@@ -25,8 +25,8 @@
     "build:production": "NODE_ENV=production npm run build",
     "build:worker:production": "NODE_ENV=production node esbuild.config.js",
     "watch": "tsc --watch",
-    "dev": "nodemon --watch src --ext ts --exec \"npm run build:tsc && node dist/cli.js --realm=localhost:8000\"",
-    "dev:genesis": "nodemon --watch src --ext ts --exec \"npm run build:tsc && node dist/cli.js --position=23,-24\"",
+    "dev": "nodemon --watch src --ext ts --exec \"npm run build && node dist/cli.js --realm=localhost:8000\"",
+    "dev:genesis": "nodemon --watch src --ext ts --exec \"npm run build && node dist/cli.js --position=23,-24\"",
     "test": "jest",
     "prepublishOnly": "npm run build:production"
   },
@@ -56,10 +56,10 @@
     "README.md"
   ],
   "dependencies": {
-    "@babylonjs/core": "^6.4.1",
-    "@babylonjs/gui": "~6.4.1",
-    "@babylonjs/loaders": "^6.4.1",
-    "@babylonjs/materials": "~6.4.1",
+    "@babylonjs/core": "6.4.1",
+    "@babylonjs/gui": "6.4.1",
+    "@babylonjs/loaders": "6.4.1",
+    "@babylonjs/materials": "6.4.1",
     "@dcl/crypto": "^3.4.1",
     "@dcl/protocol": "https://sdk-team-cdn.decentraland.org/@dcl/protocol/branch//dcl-protocol-1.0.0-16234000840.commit-ff76686.tgz",
     "@dcl/quickjs-emscripten": "^0.21.0-3680274614.commit-1808aa1",
