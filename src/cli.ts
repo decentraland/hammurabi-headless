@@ -106,7 +106,8 @@ async function restart() {
 
 // Key listener - only in development mode
 if (developmentMode) {
-  // Simple approach: just listen to stdin data
+  console.log('📋 Development mode - restart listener enabled')
+  process.stdin.setRawMode(true)
   process.stdin.setEncoding('utf8')
   process.stdin.resume()
   
@@ -115,6 +116,9 @@ if (developmentMode) {
     if (input === 'r') {
       console.log('🔄 Restarting...')
       restart()
+    }
+    if (input === '\u0003') { // Ctrl+C
+      process.exit(0)
     }
   })
 }

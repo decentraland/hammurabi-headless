@@ -9,6 +9,7 @@ import { EngineApiServiceDefinition } from "@dcl/protocol/out-js/decentraland/ke
 import { RuntimeServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen";
 import { UserIdentityServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen";
 import { CommunicationsControllerServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen";
+import { CommsApiServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen";
 import { UserActionModuleServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen";
 import { RestrictedActionsServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen";
 import { SignedFetchServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen";
@@ -98,6 +99,29 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       }
       return {
         data: context.getNetworkMessages()
+      }
+    }
+  }))
+
+  codegen.registerService(port, CommsApiServiceDefinition, async () => ({
+    async getActiveVideoStreams() {
+      // Return list of active video streams
+      return {
+        streams: []
+      }
+    },
+    async getConnectedPeers() {
+      // Return list of connected peers from the transport
+      return {
+        peers: []
+      }
+    },
+    async getRoomInfo() {
+      // Return information about the current communication room
+      return {
+        roomId: '',
+        maxPeers: 100,
+        currentPeers: 0
       }
     }
   }))
