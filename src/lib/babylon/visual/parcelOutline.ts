@@ -1,5 +1,5 @@
 import * as BABYLON from '@babylonjs/core'
-import { GridMaterial } from '@babylonjs/materials/grid/gridMaterial'
+import { GridMaterial } from '@babylonjs/materials'
 import { gridToParcel, PARCEL_SIZE_METERS, parseParcelPosition } from "../../decentraland/positions"
 import { memoize } from '../../misc/memoize'
 
