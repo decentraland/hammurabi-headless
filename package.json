@@ -14,7 +14,7 @@
   "author": "Protocol Squad",
   "license": "Apache-2.0",
   "bin": {
-    "start": "dist/cli.js"
+    "hammurabi-server": "dist/cli.js"
   },
   "scripts": {
     "start": "node dist/cli.js --realm=localhost:8000",
