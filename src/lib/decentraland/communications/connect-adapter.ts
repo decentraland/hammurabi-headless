@@ -6,13 +6,13 @@ import { ExplorerIdentity } from "../identity/types"
 import { CommsAdapter } from "./types"
 
 // TODO: this should be an env var
-const COMMS_GATEKEEPER_URL = 
-// 'http://localhost:3000/get-server-scene-adapter'
-'https://comms-gatekeeper-local.decentraland.org/get-scene-adapter' 
+const COMMS_GATEKEEPER_URL = 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter' // 'http://localhost:3000/get-server-scene-adapter'
+const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter' 
 
 export async function connectLocalAdapter(baseUrl: string) {
   const { urn } = await getLoadableSceneFromLocalContext(baseUrl)
   const identity = await userIdentity.deref()
+
   try {
     const result = await signedFetch(
       COMMS_GATEKEEPER_URL,
@@ -31,6 +31,35 @@ export async function connectLocalAdapter(baseUrl: string) {
     )
     if (result.ok && result.json.adapter) {
       return await connectAdapter(result.json.adapter, identity, urn)
+    }
+    throw 'Invalid livekit connection'
+  } catch (e: any) { 
+    console.log(e)
+    throw e
+  }
+}
+
+export async function connectGenesisAdapter(sceneId: string) {
+  const identity = await userIdentity.deref()
+
+  try {
+    const result = await signedFetch(
+      COMMS_GATEKEEPER_PROD,
+      identity.authChain,
+      { method: 'POST', responseBodyType: 'json' },
+      {
+        intent: 'dcl:explorer:comms-handshake',
+        signer: 'dcl:explorer',
+        isGuest: identity.isGuest,
+        realm: {
+          serverName: 'main'
+        },
+        realmName: 'main',      
+        sceneId: sceneId,
+      }
+    )
+    if (result.ok && result.json.adapter) {
+      return await connectAdapter(result.json.adapter, identity, sceneId)
     }
     throw 'Invalid livekit connection'
   } catch (e: any) { 
@@ -102,7 +131,6 @@ export async function connectAdapter(connStr: string, identity: ExplorerIdentity
           'There was an error acquiring the communications connection. Decentraland will try to connect to another realm'
         )
       }
-      console.log('[BOEDO]', { response })
 
       type SignedLoginResult = {
         fixedAdapter?: string

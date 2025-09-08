@@ -169,3 +169,37 @@ export async function getLoadableSceneFromPointers(pointers: string[], contentSe
     baseUrl: contentServerBaseUrl + '/contents/',
   }))
 }
+
+/**
+ * Loads a scene from a remote position (parcel coordinates)
+ * @param sceneContext The scene context atom to populate
+ * @param engineScene The Babylon.js scene
+ * @param options Configuration including realm URL and position
+ * @returns Promise resolving to the scene context atom
+ */
+export async function loadSceneContextFromPosition(
+  sceneContext: Atom<SceneContext>, 
+  engineScene: BABYLON.Scene, 
+  options: { realmBaseUrl: string, position: string }
+): Promise<Atom<SceneContext>> {
+  const contentServerUrl = `${options.realmBaseUrl}/content`
+  const pointer = options.position // e.g., "80,80"
+  
+  console.log(`🌐 Fetching scene at position ${pointer} from ${contentServerUrl}`)
+  
+  // Fetch the scene entity from the content server
+  const loadableScenes = await getLoadableSceneFromPointers([pointer], contentServerUrl)
+  console.log(JSON.stringify({ loadableScenes }, null, 2))
+  if (loadableScenes.length === 0) {
+    throw new Error(`No scene found at position ${pointer}`)
+  }
+  
+  const loadableScene = loadableScenes[0]
+  const entityId = loadableScene.urn
+  
+  console.log(`📦 Loading scene: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
+  
+  sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, false))
+  
+  return sceneContext
+}

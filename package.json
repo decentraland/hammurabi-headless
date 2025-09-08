@@ -24,6 +24,9 @@
     "build:worker": "node esbuild.config.js",
     "build:production": "NODE_ENV=production npm run build",
     "build:worker:production": "NODE_ENV=production node esbuild.config.js",
+    "watch": "tsc --watch",
+    "dev": "nodemon --watch src --ext ts --exec \"npm run build:tsc && node dist/cli.js --realm=localhost:8000\"",
+    "dev:genesis": "nodemon --watch src --ext ts --exec \"npm run build:tsc && node dist/cli.js --position=23,-24\"",
     "test": "jest",
     "prepublishOnly": "npm run build:production"
   },
@@ -75,6 +78,7 @@
     "@types/ws": "^8.5.5",
     "esbuild": "^0.25.9",
     "jest": "^29.5.0",
+    "nodemon": "^3.1.10",
     "ts-jest": "^29.1.0",
     "typescript": "^5.0.4"
   }

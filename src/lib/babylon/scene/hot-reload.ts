@@ -35,7 +35,6 @@ export async function initHotReload(baseUrl: string, entityId: string, reloadSce
       }
 
       wsConnection.onmessage = async (event) => {        
-        console.log('onmessage')
         // Only decode if the data is binary (ArrayBuffer)
         if (event.data instanceof ArrayBuffer) {
           try {

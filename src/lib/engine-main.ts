@@ -4,7 +4,7 @@ import { setupXMLHttpRequestPolyfill } from './polyfills/xmlhttprequest'
 import { Scene } from '@dcl/schemas'
 import { initEngine } from './babylon'
 import { createAvatarRendererSystem } from './babylon/avatar-rendering-system'
-import { loadSceneContextFromLocal } from './babylon/scene/load'
+import { loadSceneContextFromLocal, loadSceneContextFromPosition } from './babylon/scene/load'
 import { PLAYER_HEIGHT } from './babylon/scene/logic/static-entities'
 import { createSceneCullingSystem } from './babylon/scene/scene-culling'
 import { createSceneTickSystem } from './babylon/scene/update-scheduler'
@@ -29,6 +29,7 @@ const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = 10
 export interface EngineOptions {
   canvas?: HTMLCanvasElement
   realmUrl?: string
+  position?: string
 }
 
 let initialized = false
@@ -116,12 +117,33 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
 
   const sceneContext: Atom<SceneContext> = Atom()
   
+  
+  let ctx: Atom<SceneContext>
+  
+  if (realm.baseUrl.includes('localhost') || realm.baseUrl.includes('127.0.0.1')) {
+    // Load local scene (existing behavior)
+    ctx = await loadSceneContextFromLocal(sceneContext, scene, { baseUrl: realm.baseUrl, isGlobal: false })
+  } else {
+    // Load scene from remote position
+    if (!options.position) {
+      throw new Error('Position parameter is required for remote realms. Use --position=x,y')
+    }
+    ctx = await loadSceneContextFromPosition(sceneContext, scene, { 
+      realmBaseUrl: realm.baseUrl, 
+      position: options.position 
+    })
+  }
+
+  // Get scene info from loaded context
+  const loadedSceneContext = await ctx.deref()
+  const isGenesisScene = !(realm.baseUrl.includes('localhost') || realm.baseUrl.includes('127.0.0.1'))
+  const sceneId = loadedSceneContext.loadableScene.urn
+
   // Enable scene comms with Node.js compatible LiveKit
-  const sceneTransport = await createSceneComms(realm, identityAtom, scene)
+  const sceneTransport = await createSceneComms(realm, identityAtom, scene, { isGenesisScene, sceneId })
   sceneContext.pipe(async (ctx) => {
     ctx.attachLivekitTransport(sceneTransport)
   })
-  const ctx = await loadSceneContextFromLocal(sceneContext, scene, { baseUrl: realm.baseUrl, isGlobal: false })
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)
   characterControllerSystem.teleport(position)
