@@ -12,6 +12,7 @@ import { UserIdentityServiceDefinition } from '@dcl/protocol/out-js/decentraland
 import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
 import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen'
 import { CommunicationsControllerServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen'
+import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen'
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
 
 export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
@@ -42,6 +43,8 @@ export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
       return codegen.loadService(port, RestrictedActionsServiceDefinition)
     case '~system/SignedFetch':
       return codegen.loadService(port, SignedFetchServiceDefinition)
+    case '~system/CommsApi':
+      return codegen.loadService(port, CommsApiServiceDefinition)
     case '~system/Testing':
       return codegen.loadService(port, TestingServiceDefinition)
     default:

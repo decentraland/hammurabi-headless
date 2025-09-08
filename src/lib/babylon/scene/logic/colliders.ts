@@ -1,5 +1,5 @@
 import { AbstractMesh, Scene } from '@babylonjs/core'
-import { GridMaterial } from '@babylonjs/materials'
+import { GridMaterial } from '@babylonjs/materials/grid/gridMaterial'
 import { memoize } from '../../../misc/memoize'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { BabylonEntity } from '../BabylonEntity'

@@ -55,14 +55,14 @@ if (!realmUrl) {
 process.on('uncaughtException', (error) => {
   console.error('❌ Error:', error.message)
   if (developmentMode) {
-    console.log('Press [R] to restart or [Ctrl+C] to exit')
+    console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
   }
 })
 
 process.on('unhandledRejection', (reason: any) => {
   console.error('❌ Error:', reason?.message || reason)
   if (developmentMode) {
-    console.log('Press [R] to restart or [Ctrl+C] to exit')
+    console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
   }
 })
 
@@ -73,7 +73,7 @@ async function start() {
   try {
     const scene = await main({ realmUrl, position })
     if (developmentMode) {
-      console.log('✅ Server running - Press [R] to restart or [Ctrl+C] to exit')
+      console.log('✅ Server running - Type "r" + Enter to restart or [Ctrl+C] to exit')
     } else {
       console.log('✅ Server running in production mode')
     }
@@ -81,7 +81,7 @@ async function start() {
   } catch (error: any) {
     console.error('❌ Failed to start:', error.message)
     if (developmentMode) {
-      console.log('Press [R] to retry or [Ctrl+C] to exit')
+      console.log('Type "r" + Enter to retry or [Ctrl+C] to exit')
     }
     throw error
   }
@@ -104,16 +104,18 @@ async function restart() {
   isRestarting = false
 }
 
-// Key listener - only in development mode with proper TTY
-if (developmentMode && process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-  process.stdin.setRawMode(true)
-  process.stdin.resume()
+// Key listener - only in development mode
+if (developmentMode) {
+  // Simple approach: just listen to stdin data
   process.stdin.setEncoding('utf8')
-
-  process.stdin.on('data', (key) => {
-    const keyStr = key.toString()
-    if (keyStr === 'r' || keyStr === 'R') restart()
-    if (keyStr === '\u0003') process.exit(0) // Ctrl+C
+  process.stdin.resume()
+  
+  process.stdin.on('data', (data: string) => {
+    const input = data.toString().trim().toLowerCase()
+    if (input === 'r') {
+      console.log('🔄 Restarting...')
+      restart()
+    }
   })
 }
 

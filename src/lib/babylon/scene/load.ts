@@ -189,7 +189,7 @@ export async function loadSceneContextFromPosition(
   
   // Fetch the scene entity from the content server
   const loadableScenes = await getLoadableSceneFromPointers([pointer], contentServerUrl)
-  console.log(JSON.stringify({ loadableScenes }, null, 2))
+
   if (loadableScenes.length === 0) {
     throw new Error(`No scene found at position ${pointer}`)
   }
