@@ -13,7 +13,6 @@ export type FlatFetchInit = RequestInit & { responseBodyType?: BodyType }
 
 export async function flatFetch(url: string, init?: FlatFetchInit): Promise<FlatFetchResponse> {
   const response = await fetch(url, init)
-
   const responseBodyType = init?.responseBodyType || 'text'
 
   const headers: Record<string, string> = {}

@@ -105,7 +105,7 @@ async function restart() {
 }
 
 // Key listener - only in development mode
-if (developmentMode) {
+if (developmentMode && process.stdin.setRawMode) {
   console.log('📋 Development mode - restart listener enabled')
   process.stdin.setRawMode(true)
   process.stdin.setEncoding('utf8')

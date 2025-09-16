@@ -6,7 +6,9 @@ import { ExplorerIdentity } from "../identity/types"
 import { CommsAdapter } from "./types"
 
 // TODO: this should be an env var
-const COMMS_GATEKEEPER_URL = 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter' // 'http://localhost:3000/get-server-scene-adapter'
+const COMMS_GATEKEEPER_URL =
+'https://comms-gatekeeper-local.decentraland.zone/get-server-scene-adapter'
+// 'http://localhost:3000/get-server-scene-adapter'
 const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter' 
 
 export async function connectLocalAdapter(baseUrl: string) {

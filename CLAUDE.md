@@ -4,23 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build Commands
 
-This project is a headless Node.js server implementation of the Decentraland protocol using Babylon.js NullEngine for 3D scene processing without rendering.
-
 ```bash
-# Build TypeScript to JavaScript
-npm run build
+# Build TypeScript and worker bundle
+npm run build              # Runs tsc + esbuild for worker bundle
 
 # Run tests
-npm run test
+npm run test               # Jest tests for *.spec.ts files
 
-# Start development server
-npm start  # runs: ./start --realm=localhost:8000
+# Development with hot reload
+npm run dev                # Local preview (localhost:8000) with nodemon
+npm run dev:genesis        # Genesis City at position 23,-24 with nodemon
 
-# Run the server with specific realm
-npx @dcl/hammurabi-server --realm=localhost:8000
+# Start production server
+npm start                  # Runs: node dist/cli.js --realm=localhost:8000
+
+# Run with different configurations
+node dist/cli.js --realm=https://peer.decentraland.org --position=80,80
+node dist/cli.js --realm=localhost:8000 --authenticated
+npx @dcl/hammurabi-server --position=0,0  # Default to peer.decentraland.org
 ```
-
-The project uses simple TypeScript compilation (`tsc`) instead of complex bundling. The compiled output goes to `dist/` folder.
 
 ## Project Architecture
 
@@ -28,63 +30,95 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 
 ### Core Architecture Components
 
-**Engine Initialization (`src/lib/engine-main.ts`)**:
-- Entry point that creates Babylon.js NullEngine for headless 3D processing
-- Creates guest identity for authentication
+**Engine Entry (`src/lib/engine-main.ts`)**
+- Creates Babylon.js NullEngine (no WebGL/canvas)
+- Generates guest identity for authentication
 - Fetches realm configuration from `/about` endpoint
-- Initializes all systems (avatar rendering, scene culling, character controller, etc.)
-- Scene loading uses `loadSceneContextFromLocal` with hot reload support
+- Routes to local or remote scene loading based on realm URL
+- Manages all subsystems initialization
 
-**Scene Management (`src/lib/babylon/scene/`)**:
-- `SceneContext` - Central class managing scene state, CRDT message processing, and entity lifecycle
-- `BabylonEntity` - Wrapper around Babylon.js objects with component-based architecture
-- **Node.js Runtime**: Uses `connectSceneContextUsingNodeJs` with in-process WebWorker runtime and MemoryTransport (no actual worker threads)
-- Hot reload support for local development
+**Scene Loading System (`src/lib/babylon/scene/load.ts`)**
+- `loadSceneContextFromLocal`: Local development with hot reload via file watching
+- `loadSceneContextFromPosition`: Fetches scenes from Genesis City by coordinates
+- Uses content server API: `/content/entities/active` for remote scenes
+- Handles scene manifests and asset URLs
 
-**Communications System (`src/lib/decentraland/communications/`)**:
-- **LiveKit Transport** (`transports/livekit.ts`): Uses `@livekit/rtc-node` package for Node.js multiplayer
-  - Room management without browser-specific APIs
-  - Uses `connectionState` instead of `state` property
-  - No `waitForPCInitialConnection()` in Node.js version
-- `CommsTransportWrapper` - Transport abstraction layer
-- Scene-specific communications via `createSceneComms`
-- Local gatekeeper connection at `localhost:3000` for preview scenes
+**Scene Runtime (`src/lib/babylon/scene/`)**
+- `SceneContext`: Central state manager for CRDT messages and entity lifecycle
+- `BabylonEntity`: Component-based wrapper around Babylon.js objects
+- In-process WebWorker using QuickJS with MemoryTransport (no actual worker threads)
+- Entity ID allocation: 1 for local player, 32-255 for remote players
 
-**Headless Adaptations**:
-- **Babylon.js** (`src/lib/babylon/index.ts`): Always uses NullEngine, no canvas/WebGL
-- **Avatar Rendering** (`src/lib/babylon/avatars/AvatarRenderer.ts`): 
-  - Skips UI texture creation when `OffscreenCanvas` is undefined
-  - No emote loading in headless mode
-  - Avatar components created but not visually rendered
-- **Asset Loading**: Custom XMLHttpRequest polyfill in `cli.ts` for GLTF loading
-- **Environment**: Simplified lighting without complex visual materials
+**Communications System**
+- **LiveKit Transport** (`src/lib/decentraland/communications/transports/livekit.ts`)
+  - Uses `@livekit/rtc-node` for Node.js WebRTC
+  - Room connection without browser APIs
+  - Handles `connectionState` instead of browser `state` property
+- **Adapter System** (`src/lib/decentraland/communications/connect-adapter.ts`)
+  - `connectLocalAdapter`: Local preview via comms-gatekeeper
+  - `connectGenesisAdapter`: Production Genesis City connections
+  - `connectProductionAdapter`: Flexible production realm connections
+  - Protocol support: livekit, ws-room, offline, signed-login
+- **Comms Gatekeeper URLs**:
+  - Local: `https://comms-gatekeeper-local.decentraland.org`
+  - Production: `https://comms-gatekeeper.decentraland.zone`
 
-### Key Technical Details
+**RPC Services (`src/lib/babylon/scene/connect-context-rpc.ts`)**
+- Scene-kernel communication via RPC protocol
+- Service definitions: Runtime, Permissions, UserIdentity, PortableExperiences, CommsApi
+- CRDT message passing between scene and kernel
 
-- **Node.js 18+**: Uses native fetch API, no polyfills needed
-- **Error Resilience**: Global uncaught exception handlers prevent server crashes
-- **No DOM Dependencies**: All browser-specific code is conditional or removed
-- **LiveKit Node SDK**: Direct imports from `@livekit/rtc-node`, no conditional loading
-- **Entity Allocation**: Unity-compatible reserved ranges (1 for local player, 32-255 for remote)
-- **CRDT Protocol**: Component-based entity system with conflict resolution
-- **Profile System**: ADR-204 compliant with Catalyst-based fetching
+**CLI Interface (`src/cli.ts`)**
+- Command-line argument parsing: `--realm`, `--position`, `--authenticated`
+- XMLHttpRequest polyfill for Babylon.js GLTF loading
+- Global error handlers that keep server running
+- Restart listener for 'r' key during development
 
-### CLI Structure (`src/cli.ts`)
+### Technical Details
 
-The CLI provides:
-- XMLHttpRequest polyfill for Babylon.js asset loading
-- Argument parsing for `--realm`, `--address`, `--authenticated` flags  
-- Global error handlers that keep server running despite errors
-- Direct execution as npm bin via `dist/cli.js`
+**Node.js Requirements**
+- Version 18+ (uses native fetch API)
+- No DOM polyfills needed
+- Custom XMLHttpRequest implementation for asset loading
 
-### GitHub Actions Publishing
+**Babylon.js Adaptations**
+- Always uses NullEngine (no rendering)
+- Avatar system without UI textures when OffscreenCanvas unavailable
+- Simplified materials and lighting for headless mode
+- All packages pinned to version 6.4.1 for compatibility
+
+**Build System**
+- TypeScript compilation to `dist/` folder
+- esbuild creates `dist/worker-bundle.cjs` for CommonJS compatibility
+- Worker bundle excludes native modules and Node.js built-ins
+- Production builds include minification and tree-shaking
+
+## Key Implementation Notes
+
+**Position Parameter**
+- Format: `--position=x,y` for Genesis City coordinates
+- Required for remote realms, not for localhost
+- Fetches scene from content server's active entities
+
+**Realm Detection**
+- localhost/127.0.0.1: Uses local scene loading with hot reload
+- Other URLs: Requires position parameter for remote scene fetching
+- Default realm: `https://peer.decentraland.org` for Genesis City
+
+**Error Resilience**
+- Global uncaught exception handlers prevent crashes
+- Scene errors logged but don't stop server
+- Communications failures handled gracefully
+
+**Development Mode**
+- Hot reload via file watching for local scenes
+- Nodemon integration for source code changes
+- Press 'r' to manually restart during development
+
+## GitHub Actions Publishing
 
 The `.github/workflows/build-release.yaml` workflow:
-- Triggers on pushes to main, all PRs, and releases
-- Uses `decentraland/oddish-action@master` for npm/S3 publishing
-- Creates deterministic snapshots for PR testing
+- Triggers on main branch pushes, PRs, and releases
+- Uses `decentraland/oddish-action@master` for npm publishing
+- Creates snapshot versions for PR testing
 - Publishes to `@dcl/hammurabi-server` on npm
-
-### Testing
-
-The project uses Jest for testing. Integration tests may require the testing realm to be built, though most of that infrastructure has been simplified for the headless server.
