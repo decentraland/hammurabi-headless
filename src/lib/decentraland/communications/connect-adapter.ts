@@ -7,9 +7,9 @@ import { CommsAdapter } from "./types"
 
 // TODO: this should be an env var
 const COMMS_GATEKEEPER_URL =
-'https://comms-gatekeeper-local.decentraland.zone/get-server-scene-adapter'
+'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
 // 'http://localhost:3000/get-server-scene-adapter'
-const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter' 
+const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.org/get-server-scene-adapter' 
 
 export async function connectLocalAdapter(baseUrl: string) {
   const { urn } = await getLoadableSceneFromLocalContext(baseUrl)
@@ -42,6 +42,14 @@ export async function connectLocalAdapter(baseUrl: string) {
 }
 
 export async function connectGenesisAdapter(sceneId: string) {
+  return connectProductionAdapter(sceneId, 'main')
+}
+
+export async function connectWorldsAdapter(sceneId: string, worldName: string) {
+  return connectProductionAdapter(sceneId, worldName)
+}
+
+export async function connectProductionAdapter(sceneId: string, realmName: string) {
   const identity = await userIdentity.deref()
 
   try {
@@ -54,9 +62,9 @@ export async function connectGenesisAdapter(sceneId: string) {
         signer: 'dcl:explorer',
         isGuest: identity.isGuest,
         realm: {
-          serverName: 'main'
+          serverName: realmName
         },
-        realmName: 'main',      
+        realmName: realmName,
         sceneId: sceneId,
       }
     )
@@ -64,7 +72,7 @@ export async function connectGenesisAdapter(sceneId: string) {
       return await connectAdapter(result.json.adapter, identity, sceneId)
     }
     throw 'Invalid livekit connection'
-  } catch (e: any) { 
+  } catch (e: any) {
     console.log(e)
     throw e
   }

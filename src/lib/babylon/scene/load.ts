@@ -178,28 +178,83 @@ export async function getLoadableSceneFromPointers(pointers: string[], contentSe
  * @returns Promise resolving to the scene context atom
  */
 export async function loadSceneContextFromPosition(
-  sceneContext: Atom<SceneContext>, 
-  engineScene: BABYLON.Scene, 
+  sceneContext: Atom<SceneContext>,
+  engineScene: BABYLON.Scene,
   options: { realmBaseUrl: string, position: string }
 ): Promise<Atom<SceneContext>> {
   const contentServerUrl = `${options.realmBaseUrl}/content`
   const pointer = options.position // e.g., "80,80"
-  
+
   console.log(`🌐 Fetching scene at position ${pointer} from ${contentServerUrl}`)
-  
+
   // Fetch the scene entity from the content server
   const loadableScenes = await getLoadableSceneFromPointers([pointer], contentServerUrl)
 
   if (loadableScenes.length === 0) {
     throw new Error(`No scene found at position ${pointer}`)
   }
-  
+
   const loadableScene = loadableScenes[0]
   const entityId = loadableScene.urn
-  
+
   console.log(`📦 Loading scene: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
-  
+
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, false))
-  
+
+  return sceneContext
+}
+
+/**
+ * Loads a scene from a Decentraland World
+ * @param sceneContext The scene context atom to populate
+ * @param engineScene The Babylon.js scene
+ * @param options Configuration including world name and realm base URL
+ * @returns Promise resolving to the scene context atom
+ */
+export async function loadSceneContextFromWorld(
+  sceneContext: Atom<SceneContext>,
+  engineScene: BABYLON.Scene,
+  options: { worldName: string, realmBaseUrl: string }
+): Promise<Atom<SceneContext>> {
+  console.log(`🌍 Loading World: ${options.worldName}`)
+
+  // Fetch world metadata to get the scene URN
+  const worldAboutUrl = `${options.realmBaseUrl}/about`
+  const worldAboutRes = await fetch(worldAboutUrl)
+  const worldAbout = await worldAboutRes.json() as any
+  // Get the scenes from the world configuration
+  const sceneUrns = worldAbout.configurations?.scenesUrn || []
+
+  if (sceneUrns.length === 0) {
+    throw new Error(`No scenes found in world ${options.worldName}`)
+  }
+
+  // For now, load the first scene in the world
+  // In the future, this could be enhanced to handle multiple scenes
+  const sceneUrn = sceneUrns[0]
+
+  console.log(`📦 Loading World scene: ${sceneUrn}`)
+
+  // Parse the URN to extract entity ID and baseUrl
+  // Format: urn:decentraland:entity:<hash>?=&baseUrl=<url>
+  const urnMatch = sceneUrn.match(/urn:decentraland:entity:([^?]+)/)
+  const baseUrlMatch = sceneUrn.match(/baseUrl=([^&]+)/)
+
+  if (!urnMatch || !baseUrlMatch) {
+    throw new Error(`Invalid scene URN format: ${sceneUrn}`)
+  }
+
+  const entityId = urnMatch[1]
+  const contentBaseUrl = baseUrlMatch[1]
+
+  console.log(`📦 Fetching entity ${entityId} from ${contentBaseUrl}`)
+
+  // Fetch the scene directly using the entity ID and provided base URL
+  const loadableScene = await getLoadableSceneFromUrl(entityId, contentBaseUrl)
+  console.log(`✨ Loading: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
+
+  // Use the full URN (with baseUrl) as the scene identifier
+  sceneContext.swap(await createSceneContext(engineScene, loadableScene, sceneUrn, false))
+
   return sceneContext
 }

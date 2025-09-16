@@ -4,7 +4,7 @@ import { setupXMLHttpRequestPolyfill } from './polyfills/xmlhttprequest'
 import { Scene } from '@dcl/schemas'
 import { initEngine } from './babylon'
 import { createAvatarRendererSystem } from './babylon/avatar-rendering-system'
-import { loadSceneContextFromLocal, loadSceneContextFromPosition } from './babylon/scene/load'
+import { loadSceneContextFromLocal, loadSceneContextFromPosition, loadSceneContextFromWorld } from './babylon/scene/load'
 import { PLAYER_HEIGHT } from './babylon/scene/logic/static-entities'
 import { createSceneCullingSystem } from './babylon/scene/scene-culling'
 import { createSceneTickSystem } from './babylon/scene/update-scheduler'
@@ -20,7 +20,7 @@ import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
 import { userIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm } from './decentraland/state'
 import { createGuestIdentity } from './decentraland/identity/login'
-import { resolveRealmBaseUrl } from './decentraland/realm/resolution'
+import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
 // we only spend ONE millisecond per frame procesing messages from scenes,
 // it is a conservative number but we want to prioritize CPU time for rendering
@@ -65,25 +65,31 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   // Always create a guest account
   const guestIdentity = await createGuestIdentity()
   userIdentity.swap(guestIdentity)
-  const identity = guestIdentity
-  
-  // Fetch realm if URL provided, otherwise use default
+
+  // Fetch realm configuration
   let realm: CurrentRealm
-  if (options.realmUrl) {
-    const baseUrl = options.realmUrl.startsWith('http') ? options.realmUrl : `http://${options.realmUrl}`
-    
-    console.log('🌐 Fetching realm info from:', baseUrl + '/about')
-    const res = await fetch(baseUrl + '/about')
-    const aboutResponse = (await res.json() as any)
-    realm = {
-      baseUrl,
-      connectionString: options.realmUrl,
-      aboutResponse
-    }
-    currentRealm.swap(realm)
-  } else {
-    realm = await currentRealm.deref()
+  if (!options.realmUrl) {
+    throw new Error('Realm URL is required')
   }
+
+  // Use resolveRealmBaseUrl to handle .dcl.eth domains and other URLs properly
+  const baseUrl = await resolveRealmBaseUrl(options.realmUrl)
+
+  console.log('🌐 Fetching realm info from:', baseUrl + '/about')
+  const res = await fetch(baseUrl + '/about')
+  const aboutResponse = (await res.json() as any)
+
+  realm = {
+    baseUrl,
+    connectionString: options.realmUrl,
+    aboutResponse
+  }
+  currentRealm.swap(realm)
+
+  // Determine realm type
+  const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
+  const isWorld = isDclEns(options.realmUrl)
+  const isGenesisCity = !isLocalhost && !isWorld
   
   // Create identity atom for sceneComms
   const identityAtom = Atom(guestIdentity)
@@ -116,31 +122,43 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   )
 
   const sceneContext: Atom<SceneContext> = Atom()
-  
-  
+
   let ctx: Atom<SceneContext>
-  
-  if (realm.baseUrl.includes('localhost') || realm.baseUrl.includes('127.0.0.1')) {
-    // Load local scene (existing behavior)
+
+  if (isLocalhost) {
+    // Load local scene
     ctx = await loadSceneContextFromLocal(sceneContext, scene, { baseUrl: realm.baseUrl, isGlobal: false })
-  } else {
-    // Load scene from remote position
-    if (!options.position) {
-      throw new Error('Position parameter is required for remote realms. Use --position=x,y')
-    }
-    ctx = await loadSceneContextFromPosition(sceneContext, scene, { 
-      realmBaseUrl: realm.baseUrl, 
-      position: options.position 
+  } else if (isWorld) {
+    // Load World scene
+    ctx = await loadSceneContextFromWorld(sceneContext, scene, {
+      worldName: options.realmUrl,
+      realmBaseUrl: realm.baseUrl
     })
+  } else if (isGenesisCity) {
+    // Load scene from Genesis City position
+    if (!options.position) {
+      throw new Error('Position parameter is required for Genesis City realms. Use --position=x,y')
+    }
+    ctx = await loadSceneContextFromPosition(sceneContext, scene, {
+      realmBaseUrl: realm.baseUrl,
+      position: options.position
+    })
+  } else {
+    throw new Error('Unknown realm type')
   }
 
   // Get scene info from loaded context
   const loadedSceneContext = await ctx.deref()
-  const isGenesisScene = !(realm.baseUrl.includes('localhost') || realm.baseUrl.includes('127.0.0.1'))
   const sceneId = loadedSceneContext.loadableScene.urn
 
   // Enable scene comms with Node.js compatible LiveKit
-  const sceneTransport = await createSceneComms(realm, identityAtom, scene, { isGenesisScene, sceneId })
+  const sceneTransport = await createSceneComms(realm, identityAtom, scene, {
+    isGenesisScene: isGenesisCity,
+    sceneId,
+    isWorld,
+    isLocalhost
+  })
+  
   sceneContext.pipe(async (ctx) => {
     ctx.attachLivekitTransport(sceneTransport)
   })

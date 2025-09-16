@@ -15,7 +15,8 @@ Usage: npx @dcl/hammurabi-server [--realm=<url>] [--position=<x,y>] [--productio
 
 Options:
   --realm=<url>      Realm URL to connect to (default: localhost:8000 for local, peer.decentraland.org for position)
-  --position=<x,y>   Fetch scene at parcel coordinates from content server
+                     Can be a .dcl.eth World name (e.g., boedo.dcl.eth)
+  --position=<x,y>   Fetch scene at parcel coordinates from content server (required for Genesis City)
   --production       Run in production mode without interactive controls (for process spawning)
   --help, -h         Show this help
 
@@ -23,6 +24,7 @@ Examples:
   npx @dcl/hammurabi-server --realm=localhost:8000
   npx @dcl/hammurabi-server --position=80,80
   npx @dcl/hammurabi-server --position=80,80 --realm=https://my.zone
+  npx @dcl/hammurabi-server --realm=boedo.dcl.eth
 `)
     process.exit(0)
   }
@@ -48,7 +50,7 @@ Examples:
 
 // Set default realm based on whether position is provided
 if (!realmUrl) {
-  realmUrl = position ? 'https://peer.decentraland.org' : 'localhost:8000'
+  realmUrl = position ? 'https://peer.decentraland.org' : 'http://localhost:8000'
 }
 
 // Global error handlers

@@ -25,7 +25,8 @@
     "build:production": "NODE_ENV=production npm run build",
     "build:worker:production": "NODE_ENV=production node esbuild.config.js",
     "watch": "tsc --watch",
-    "dev": "nodemon --watch src --ext ts --exec \"npm run build && node dist/cli.js --realm=localhost:8000\"",
+    "dev": "nodemon --watch src --ext ts --exec \"npm run build && node dist/cli.js\"",
+    "dev:world": "nodemon --watch src --ext ts --exec \"npm run build && node dist/cli.js --realm=boedo.dcl.eth\"",
     "dev:genesis": "nodemon --watch src --ext ts --exec \"npm run build && node dist/cli.js --position=23,-24\"",
     "test": "jest",
     "prepublishOnly": "npm run build:production"
