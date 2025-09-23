@@ -54,7 +54,7 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
 
   try {
     const result = await signedFetch(
-      COMMS_GATEKEEPER_PROD,
+      COMMS_GATEKEEPER_URL,
       identity.authChain,
       { method: 'POST', responseBodyType: 'json' },
       {
@@ -62,9 +62,9 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
         signer: 'dcl:explorer',
         isGuest: identity.isGuest,
         realm: {
-          serverName: realmName
+          serverName: 'LocalPreview' //realmName
         },
-        realmName: realmName,
+        realmName: 'LocalPreview', // ?? realmName,
         sceneId: sceneId,
       }
     )
