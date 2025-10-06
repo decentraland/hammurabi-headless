@@ -96,6 +96,29 @@ export async function createGuestIdentity(): Promise<ExplorerIdentity> {
   return explorerIdentityFromEphemeralIdentity(storeableIdentity)
 }
 
+export async function loginFromPrivateKey(privateKey: string): Promise<StoreableIdentity> {
+  const privateKeyBytes = hexToBytes(privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey)
+  const publicKey = secp256k1.getPublicKey(privateKeyBytes).slice(1)
+  const address = computeAddress(publicKey)
+
+  const account: IdentityType = {
+    privateKey: bytesToHex(privateKeyBytes),
+    publicKey: bytesToHex(publicKey),
+    address
+  }
+
+  async function signer(message: string): Promise<string> {
+    return Authenticator.createSignature(account, message)
+  }
+
+  return identityFromSigner(account.address, signer, false)
+}
+
+export async function createIdentityFromPrivateKey(privateKey: string): Promise<ExplorerIdentity> {
+  const storeableIdentity = await loginFromPrivateKey(privateKey)
+  return explorerIdentityFromEphemeralIdentity(storeableIdentity)
+}
+
 export async function getEthereumUserAccount(requestManager: RequestManager, returnChecksum: boolean): Promise<string | undefined> {
   try {
     const accounts = await requestManager.eth_accounts()

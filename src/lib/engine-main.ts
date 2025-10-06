@@ -19,7 +19,7 @@ import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
 import { userIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm } from './decentraland/state'
-import { createGuestIdentity } from './decentraland/identity/login'
+import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
 // we only spend ONE millisecond per frame procesing messages from scenes,
@@ -30,6 +30,7 @@ export interface EngineOptions {
   canvas?: HTMLCanvasElement
   realmUrl?: string
   position?: string
+  privateKey?: string
 }
 
 let initialized = false
@@ -62,9 +63,12 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   initialized = true
   const { scene } = await initEngine(options.canvas)
 
-  // Always create a guest account
-  const guestIdentity = await createGuestIdentity()
-  userIdentity.swap(guestIdentity)
+  // Create identity based on private key or as guest
+  const identity = options.privateKey
+    ? await createIdentityFromPrivateKey(options.privateKey)
+    : await createGuestIdentity()
+
+  userIdentity.swap(identity)
 
   // Fetch realm configuration
   let realm: CurrentRealm
@@ -92,13 +96,13 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   const isGenesisCity = !isLocalhost && !isWorld
   
   // Create identity atom for sceneComms
-  const identityAtom = Atom(guestIdentity)
+  const identityAtom = Atom(identity)
   
   // init the character controller and input system
   const characterControllerSystem = await createCharacterControllerSystem(scene)
 
   // then init all the rendering systems
-  const avatar = guestIdentity.isGuest ? await generateRandomAvatar(guestIdentity.address) : await downloadAvatar(guestIdentity.address)
+  const avatar = identity.isGuest ? await generateRandomAvatar(identity.address) : await downloadAvatar(identity.address)
   const avatarRenderingSystem = createAvatarRendererSystem(scene, () => loadedScenesByEntityId.values())
   const sceneCullingSystem = createSceneCullingSystem(scene, () => loadedScenesByEntityId.values())
   const sceneTickSystem = createSceneTickSystem(scene, () => loadedScenesByEntityId.values(), MS_PER_FRAME_PROCESSING_SCENE_MESSAGES)

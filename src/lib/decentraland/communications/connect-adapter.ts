@@ -10,6 +10,7 @@ const COMMS_GATEKEEPER_URL =
 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
 // 'http://localhost:3000/get-server-scene-adapter'
 const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.org/get-server-scene-adapter' 
+const COMMS_GATEKEEPER_ZONE = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter' 
 
 export async function connectLocalAdapter(baseUrl: string) {
   const { urn } = await getLoadableSceneFromLocalContext(baseUrl)
@@ -50,11 +51,12 @@ export async function connectWorldsAdapter(sceneId: string, worldName: string) {
 }
 
 export async function connectProductionAdapter(sceneId: string, realmName: string) {
+  console.log('[CASLA]: connectProductionAdapter')
   const identity = await userIdentity.deref()
 
   try {
     const result = await signedFetch(
-      COMMS_GATEKEEPER_URL,
+      COMMS_GATEKEEPER_ZONE,
       identity.authChain,
       { method: 'POST', responseBodyType: 'json' },
       {
@@ -62,9 +64,9 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
         signer: 'dcl:explorer',
         isGuest: identity.isGuest,
         realm: {
-          serverName: 'LocalPreview' //realmName
+          serverName: realmName
         },
-        realmName: 'LocalPreview', // ?? realmName,
+        realmName,
         sceneId: sceneId,
       }
     )

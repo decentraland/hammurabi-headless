@@ -9,7 +9,8 @@ function isEns(str: string | undefined): str is `${string}.dcl.eth` {
 }
 
 export function dclWorldUrl(dclName: string) {
-  return `https://worlds-content-server.decentraland.org/world/${encodeURIComponent(dclName.toLowerCase())}`
+  // TODO: handle .org & .zone
+  return `https://worlds-content-server.decentraland.zone/world/${encodeURIComponent(dclName.toLowerCase())}`
 }
 
 function normalizeUrl(url: string) {
