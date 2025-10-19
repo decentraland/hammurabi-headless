@@ -4,6 +4,7 @@ import { Atom } from "../../misc/atom"
 import { signedFetch } from "../identity/signed-fetch"
 import { ExplorerIdentity } from "../identity/types"
 import { CommsAdapter } from "./types"
+import { isDclEns } from "../realm/resolution"
 
 // TODO: this should be an env var
 const COMMS_GATEKEEPER_URL =
@@ -67,7 +68,7 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
           serverName: realmName
         },
         realmName,
-        sceneId: sceneId,
+        sceneId: isDclEns(realmName) ? realmName : sceneId,
       }
     )
     if (result.ok && result.json.adapter) {

@@ -33,11 +33,11 @@ Examples:
 `)
     process.exit(0)
   }
-  
+
   if (arg.startsWith('--realm=')) {
     realmUrl = arg.split('=')[1]
   }
-  
+
   if (arg.startsWith('--position=')) {
     position = arg.split('=')[1]
     // Validate position format
@@ -47,7 +47,7 @@ Examples:
       process.exit(1)
     }
   }
-  
+
   if (arg.startsWith('--private-key=')) {
     privateKey = arg.split('=')[1]
   }
@@ -106,10 +106,10 @@ async function start() {
 
 async function restart() {
   if (isRestarting) return
-  
+
   isRestarting = true
   console.log('🔄 Restarting...')
-  
+
   try {
     resetEngine()
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -117,7 +117,7 @@ async function restart() {
   } catch (error) {
     console.error('❌ Restart failed')
   }
-  
+
   isRestarting = false
 }
 
@@ -127,7 +127,7 @@ if (developmentMode && process.stdin.setRawMode) {
   process.stdin.setRawMode(true)
   process.stdin.setEncoding('utf8')
   process.stdin.resume()
-  
+
   process.stdin.on('data', (data: string) => {
     const input = data.toString().trim().toLowerCase()
     if (input === 'r') {

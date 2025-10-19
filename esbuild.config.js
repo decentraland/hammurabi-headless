@@ -15,7 +15,7 @@ const buildWorkerBundle = {
   sourcemap: !isProduction,  // Only include source maps in development
   treeShaking: true,
   // Drop console logs and debugger statements in production
-  drop: isProduction ? ['console', 'debugger'] : [],
+  // drop: isProduction ? ['console', 'debugger'] : [],
   // Additional size optimizations for production
   keepNames: !isProduction,  // Allow name mangling in production
   legalComments: isProduction ? 'none' : 'inline',
@@ -44,7 +44,7 @@ const buildWorkerBundle = {
       build.onResolve({ filter: /\.node$/ }, () => {
         return { external: true }
       })
-      
+
       // Exclude LiveKit native modules
       build.onResolve({ filter: /@livekit\/rtc-node/ }, () => {
         return { external: true }
@@ -57,7 +57,7 @@ const buildWorkerBundle = {
 // Build for CLI (existing behavior) - let TypeScript handle this
 const buildCli = null  // Skip esbuild for CLI, use TypeScript output
 
-// Build index for direct imports - let TypeScript handle this  
+// Build index for direct imports - let TypeScript handle this
 const buildIndex = null  // Skip esbuild for index, use TypeScript output
 
 async function build() {
