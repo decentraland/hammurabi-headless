@@ -24,10 +24,10 @@ async function createSceneContext(engineScene: BABYLON.Scene, loadableScene: Loa
   }
 
   await ctx.initAsyncJobs()
-  
+
   // Node.js environment - use in-process WebWorker runtime with MemoryTransport
   connectSceneContextUsingNodeJs(ctx, loadableScene)
-  
+
   loadedScenesByEntityId.set(entityId, ctx)
 
   return ctx
@@ -70,7 +70,7 @@ export async function loadSceneContextFromLocal(sceneContext: Atom<SceneContext>
     // Initialize hot reload for local development
     initHotReload(options.baseUrl, entityId, reloadScene)
   }
-  
+
   return sceneContext
 }
 
@@ -127,7 +127,7 @@ export async function getLoadableSceneFromLocalContext(baseUrl: string) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pointers })
   })
-  
+
   const entity = (await entitiesResponse.json() as any)[0]
 
   return {
@@ -254,7 +254,7 @@ export async function loadSceneContextFromWorld(
   console.log(`✨ Loading: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
 
   // Use the full URN (with baseUrl) as the scene identifier
-  sceneContext.swap(await createSceneContext(engineScene, loadableScene, sceneUrn, false))
+  sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, false))
 
   return sceneContext
 }

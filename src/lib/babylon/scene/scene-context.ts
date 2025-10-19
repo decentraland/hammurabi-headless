@@ -71,7 +71,7 @@ export class SceneContext implements EngineApiInterface {
   // stash of outgoing messages ready to be sent to back to the scripting scene
   outgoingMessagesBuffer: ByteBuffer = new ReadWriteByteBuffer()
 
-  // when we finish to process all the income messages of a tick, 
+  // when we finish to process all the income messages of a tick,
   // set finishedProcessingFrame to true to send the outgoing messages, then to false.
   finishedProcessingIncomingMessagesOfTick: boolean = false
 
@@ -128,7 +128,7 @@ export class SceneContext implements EngineApiInterface {
   unparentedEntities = new Set<Entity>
 
   // the assetmanager is used to centralize all the loading/unloading of assets
-  // of this scene. 
+  // of this scene.
   assetManager = new AssetManager(this.loadableScene, this.babylonScene)
 
   // bounding vectors to calculate the distance to the outer bounds of the scene
@@ -246,10 +246,10 @@ export class SceneContext implements EngineApiInterface {
   /**
    * The "update" function handles all the incoming messages from the scene and
    * applies the changes to the renderer entities.
-   * 
+   *
    * This function is declared as a property to be added and removed to the
    * rendering engine without binding the SceneContext object.
-   * 
+   *
    * Returns false if the quota was exceeded. True if there is still time to continue
    * processing more messages, similar to cooperative scheduling.
    */
@@ -324,7 +324,7 @@ export class SceneContext implements EngineApiInterface {
   /**
    * lateUpdate should run in each frame AFTER the physics are processed. This is described
    * in ADR-148.
-   * 
+   *
    * The lateUpdate function is declared as a property to be added and removed to the
    * rendering engine without binding the SceneContext object.
    */
