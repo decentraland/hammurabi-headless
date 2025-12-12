@@ -10,8 +10,8 @@ import { isDclEns } from "../realm/resolution"
 const COMMS_GATEKEEPER_URL =
 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
 // 'http://localhost:3000/get-server-scene-adapter'
-const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.org/get-server-scene-adapter' 
-const COMMS_GATEKEEPER_ZONE = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter' 
+const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.org/get-server-scene-adapter'
+const COMMS_GATEKEEPER_ZONE = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter'
 
 export async function connectLocalAdapter(baseUrl: string) {
   const { urn } = await getLoadableSceneFromLocalContext(baseUrl)
@@ -29,7 +29,7 @@ export async function connectLocalAdapter(baseUrl: string) {
         realm: {
           serverName: 'LocalPreview'
         },
-        realmName: 'LocalPreview',      
+        realmName: 'LocalPreview',
         sceneId: urn,
       }
     )
@@ -37,7 +37,7 @@ export async function connectLocalAdapter(baseUrl: string) {
       return await connectAdapter(result.json.adapter, identity, urn)
     }
     throw 'Invalid livekit connection'
-  } catch (e: any) { 
+  } catch (e: any) {
     console.log(e)
     throw e
   }
@@ -80,7 +80,7 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
     throw e
   }
 }
-  
+
 
 // this function returns adapters for the different protocols. in case of receiving a transport instead,
 // a stub adapter will be created to wrap the transport
@@ -99,7 +99,7 @@ export async function connectAdapter(connStr: string, identity: ExplorerIdentity
         disconnect() {
           // stub
         }
-      } 
+      }
     }
     case 'offline': {
       return {

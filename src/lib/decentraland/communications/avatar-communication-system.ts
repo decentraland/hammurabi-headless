@@ -19,10 +19,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const AvatarBase = createLwwStore(avatarBaseComponent)
   const Transform = createLwwStore(transformComponent)
   const listOfComponentsToSynchronize: ComponentDefinition<any>[] = [PlayerIdentityData, AvatarBase, Transform]
-  
+
   // Cache for profiles fetched from Catalyst
   const profileCache = new Map<string, {profile: any, version: number}>()
-  
+
   function normalizeAddress(address: string) {
     return address.toLowerCase()
   }
@@ -35,7 +35,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       if (!response.ok) {
         throw new Error(`Failed to fetch profile: ${response.status}`)
       }
-      
+
       const data: any = await response.json()
       return data[0].avatars?.[0] // Return the profile data
     } catch (error) {
@@ -45,18 +45,18 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   async function handleProfileVersionAnnouncement(
-    entity: Entity, 
-    address: string, 
-    announcedVersion: number, 
+    entity: Entity,
+    address: string,
+    announcedVersion: number,
     lambdasEndpoint?: string
   ) {
     const cached = profileCache.get(address)
-    
+
     // Only fetch if we don't have this version cached
     if (!cached || cached.version < announcedVersion) {
       try {
         const profile = await fetchProfileFromCatalyst(address, lambdasEndpoint)
-        
+
         if (profile && profile.version >= announcedVersion) {
           profileCache.set(address, {profile, version: profile.version})
           updatePlayerComponents(entity, address, profile)
@@ -69,18 +69,18 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   function updatePlayerComponents(entity: Entity, address: string, profile: any) {
     // Update PlayerIdentityData component (protobuf)
-    PlayerIdentityData.createOrReplace(entity, { 
-      address: address, 
-      isGuest: !profile.hasConnectedWeb3 
+    PlayerIdentityData.createOrReplace(entity, {
+      address: address,
+      isGuest: !profile.hasConnectedWeb3
     })
-    
-    // Update AvatarBase component (protobuf) 
+
+    // Update AvatarBase component (protobuf)
     AvatarBase.createOrReplace(entity, {
       name: profile.name || 'Unknown',
       bodyShapeUrn: profile.avatar?.bodyShape || '',
       skinColor: profile.avatar?.skin?.color ? {
         r: profile.avatar.skin.color.r,
-        g: profile.avatar.skin.color.g, 
+        g: profile.avatar.skin.color.g,
         b: profile.avatar.skin.color.b
       } : { r: 0.8, g: 0.6, b: 0.4 }, // Default skin color
       eyesColor: profile.avatar?.eyes?.color ? {
@@ -100,10 +100,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     for (const component of listOfComponentsToSynchronize) {
       component.entityDeleted(entity, true)
     }
-    
+
     // Free the entity in the player entity manager
     playerEntityManager.freeEntityForPlayer(address)
-    
+
     // Clear from profile cache
     const normalizedAddress = normalizeAddress(address)
     profileCache.delete(normalizedAddress)
@@ -111,7 +111,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
     const normalizedAddress = normalizeAddress(address)
-    
+
     // First check if we already have an entity allocated for this address
     let entity = playerEntityManager.getEntityForAddress(normalizedAddress)
     if (entity !== null) {
@@ -135,11 +135,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   // Wire up transport events
   transport.events.on('PEER_CONNECTED', (event) => {
+    console.log('peer connected', event)
     const address = normalizeAddress(event.address)
-    
+
     // Allocate entity for the new participant
     const entity = findPlayerEntityByAddress(address, true)
-    if (entity) {      
+    if (entity) {
       // Trigger initial profile fetch
       transport.events.emit('profileMessage', {
         address: address,
@@ -149,7 +150,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       })
     }
   })
-  
+
   transport.events.on('PEER_DISCONNECTED', (event) => {
     // TODO: handle the .off event
     console.log('[PEER_DISCONNECTED]', event)
@@ -158,7 +159,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       removePlayerEntity(entity, event.address)
     }
   })
-  
+
   transport.events.on('position', (event) => {
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
@@ -170,18 +171,31 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       })
     }
   })
-  
+
+  transport.events.on('movement', (event) => {
+    const entity = findPlayerEntityByAddress(event.address, true)
+
+    if (entity) {
+      Transform.createOrReplace(entity, {
+        position: new Vector3(event.data.positionX, event.data.positionY, event.data.positionZ),
+        scale: Vector3.One(),
+        rotation: Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY),
+        parent: StaticEntities.GlobalCenterOfCoordinates
+      })
+    }
+  })
+
   // ADR-204: Use profileMessage for profile version announcements
   transport.events.on('profileMessage', async (event) => {
     const address = normalizeAddress(event.address)
     const announcedVersion = event.data.profileVersion
-    
+
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
       await handleProfileVersionAnnouncement(entity, address, announcedVersion)
     }
   })
-  
+
   transport.events.on('chatMessage', (event) => {
     const address = normalizeAddress(event.address)
     const cached = profileCache.get(address)
@@ -194,7 +208,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   return {
     // Entity range this system manages
     range: [32, 256] as [number, number],
-    
+
     // Update function to be called each frame
     update() {
       const updates = new ReadWriteByteBuffer()
@@ -203,7 +217,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         component.dumpCrdtUpdates(updates)
       }
     },
-    
+
     // Create subscription for CRDT synchronization
     createSubscription() {
       const state = new Map<ComponentDefinition<any>, number>(
@@ -227,7 +241,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         },
       }
     },
-    
+
     // Cleanup function
     dispose() {
       playerEntityManager.clear()

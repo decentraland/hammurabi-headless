@@ -23,6 +23,7 @@ export type CommsEvents = Pick<CommsTransportEvents, 'DISCONNECTION' | 'PEER_CON
   chatMessage: TransportPacket<proto.Chat>
   profileMessage: TransportPacket<proto.AnnounceProfileVersion>
   position: TransportPacket<proto.Position>
+  movement: TransportPacket<proto.Movement>
   voiceMessage: TransportPacket<proto.Voice>
   profileResponse: TransportPacket<proto.ProfileResponse>
   profileRequest: TransportPacket<proto.ProfileRequest>
@@ -153,6 +154,10 @@ export class CommsTransportWrapper {
           address,
           data: message.profileVersion
         })
+        break
+      }
+      case 'movement': {
+        this.events.emit('movement', { address, data: message.movement })
         break
       }
     }

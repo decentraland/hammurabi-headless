@@ -417,13 +417,10 @@ export class SceneContext implements EngineApiInterface {
       this._avatarSystem = undefined
     }
 
-    // Disconnect transport if it exists
-    if (this._transport) {
-      this._transport.disconnect().catch(() => {
-        // Ignore disconnection errors during dispose
-      })
-      this._transport = undefined
-    }
+    // Clear transport reference but DON'T disconnect it.
+    // The transport is shared and its lifecycle is managed by the caller (engine-main.ts).
+    // This allows the transport to stay connected during hot-reload.
+    this._transport = undefined
 
     this.stopped.resolve()
 

@@ -44,10 +44,10 @@ export function resetEngine() {
       console.error(`Error disposing scene ${entityId}:`, e)
     }
   }
-  
+
   // Clear the map
   loadedScenesByEntityId.clear()
-  
+
   // Reset the initialization flag
   initialized = false
 }
@@ -94,10 +94,10 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
   const isWorld = isDclEns(options.realmUrl)
   const isGenesisCity = !isLocalhost && !isWorld
-  
+
   // Create identity atom for sceneComms
   const identityAtom = Atom(identity)
-  
+
   // init the character controller and input system
   const characterControllerSystem = await createCharacterControllerSystem(scene)
 
@@ -162,7 +162,7 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
     isWorld,
     isLocalhost
   })
-  
+
   sceneContext.pipe(async (ctx) => {
     ctx.attachLivekitTransport(sceneTransport)
   })
