@@ -20,7 +20,7 @@ npm start                  # Runs: node dist/cli.js --realm=localhost:8000
 
 # Run with different configurations
 node dist/cli.js --realm=https://peer.decentraland.org --position=80,80
-node dist/cli.js --realm=localhost:8000 --authenticated
+node dist/cli.js --realm=http://localhost:8000 --authenticated
 npx @dcl/hammurabi-server --position=0,0  # Default to peer.decentraland.org
 ```
 

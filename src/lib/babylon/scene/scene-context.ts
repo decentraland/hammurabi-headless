@@ -35,7 +35,7 @@ import { VirtualSceneSubscription } from '../../decentraland/virtual-scene'
 import { MAX_ENTITY_NUMBER } from '../../decentraland/crdt-internal/generational-index-pool'
 import { avatarShapeComponent } from '../../decentraland/sdk-components/avatar-shape'
 import { avatarBaseComponent } from '../../decentraland/sdk-components/avatar-base'
-import { delayedInterpolationComponent } from '../../decentraland/sdk-components/delayed-interpolation'
+// import { delayedInterpolationComponent } from '../../decentraland/sdk-components/delayed-interpolation'
 import { tweenComponent } from '../../decentraland/sdk-components/tween'
 import { materialComponent } from '../../decentraland/sdk-components/material-component'
 import { CommsTransportWrapper } from '../../decentraland/communications/CommsTransportWrapper'
@@ -91,7 +91,7 @@ export class SceneContext implements EngineApiInterface {
   readonly startFrame = this.babylonScene.getEngine().frameId
 
   // contents of the main.crdt file
-  mainCrdt: Uint8Array<ArrayBufferLike> = Uint8Array.of()
+  mainCrdt: Uint8Array = Uint8Array.of()
 
   components = {
     [transformComponent.componentId]: createLwwStore(transformComponent),
@@ -114,7 +114,7 @@ export class SceneContext implements EngineApiInterface {
     [avatarShapeComponent.componentId]: createLwwStore(avatarShapeComponent),
     [avatarBaseComponent.componentId]: createLwwStore(avatarBaseComponent),
     [tweenComponent.componentId]: createLwwStore(tweenComponent),
-    [delayedInterpolationComponent.componentId]: createLwwStore(delayedInterpolationComponent),
+    // [delayedInterpolationComponent.componentId]: createLwwStore(delayedInterpolationComponent),
     [materialComponent.componentId]: createLwwStore(materialComponent),
   } as const
 

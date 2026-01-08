@@ -27,15 +27,13 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, RestrictedActionsServiceDefinition, async() => ({
     async movePlayerTo() { return { success: true } },
     async teleportTo() { return { success: true } },
-    async triggerEmote() { return { success: true } }, 
+    async triggerEmote() { return { success: true } },
     async changeRealm() { return { success: true } },
-    async requestTeleport() { return { success: true } },
     async triggerSceneEmote() { return { success: true } },
-    async showAvatarEmoteWheel() { return { success: true } },
-    async showAvatarExpressionsWheel() { return { success: true } },
     async openExternalUrl() { return { success: true } },
     async openNftDialog() { return { success: true } },
-    async setCommunicationsAdapter() { return { success: true } }
+    async setCommunicationsAdapter() { return { success: true } },
+    async copyToClipboard() { return {} }
   }))
   codegen.registerService(port, RuntimeServiceDefinition, async () => ({
     async getSceneInformation(_payload, context) {

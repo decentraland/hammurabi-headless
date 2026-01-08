@@ -13,8 +13,8 @@ import { PBPointerEvents } from '@dcl/protocol/out-js/decentraland/sdk/component
 import { PBMeshRenderer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_renderer.gen'
 import { AvatarRenderer } from '../avatars/AvatarRenderer'
 import { StaticEntities } from './logic/static-entities'
-import { PBDelayedInterpolation } from '@dcl/protocol/out-js/decentraland/sdk/components/delayed_interpolation.gen'
-import { applyDelayedInterpolation } from './logic/delayed-interpolation'
+// import { PBDelayedInterpolation } from '@dcl/protocol/out-js/decentraland/sdk/components/delayed_interpolation.gen'
+// import { applyDelayedInterpolation } from './logic/delayed-interpolation'
 import { PBTween } from '@dcl/protocol/out-js/decentraland/sdk/components/tween.gen'
 import { PBMaterial } from '@dcl/protocol/out-js/decentraland/sdk/components/material.gen'
 import { PBAvatarBase } from '@dcl/protocol/out-js/decentraland/sdk/components/avatar_base.gen'
@@ -51,7 +51,7 @@ export type AppliedComponents = {
   pointerEvents: PBPointerEvents
   avatarRenderer: AvatarRenderer
   avatarBase: PBAvatarBase
-  delayedInterpolation: PBDelayedInterpolation
+  // delayedInterpolation: PBDelayedInterpolation
   tween: PBTween
   material: {
     value: PBMaterial
@@ -111,8 +111,8 @@ export class BabylonEntity extends BABYLON.TransformNode {
       return
     }
 
-    if (this.appliedComponents.delayedInterpolation) {
-      applyDelayedInterpolation(this, this.appliedComponents.delayedInterpolation, commands, performance.now())
+    if (false) {
+      // applyDelayedInterpolation(this, this.appliedComponents.delayedInterpolation, commands, performance.now())
     } else /* if(BPTween) {
       applyTween(this, this.appliedComponents.tween!, commands, performance.now())
     } else */ {
