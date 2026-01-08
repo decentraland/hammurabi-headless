@@ -91,7 +91,7 @@ export class SceneContext implements EngineApiInterface {
   readonly startFrame = this.babylonScene.getEngine().frameId
 
   // contents of the main.crdt file
-  mainCrdt = Uint8Array.of()
+  mainCrdt: Uint8Array<ArrayBufferLike> = Uint8Array.of()
 
   components = {
     [transformComponent.componentId]: createLwwStore(transformComponent),
@@ -484,22 +484,22 @@ export class SceneContext implements EngineApiInterface {
   }
 
   private incomingNetworkMessages: Uint8Array[] = []
-  
+
   getNetworkMessages(): Uint8Array[] {
     const messages = [...this.incomingNetworkMessages]
     this.incomingNetworkMessages.length = 0
     return messages
   }
-  
+
   attachLivekitTransport(transport: CommsTransportWrapper) {
     this._transport = transport
-    
+
     // Create avatar communication system for this scene
     this._avatarSystem = createAvatarCommunicationSystem(transport)
-    
+
     // Add the avatar system subscription to this scene's subscriptions
     this.subscriptions.push(this._avatarSystem.createSubscription())
-    
+
     transport.events.on('sceneMessageBus', (event) => {
       if (event.data.sceneId === this.entityId) {
         if (event.data.data.byteLength) {
