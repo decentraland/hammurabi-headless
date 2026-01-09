@@ -3,26 +3,26 @@
  * to the RPC server, so that the scene can call them.
  */
 
-import { RpcServerPort } from "@dcl/rpc"
-import * as codegen from "@dcl/rpc/dist/codegen"
-import { EngineApiServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen"
-import { RuntimeServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen"
-import { UserIdentityServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen"
-import { CommunicationsControllerServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen"
-import { CommsApiServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen"
-import { UserActionModuleServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen"
-import { RestrictedActionsServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen"
-import { SignedFetchServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen"
-import { encodeMessage, MsgType, SceneContext } from "./scene-context"
-import { userIdentity, currentRealm } from "../../decentraland/state"
-import { signedFetch, getSignedHeaders } from "../../decentraland/identity/signed-fetch"
-import { Authenticator } from "@dcl/crypto"
+import { RpcServerPort } from '@dcl/rpc'
+import * as codegen from '@dcl/rpc/dist/codegen'
+import { EngineApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen'
+import { RuntimeServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen'
+import { UserIdentityServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen'
+import { CommunicationsControllerServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen'
+import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen'
+import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
+import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen'
+import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
+import { encodeMessage, MsgType, SceneContext } from './scene-context'
+import { userIdentity, currentRealm } from '../../decentraland/state'
+import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
+import { Authenticator } from '@dcl/crypto'
 
 export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
     async requestTeleport() {
       return {}
-    },
+    }
   }))
   codegen.registerService(port, RestrictedActionsServiceDefinition, async () => ({
     async movePlayerTo() {
@@ -60,7 +60,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     },
     async copyToClipboard() {
       return {}
-    },
+    }
   }))
   codegen.registerService(port, RuntimeServiceDefinition, async () => ({
     async getSceneInformation(_payload, context) {
@@ -68,7 +68,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         baseUrl: context.loadableScene.baseUrl!,
         content: context.loadableScene.entity.content,
         metadataJson: JSON.stringify(context.loadableScene.entity.metadata),
-        urn: context.loadableScene.urn,
+        urn: context.loadableScene.urn
       }
     },
     async getRealm() {
@@ -78,16 +78,16 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       }
 
       const { aboutResponse, baseUrl } = realm
-      const isLocalhost = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")
+      const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
 
       return {
         realmInfo: {
           baseUrl,
-          realmName: aboutResponse.configurations?.realmName || "Unknown",
+          realmName: aboutResponse.configurations?.realmName || 'Unknown',
           networkId: aboutResponse.configurations?.networkId || 0,
-          commsAdapter: aboutResponse.comms?.fixedAdapter || "offline",
-          isPreview: (aboutResponse.configurations as any)?.isPreview ?? isLocalhost,
-        },
+          commsAdapter: aboutResponse.comms?.fixedAdapter || 'offline',
+          isPreview: (aboutResponse.configurations as any)?.isPreview ?? isLocalhost
+        }
       }
     },
     async getWorldTime() {
@@ -99,25 +99,25 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     async getExplorerInformation() {
       return {
         previewMode: true,
-        agent: "desktop",
-        platform: "desktop",
-        configurations: {},
+        agent: 'desktop',
+        platform: 'desktop',
+        configurations: {}
       }
-    },
+    }
   }))
 
   codegen.registerService(port, EngineApiServiceDefinition, async () => ({
     async subscribe() {
-      throw new Error("not implemented")
+      throw new Error('not implemented')
     },
     async unsubscribe() {
-      throw new Error("not implemented")
+      throw new Error('not implemented')
     },
     async sendBatch() {
       return { events: [] }
     },
     async crdtGetMessageFromRenderer() {
-      throw new Error("not implemented")
+      throw new Error('not implemented')
     },
     async isServer() {
       return { isServer: true }
@@ -127,13 +127,13 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     },
     async crdtSendToRenderer(req, context) {
       return context.crdtSendToRenderer(req)
-    },
+    }
   }))
 
   codegen.registerService(port, CommunicationsControllerServiceDefinition, async () => ({
     async send() {
       return {
-        data: [],
+        data: []
       }
     },
     async sendBinary(req, context) {
@@ -148,32 +148,32 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         }
       }
       return {
-        data: context.getNetworkMessages(),
+        data: context.getNetworkMessages()
       }
-    },
+    }
   }))
 
   codegen.registerService(port, CommsApiServiceDefinition, async () => ({
     async getActiveVideoStreams() {
       // Return list of active video streams
       return {
-        streams: [],
+        streams: []
       }
     },
     async getConnectedPeers() {
       // Return list of connected peers from the transport
       return {
-        peers: [],
+        peers: []
       }
     },
     async getRoomInfo() {
       // Return information about the current communication room
       return {
-        roomId: "",
+        roomId: '',
         maxPeers: 100,
-        currentPeers: 0,
+        currentPeers: 0
       }
-    },
+    }
   }))
 
   codegen.registerService(port, UserIdentityServiceDefinition, async () => ({
@@ -182,38 +182,38 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
       return {
         data: {
-          displayName: "Gues2t",
+          displayName: 'Gues2t',
           hasConnectedWeb3: !identity.isGuest,
           userId: identity.address,
           version: 1,
           avatar: {
-            bodyShape: "urn:decentraland:off-chain:base-avatars:BaseFemale",
-            skinColor: "#443322",
-            hairColor: "#663322",
-            eyeColor: "#332211",
+            bodyShape: 'urn:decentraland:off-chain:base-avatars:BaseFemale',
+            skinColor: '#443322',
+            hairColor: '#663322',
+            eyeColor: '#332211',
             wearables: [
-              "urn:decentraland:off-chain:base-avatars:f_sweater",
-              "urn:decentraland:off-chain:base-avatars:f_jeans",
-              "urn:decentraland:off-chain:base-avatars:bun_shoes",
-              "urn:decentraland:off-chain:base-avatars:standard_hair",
-              "urn:decentraland:off-chain:base-avatars:f_eyes_00",
-              "urn:decentraland:off-chain:base-avatars:f_eyebrows_00",
-              "urn:decentraland:off-chain:base-avatars:f_mouth_00",
+              'urn:decentraland:off-chain:base-avatars:f_sweater',
+              'urn:decentraland:off-chain:base-avatars:f_jeans',
+              'urn:decentraland:off-chain:base-avatars:bun_shoes',
+              'urn:decentraland:off-chain:base-avatars:standard_hair',
+              'urn:decentraland:off-chain:base-avatars:f_eyes_00',
+              'urn:decentraland:off-chain:base-avatars:f_eyebrows_00',
+              'urn:decentraland:off-chain:base-avatars:f_mouth_00'
             ],
             snapshots: {
               face256: `not-found`,
-              body: `not-found`,
-            },
-          },
-        },
+              body: `not-found`
+            }
+          }
+        }
       }
     },
     async getUserPublicKey() {
       const identity = await userIdentity.deref()
       return {
-        address: identity.address,
+        address: identity.address
       }
-    },
+    }
   }))
 
   codegen.registerService(port, SignedFetchServiceDefinition, async () => ({
@@ -225,31 +225,31 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           req.url,
           identity.authChain,
           {
-            method: req.init?.method || "GET",
+            method: req.init?.method || 'GET',
             headers: req.init?.headers || {},
             body: req.init?.body,
-            responseBodyType: "text",
+            responseBodyType: 'text'
           },
           {
-            origin: "hammurabi-server//",
-            sceneId: context.loadableScene.urn,
+            origin: 'hammurabi-server//',
+            sceneId: context.loadableScene.urn
           }
         )
 
         return {
           ok: result.ok,
           status: result.status,
-          statusText: result.statusText || "",
+          statusText: result.statusText || '',
           headers: result.headers || {},
-          body: result.text || "{}",
+          body: result.text || '{}'
         }
       } catch (error) {
         return {
           ok: false,
           status: 500,
-          statusText: "Internal Error",
+          statusText: 'Internal Error',
           headers: {},
-          body: JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+          body: JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' })
         }
       }
     },
@@ -259,11 +259,11 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
       try {
         const headers = getSignedHeaders(
-          req.init?.method || "GET",
+          req.init?.method || 'GET',
           new URL(req.url).pathname,
           {
-            origin: "hammurabi-server://",
-            ...req.init,
+            origin: 'hammurabi-server://',
+            ...req.init
           },
           (payload) => Authenticator.signPayload(identity.authChain, payload)
         )
@@ -271,9 +271,9 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         return { headers }
       } catch (error) {
         throw new Error(
-          `Failed to generate signed headers: ${error instanceof Error ? error.message : "Unknown error"}`
+          `Failed to generate signed headers: ${error instanceof Error ? error.message : 'Unknown error'}`
         )
       }
-    },
+    }
   }))
 }
