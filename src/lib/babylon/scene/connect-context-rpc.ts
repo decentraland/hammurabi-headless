@@ -3,37 +3,64 @@
  * to the RPC server, so that the scene can call them.
  */
 
-import { RpcServerPort } from "@dcl/rpc";
-import * as codegen from "@dcl/rpc/dist/codegen"
-import { EngineApiServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen";
-import { RuntimeServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen";
-import { UserIdentityServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen";
-import { CommunicationsControllerServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen";
-import { CommsApiServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen";
-import { UserActionModuleServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen";
-import { RestrictedActionsServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen";
-import { SignedFetchServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen";
-import { encodeMessage, MsgType, SceneContext } from "./scene-context";
-import { userIdentity } from "../../decentraland/state";
-import { signedFetch, getSignedHeaders } from "../../decentraland/identity/signed-fetch";
-import { Authenticator } from "@dcl/crypto";
+import { RpcServerPort } from '@dcl/rpc'
+import * as codegen from '@dcl/rpc/dist/codegen'
+import { EngineApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen'
+import { RuntimeServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen'
+import { UserIdentityServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen'
+import { CommunicationsControllerServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen'
+import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen'
+import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
+import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen'
+import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
+import { encodeMessage, MsgType, SceneContext } from './scene-context'
+import { userIdentity, currentRealm } from '../../decentraland/state'
+import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
+import { Authenticator } from '@dcl/crypto'
 
-export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {  
-  codegen.registerService(port, UserActionModuleServiceDefinition, async() => ({
+export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
+  codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
     async requestTeleport() {
       return {}
     }
   }))
-  codegen.registerService(port, RestrictedActionsServiceDefinition, async() => ({
-    async movePlayerTo() { return { success: true } },
-    async teleportTo() { return { success: true } },
-    async triggerEmote() { return { success: true } },
-    async changeRealm() { return { success: true } },
-    async triggerSceneEmote() { return { success: true } },
-    async openExternalUrl() { return { success: true } },
-    async openNftDialog() { return { success: true } },
-    async setCommunicationsAdapter() { return { success: true } },
-    async copyToClipboard() { return {} }
+  codegen.registerService(port, RestrictedActionsServiceDefinition, async () => ({
+    async movePlayerTo() {
+      return { success: true }
+    },
+    async teleportTo() {
+      return { success: true }
+    },
+    async triggerEmote() {
+      return { success: true }
+    },
+    async changeRealm() {
+      return { success: true }
+    },
+    async requestTeleport() {
+      return { success: true }
+    },
+    async triggerSceneEmote() {
+      return { success: true }
+    },
+    async showAvatarEmoteWheel() {
+      return { success: true }
+    },
+    async showAvatarExpressionsWheel() {
+      return { success: true }
+    },
+    async openExternalUrl() {
+      return { success: true }
+    },
+    async openNftDialog() {
+      return { success: true }
+    },
+    async setCommunicationsAdapter() {
+      return { success: true }
+    },
+    async copyToClipboard() {
+      return {}
+    }
   }))
   codegen.registerService(port, RuntimeServiceDefinition, async () => ({
     async getSceneInformation(_payload, context) {
@@ -45,8 +72,22 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       }
     },
     async getRealm() {
+      const realm = currentRealm.getOrNull()
+      if (!realm) {
+        return { realmInfo: undefined }
+      }
+
+      const { aboutResponse, baseUrl } = realm
+      const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
+
       return {
-        realmInfo: undefined
+        realmInfo: {
+          baseUrl,
+          realmName: aboutResponse.configurations?.realmName || 'Unknown',
+          networkId: aboutResponse.configurations?.networkId || 0,
+          commsAdapter: aboutResponse.comms?.fixedAdapter || 'offline',
+          isPreview: (aboutResponse.configurations as any)?.isPreview ?? isLocalhost
+        }
       }
     },
     async getWorldTime() {
@@ -66,10 +107,18 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   }))
 
   codegen.registerService(port, EngineApiServiceDefinition, async () => ({
-    async subscribe() { throw new Error('not implemented') },
-    async unsubscribe() { throw new Error('not implemented') },
-    async sendBatch() { return { events: [] } },
-    async crdtGetMessageFromRenderer() { throw new Error('not implemented') },
+    async subscribe() {
+      throw new Error('not implemented')
+    },
+    async unsubscribe() {
+      throw new Error('not implemented')
+    },
+    async sendBatch() {
+      return { events: [] }
+    },
+    async crdtGetMessageFromRenderer() {
+      throw new Error('not implemented')
+    },
     async isServer() {
       return { isServer: true }
     },
@@ -91,7 +140,10 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       if (context.transport) {
         for (const peerData of req.peerData) {
           for (const data of peerData.data) {
-            void context.transport.sendParcelSceneMessage({ sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) }, peerData.address)
+            void context.transport.sendParcelSceneMessage(
+              { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
+              peerData.address
+            )
           }
         }
       }
@@ -151,7 +203,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
             snapshots: {
               face256: `not-found`,
               body: `not-found`
-            },
+            }
           }
         }
       }
@@ -167,7 +219,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, SignedFetchServiceDefinition, async () => ({
     async signedFetch(req, context) {
       const identity = await userIdentity.deref()
-      
+
       try {
         const result = await signedFetch(
           req.url,
@@ -204,7 +256,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
     async getHeaders(req) {
       const identity = await userIdentity.deref()
-      
+
       try {
         const headers = getSignedHeaders(
           req.init?.method || 'GET',
@@ -218,7 +270,9 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
         return { headers }
       } catch (error) {
-        throw new Error(`Failed to generate signed headers: ${error instanceof Error ? error.message : 'Unknown error'}`)
+        throw new Error(
+          `Failed to generate signed headers: ${error instanceof Error ? error.message : 'Unknown error'}`
+        )
       }
     }
   }))
