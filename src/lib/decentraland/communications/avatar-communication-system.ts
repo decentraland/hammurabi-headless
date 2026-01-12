@@ -141,8 +141,8 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     return entity
   }
 
-  // Wire up transport events
-  transport.events.on('PEER_CONNECTED', (event) => {
+  // Event handlers (stored for cleanup on dispose)
+  const handlePeerConnected = (event: { address: string }) => {
     console.log('peer connected', event)
     const address = normalizeAddress(event.address)
 
@@ -157,18 +157,17 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         }
       })
     }
-  })
+  }
 
-  transport.events.on('PEER_DISCONNECTED', (event) => {
-    // TODO: handle the .off event
+  const handlePeerDisconnected = (event: { address: string }) => {
     console.log('[PEER_DISCONNECTED]', event)
     const entity = findPlayerEntityByAddress(event.address, false)
     if (entity) {
       removePlayerEntity(entity, event.address)
     }
-  })
+  }
 
-  transport.events.on('position', (event) => {
+  const handlePosition = (event: { address: string, data: any }) => {
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
       Transform.createOrReplace(entity, {
@@ -178,9 +177,9 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         parent: StaticEntities.GlobalCenterOfCoordinates
       })
     }
-  })
+  }
 
-  transport.events.on('movement', (event) => {
+  const handleMovement = (event: { address: string, data: any }) => {
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
@@ -191,10 +190,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         parent: StaticEntities.GlobalCenterOfCoordinates
       })
     }
-  })
+  }
 
   // ADR-204: Use profileMessage for profile version announcements
-  transport.events.on('profileMessage', async (event) => {
+  const handleProfileMessage = async (event: { address: string, data: any }) => {
     const address = normalizeAddress(event.address)
     const announcedVersion = event.data.profileVersion
 
@@ -202,15 +201,21 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     if (entity) {
       await handleProfileVersionAnnouncement(entity, address, announcedVersion)
     }
-  })
+  }
 
-  transport.events.on('chatMessage', (event) => {
+  const handleChatMessage = (event: { address: string, data: any }) => {
     const address = normalizeAddress(event.address)
-    const cached = profileCache.get(address)
+    const _cached = profileCache.get(address)
     findPlayerEntityByAddress(event.address, true)
+  }
 
-    const name = cached?.profile?.name || 'Unknown'
-  })
+  // Wire up transport events
+  transport.events.on('PEER_CONNECTED', handlePeerConnected)
+  transport.events.on('PEER_DISCONNECTED', handlePeerDisconnected)
+  transport.events.on('position', handlePosition)
+  transport.events.on('movement', handleMovement)
+  transport.events.on('profileMessage', handleProfileMessage)
+  transport.events.on('chatMessage', handleChatMessage)
 
   // Public API for managing the avatar system
   return {
@@ -263,6 +268,14 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
     // Cleanup function
     dispose() {
+      // Remove event listeners to prevent duplicates on hot-reload
+      transport.events.off('PEER_CONNECTED', handlePeerConnected)
+      transport.events.off('PEER_DISCONNECTED', handlePeerDisconnected)
+      transport.events.off('position', handlePosition)
+      transport.events.off('movement', handleMovement)
+      transport.events.off('profileMessage', handleProfileMessage)
+      transport.events.off('chatMessage', handleChatMessage)
+
       playerEntityManager.clear()
       profileCache.clear()
       deletedEntities.clear()
