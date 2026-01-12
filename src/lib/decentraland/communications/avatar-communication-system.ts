@@ -2,6 +2,7 @@ import { Quaternion, Vector3 } from "@babylonjs/core"
 import { ReadWriteByteBuffer } from "../ByteBuffer"
 import { ComponentDefinition } from "../crdt-internal/components"
 import { createLwwStore } from "../crdt-internal/last-write-win-element-set"
+import { DeleteEntity } from "../crdt-wire-protocol"
 import { playerIdentityDataComponent } from "../sdk-components/player-identity-data"
 import { avatarBaseComponent } from "../sdk-components/avatar-base"
 import { transformComponent } from "../sdk-components/transform-component"
@@ -19,6 +20,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const AvatarBase = createLwwStore(avatarBaseComponent)
   const Transform = createLwwStore(transformComponent)
   const listOfComponentsToSynchronize: ComponentDefinition<any>[] = [PlayerIdentityData, AvatarBase, Transform]
+
+  // Track deleted entities for DELETE_ENTITY CRDT messages
+  const deletedEntities = new Map<Entity, number>()  // entity -> tick when deleted
+  let currentTick = 0
 
   // Cache for profiles fetched from Catalyst
   const profileCache = new Map<string, {profile: any, version: number}>()
@@ -100,6 +105,9 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     for (const component of listOfComponentsToSynchronize) {
       component.entityDeleted(entity, true)
     }
+
+    // Track this entity for DELETE_ENTITY message
+    deletedEntities.set(entity, currentTick)
 
     // Free the entity in the player entity manager
     playerEntityManager.freeEntityForPlayer(address)
@@ -211,6 +219,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
     // Update function to be called each frame
     update() {
+      currentTick++
       const updates = new ReadWriteByteBuffer()
       for (const component of listOfComponentsToSynchronize) {
         // Commit updates and clean dirty iterators
@@ -223,6 +232,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       const state = new Map<ComponentDefinition<any>, number>(
         listOfComponentsToSynchronize.map(component => [component, -1])
       )
+      let lastDeleteTick = -1  // Track last processed delete tick
 
       return {
         range: [32, 256] as [number, number],
@@ -231,9 +241,18 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
           // Clear player entity manager and profile cache
           playerEntityManager.clear()
           profileCache.clear()
+          deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {
-          // Serialize all updates from the last tick until now
+          // Write DELETE_ENTITY messages for removed players
+          for (const [entityId, tick] of deletedEntities) {
+            if (tick > lastDeleteTick) {
+              DeleteEntity.write({ entityId }, writer)
+            }
+          }
+          lastDeleteTick = currentTick
+
+          // Serialize all component updates from the last tick until now
           for (const [component, tick] of state) {
             const newTick = component.dumpCrdtDeltas(writer, tick)
             state.set(component, newTick)
@@ -246,6 +265,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     dispose() {
       playerEntityManager.clear()
       profileCache.clear()
+      deletedEntities.clear()
     }
   }
 }
