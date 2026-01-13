@@ -1,14 +1,13 @@
-import { userIdentity } from "../state"
-import { getLoadableSceneFromLocalContext } from "../../babylon/scene/load"
-import { Atom } from "../../misc/atom"
-import { signedFetch } from "../identity/signed-fetch"
-import { ExplorerIdentity } from "../identity/types"
-import { CommsAdapter } from "./types"
-import { isDclEns } from "../realm/resolution"
+import { userIdentity } from '../state'
+import { getLoadableSceneFromLocalContext } from '../../babylon/scene/load'
+import { Atom } from '../../misc/atom'
+import { signedFetch } from '../identity/signed-fetch'
+import { ExplorerIdentity } from '../identity/types'
+import { CommsAdapter } from './types'
+import { isDclEns } from '../realm/resolution'
 
 // TODO: this should be an env var
-const COMMS_GATEKEEPER_URL =
-'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
+const COMMS_GATEKEEPER_URL = 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
 // 'http://localhost:3000/get-server-scene-adapter'
 const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.org/get-server-scene-adapter'
 const COMMS_GATEKEEPER_ZONE = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter'
@@ -30,7 +29,7 @@ export async function connectLocalAdapter(baseUrl: string) {
           serverName: 'LocalPreview'
         },
         realmName: 'LocalPreview',
-        sceneId: urn,
+        sceneId: urn
       }
     )
     if (result.ok && result.json.adapter) {
@@ -68,7 +67,7 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
           serverName: realmName
         },
         realmName,
-        sceneId: isDclEns(realmName) ? realmName : sceneId,
+        sceneId: isDclEns(realmName) ? realmName : sceneId
       }
     )
     if (result.ok && result.json.adapter) {
@@ -81,10 +80,13 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
   }
 }
 
-
 // this function returns adapters for the different protocols. in case of receiving a transport instead,
 // a stub adapter will be created to wrap the transport
-export async function connectAdapter(connStr: string, identity: ExplorerIdentity, sceneId: string): Promise<CommsAdapter> {
+export async function connectAdapter(
+  connStr: string,
+  identity: ExplorerIdentity,
+  sceneId: string
+): Promise<CommsAdapter> {
   const ix = connStr.indexOf(':')
   const protocol = connStr.substring(0, ix)
   const url = connStr.substring(ix + 1)

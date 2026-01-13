@@ -61,53 +61,85 @@ export class CommsTransportWrapper {
   }
 
   sendPositionMessage(position: proto.Position): Promise<void> {
-    return this.sendMessage(false, {
-      message: {
-        $case: 'position',
-        position
+    return this.sendMessage(
+      false,
+      {
+        message: {
+          $case: 'position',
+          position
+        },
+        protocolVersion: 0
       },
-      protocolVersion: 0
-    }, [])
+      []
+    )
   }
   sendParcelSceneMessage(scene: proto.Scene, destination: string[]): Promise<void> {
-    return this.sendMessage(false, {
-      message: { $case: 'scene', scene },
-      protocolVersion: 100
-    }, destination)
+    return this.sendMessage(
+      false,
+      {
+        message: { $case: 'scene', scene },
+        protocolVersion: 100
+      },
+      destination
+    )
   }
   sendProfileMessage(profileVersion: proto.AnnounceProfileVersion): Promise<void> {
-    return this.sendMessage(false, {
-      message: { $case: 'profileVersion', profileVersion },
-      protocolVersion: 0
-    }, [])
+    return this.sendMessage(
+      false,
+      {
+        message: { $case: 'profileVersion', profileVersion },
+        protocolVersion: 0
+      },
+      []
+    )
   }
   sendProfileRequest(profileRequest: proto.ProfileRequest): Promise<void> {
-    return this.sendMessage(false, {
-      message: { $case: 'profileRequest', profileRequest },
-      protocolVersion: 0
-    }, [])
+    return this.sendMessage(
+      false,
+      {
+        message: { $case: 'profileRequest', profileRequest },
+        protocolVersion: 0
+      },
+      []
+    )
   }
   sendProfileResponse(profileResponse: proto.ProfileResponse): Promise<void> {
-    return this.sendMessage(false, {
-      message: { $case: 'profileResponse', profileResponse },
-      protocolVersion: 0
-    }, [])
+    return this.sendMessage(
+      false,
+      {
+        message: { $case: 'profileResponse', profileResponse },
+        protocolVersion: 0
+      },
+      []
+    )
   }
   sendChatMessage(chat: proto.Chat): Promise<void> {
-    return this.sendMessage(true, {
-      message: { $case: 'chat', chat },
-      protocolVersion: 0
-    }, [])
+    return this.sendMessage(
+      true,
+      {
+        message: { $case: 'chat', chat },
+        protocolVersion: 0
+      },
+      []
+    )
   }
   sendVoiceMessage(voice: proto.Voice): Promise<void> {
-    return this.sendMessage(false, {
-      message: { $case: 'voice', voice },
-      protocolVersion: 0
-    }, [])
+    return this.sendMessage(
+      false,
+      {
+        message: { $case: 'voice', voice },
+        protocolVersion: 0
+      },
+      []
+    )
   }
 
   async disconnect() {
     await this.transport.disconnect()
+  }
+
+  getRoomInfo(): { roomName: string; isConnected: boolean } | undefined {
+    return this.transport.getRoomInfo?.()
   }
 
   private handleMessage({ data, address }: TransportMessageEvent) {

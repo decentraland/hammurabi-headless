@@ -32,9 +32,17 @@ export class WebSocketAdapter implements MinimumCommunicationsTransport {
 
   private ws: WebSocket | null = null
 
-  constructor(public url: string, private identity: ExplorerIdentity) { }
+  constructor(public url: string, private identity: ExplorerIdentity) {}
 
-  setVoicePosition(_address: string, _position: Position): void {
+  setVoicePosition(_address: string, _position: Position): void {}
+
+  getRoomInfo(): { roomName: string; isConnected: boolean } | undefined {
+    // WebSocket adapter uses the URL as the room identifier
+    if (!this.ws) return undefined
+    return {
+      roomName: this.url,
+      isConnected: this.ws.readyState === WebSocket.OPEN
+    }
   }
 
   async connect(): Promise<void> {

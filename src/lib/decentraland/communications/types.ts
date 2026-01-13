@@ -1,11 +1,11 @@
-import { Atom } from "../../misc/atom"
-import { Emitter } from "mitt"
-import { createLogger } from "../../misc/logger"
-import { Position } from "@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen"
+import { Atom } from '../../misc/atom'
+import { Emitter } from 'mitt'
+import { createLogger } from '../../misc/logger'
+import { Position } from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 
 export type CommsAdapter = {
   desiredTransports: Atom<[{ url: string; sceneId: string }]>
-  reportPosition: (position: { x: number, y: number, z: number }) => void
+  reportPosition: (position: { x: number; y: number; z: number }) => void
   disconnect(): void
 }
 
@@ -29,7 +29,7 @@ export interface MinimumCommunicationsTransport {
    * The .connect() method resolves when the connection with the
    * transport was successful and it is ready to send and receive
    * messages.
-   * 
+   *
    * This method returns a set of connected peerIdentities.
    */
   connect(): Promise<void>
@@ -50,6 +50,12 @@ export interface MinimumCommunicationsTransport {
    * Event emitter (mitt) with all the events produced by the transport.
    */
   events: Emitter<CommsTransportEvents>
+
+  /**
+   * Returns information about the current room connection.
+   * This is used to populate the realmInfo.room and isConnectedSceneRoom fields for scenes.
+   */
+  getRoomInfo?(): { roomName: string; isConnected: boolean } | undefined
 }
 
 export type SendHints = { reliable: boolean }
