@@ -20,7 +20,11 @@ import { processRaycasts } from './logic/raycasts'
 import { meshColliderComponent } from '../../decentraland/sdk-components/mesh-collider-component'
 import { PARCEL_SIZE_METERS, gridToWorld, parseParcelPosition } from '../../decentraland/positions'
 import { createParcelOutline } from '../visual/parcelOutline'
-import { CrdtGetStateResponse, CrdtSendToRendererRequest, CrdtSendToResponse } from '@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen'
+import {
+  CrdtGetStateResponse,
+  CrdtSendToRendererRequest,
+  CrdtSendToResponse
+} from '@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen'
 import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-component'
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
@@ -38,8 +42,12 @@ import { avatarBaseComponent } from '../../decentraland/sdk-components/avatar-ba
 // import { delayedInterpolationComponent } from '../../decentraland/sdk-components/delayed-interpolation'
 import { tweenComponent } from '../../decentraland/sdk-components/tween'
 import { materialComponent } from '../../decentraland/sdk-components/material-component'
+import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { CommsTransportWrapper } from '../../decentraland/communications/CommsTransportWrapper'
-import { createAvatarCommunicationSystem, AvatarCommunicationSystem } from '../../decentraland/communications/avatar-communication-system'
+import {
+  createAvatarCommunicationSystem,
+  AvatarCommunicationSystem
+} from '../../decentraland/communications/avatar-communication-system'
 
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
@@ -66,7 +74,7 @@ export class SceneContext implements EngineApiInterface {
   // quota each renderer frame. ByteBuffer reading is continuable using iterators.
   // the incoming messages also include the range of allowe entities that the origin
   // transports had access to
-  incomingMessages: { buffer: ByteBuffer, readonly allowedEntityRange: [number, number] }[] = []
+  incomingMessages: { buffer: ByteBuffer; readonly allowedEntityRange: [number, number] }[] = []
 
   // stash of outgoing messages ready to be sent to back to the scripting scene
   outgoingMessagesBuffer: ByteBuffer = new ReadWriteByteBuffer()
@@ -106,7 +114,7 @@ export class SceneContext implements EngineApiInterface {
       maxElements: 10,
       timestampFunction(value) {
         return value.tickNumber
-      },
+      }
     }),
     [animatorComponent.componentId]: createLwwStore(animatorComponent),
     [gltfContainerLoadingStateComponent.componentId]: createLwwStore(gltfContainerLoadingStateComponent),
@@ -116,6 +124,7 @@ export class SceneContext implements EngineApiInterface {
     [tweenComponent.componentId]: createLwwStore(tweenComponent),
     // [delayedInterpolationComponent.componentId]: createLwwStore(delayedInterpolationComponent),
     [materialComponent.componentId]: createLwwStore(materialComponent),
+    [realmInfoComponent.componentId]: createLwwStore(realmInfoComponent)
   } as const
 
   // this flag is changed every time an entity changed its parent. the change
@@ -125,7 +134,7 @@ export class SceneContext implements EngineApiInterface {
   // breaking the Babylon's hierarcy and generating stack overflows while calculating
   // the world matrix of the entitiesg
   hierarchyChanged: boolean = false
-  unparentedEntities = new Set<Entity>
+  unparentedEntities = new Set<Entity>()
 
   // the assetmanager is used to centralize all the loading/unloading of assets
   // of this scene.
@@ -145,7 +154,12 @@ export class SceneContext implements EngineApiInterface {
   deletedEntities = new Set<Entity>()
   id: number = incrementalId++
 
-  constructor(public babylonScene: BABYLON.Scene, public loadableScene: LoadableScene, public isGlobalScene: boolean, entityId: string) {
+  constructor(
+    public babylonScene: BABYLON.Scene,
+    public loadableScene: LoadableScene,
+    public isGlobalScene: boolean,
+    entityId: string
+  ) {
     this.entityId = entityId
     this.rootNode = this.getOrCreateEntity(StaticEntities.RootEntity)
     // the rootNode must be positioned according to the value of the "scenes.base" of the scene metadata (scene.json)
@@ -299,7 +313,7 @@ export class SceneContext implements EngineApiInterface {
 
         // if we exceeded the quota, finish the processing of this "message" and yield
         // the execution control back to the event loop
-        if ((++rollingOperationCounter % 10) == 0 && !hasQuota()) {
+        if (++rollingOperationCounter % 10 == 0 && !hasQuota()) {
           return false
         }
       }
@@ -352,7 +366,6 @@ export class SceneContext implements EngineApiInterface {
       }
       this.log('\n\n\n\n======================= Starting Scene Logs: ======================= \n\n')
     }
-
 
     const outMessages: Uint8Array[] = []
 
@@ -435,11 +448,10 @@ export class SceneContext implements EngineApiInterface {
   }
 
   // impl RuntimeApi {
-  async readFile(file: string): Promise<{ content: Uint8Array, hash: string }> {
+  async readFile(file: string): Promise<{ content: Uint8Array; hash: string }> {
     return this.assetManager.readFile(file)
   }
   // }
-
 
   // returns a future that will be resolved when the next frame is processed
   async nextTick() {
