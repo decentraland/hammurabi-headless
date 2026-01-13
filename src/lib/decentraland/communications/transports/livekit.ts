@@ -1,10 +1,5 @@
 import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
-import {
-  ConnectionState,
-  DisconnectReason,
-  Room,
-  RoomEvent
-} from '@livekit/rtc-node'
+import { ConnectionState, DisconnectReason, Room, RoomEvent } from '@livekit/rtc-node'
 
 import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, SendHints, commsLogger } from '../types'
@@ -34,18 +29,18 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
 
     this.room
       .on(RoomEvent.ParticipantConnected, (_) => {
-        const address = _.identity        
+        const address = _.identity
         this.events.emit('PEER_CONNECTED', {
           address: address
         })
       })
       .on(RoomEvent.ParticipantDisconnected, (_) => {
         const address = _.identity
-        
+
         this.events.emit('PEER_DISCONNECTED', {
           address: address
         })
-              })
+      })
       .on(RoomEvent.Disconnected, (reason) => {
         if (this.disposed) {
           return
@@ -62,7 +57,7 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
           console.error('Press [R] to restart the server or [Ctrl+C] to exit')
           console.error('═'.repeat(60) + '\n')
         }
-        
+
         const kicked = reason === DisconnectReason.DUPLICATE_IDENTITY
         this.doDisconnect(kicked).catch((err) => {
           commsLogger.error(`error during disconnection ${err.toString()}`)
@@ -77,7 +72,10 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
 
   async connect(): Promise<void> {
     await this.room.connect(this.config.url, this.config.token)
-    commsLogger.log(`Connected to livekit room ${this.room.name?.split(':')[0]}`, { sid: await this.room.getSid(), metadata: this.room.metadata} )
+    commsLogger.log(`Connected to livekit room ${this.room.name?.split(':')[0]}`, {
+      sid: await this.room.getSid(),
+      metadata: this.room.metadata
+    })
   }
 
   async send(data: Uint8Array, { reliable }: SendHints, destination?: string[]): Promise<void> {
@@ -121,6 +119,14 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
 
   setVoicePosition(address: string, position: proto.Position) {
     // No-op for headless server
+  }
+
+  getRoomInfo(): { roomName: string; isConnected: boolean } | undefined {
+    if (!this.room.name) return undefined
+    return {
+      roomName: this.room.name,
+      isConnected: this.room.connectionState === ConnectionState.CONN_CONNECTED
+    }
   }
 
   handleMessage(address: string, data: Uint8Array) {
