@@ -13,10 +13,12 @@ import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/ker
 import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
 import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen'
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
-import { encodeMessage, MsgType, SceneContext } from './scene-context'
-import { userIdentity, currentRealm } from '../../decentraland/state'
-import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { Authenticator } from '@dcl/crypto'
+import { userIdentity } from '../../decentraland/state'
+import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
+import { encodeMessage, MsgType, SceneContext } from './scene-context'
+import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
+import { StaticEntities } from './logic/static-entities'
 
 export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
@@ -71,24 +73,12 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         urn: context.loadableScene.urn
       }
     },
-    async getRealm() {
-      const realm = currentRealm.getOrNull()
-      if (!realm) {
-        return { realmInfo: undefined }
-      }
+    async getRealm(_req, context) {
+      // Read RealmInfo from the CRDT component (populated by updateStaticEntities)
+      const RealmInfo = context.components[realmInfoComponent.componentId]
+      const realmInfo = RealmInfo.getOrNull(StaticEntities.RootEntity)
 
-      const { aboutResponse, baseUrl } = realm
-      const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
-
-      return {
-        realmInfo: {
-          baseUrl,
-          realmName: aboutResponse.configurations?.realmName || 'Unknown',
-          networkId: aboutResponse.configurations?.networkId || 0,
-          commsAdapter: aboutResponse.comms?.fixedAdapter || 'offline',
-          isPreview: (aboutResponse.configurations as any)?.isPreview ?? isLocalhost
-        }
-      }
+      return { realmInfo: realmInfo ?? undefined }
     },
     async getWorldTime() {
       return { seconds: 0 }
