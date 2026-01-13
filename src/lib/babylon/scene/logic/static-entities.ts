@@ -1,17 +1,18 @@
-import { Vector3, Quaternion } from "@babylonjs/core";
-import { transformComponent } from "../../../decentraland/sdk-components/transform-component";
-import type { SceneContext } from "../scene-context";
-import { globalCoordinatesToSceneCoordinates } from "../coordinates";
-import { Entity } from "../../../decentraland/types";
-import { engineInfoComponent } from "../../../decentraland/sdk-components/engine-info";
-import { EntityUtils } from "../../../decentraland/crdt-internal/generational-index-pool";
-import { playerEntityAtom } from "../../../decentraland/state";
+import { Vector3, Quaternion } from '@babylonjs/core'
+import { transformComponent } from '../../../decentraland/sdk-components/transform-component'
+import type { SceneContext } from '../scene-context'
+import { globalCoordinatesToSceneCoordinates } from '../coordinates'
+import { Entity } from '../../../decentraland/types'
+import { engineInfoComponent } from '../../../decentraland/sdk-components/engine-info'
+import { realmInfoComponent } from '../../../decentraland/sdk-components/realm-info'
+import { EntityUtils } from '../../../decentraland/crdt-internal/generational-index-pool'
+import { playerEntityAtom, currentRealm } from '../../../decentraland/state'
 
 export const StaticEntities = {
   RootEntity: 0 as Entity,
   PlayerEntity: 1 as Entity,
   CameraEntity: 2 as Entity,
-  GlobalCenterOfCoordinates: 5 as Entity,
+  GlobalCenterOfCoordinates: 5 as Entity
 } as const
 
 export const PLAYER_HEIGHT = 1.7
@@ -41,15 +42,56 @@ export function updateStaticEntities(context: SceneContext) {
   info.totalRuntime = context.getElapsedTime()
   info.frameNumber = context.babylonScene.getEngine().frameId - context.startFrame
 
+  // Update RealmInfo component
+  const RealmInfo = context.components[realmInfoComponent.componentId]
+  const realm = currentRealm.getOrNull()
+
+  if (realm) {
+    const { aboutResponse, baseUrl } = realm
+    const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
+    const roomInfo = context.transport?.getRoomInfo?.()
+
+    if (!RealmInfo.has(StaticEntities.RootEntity)) {
+      RealmInfo.create(StaticEntities.RootEntity, {
+        baseUrl,
+        realmName: aboutResponse.configurations?.realmName || 'Unknown',
+        networkId: aboutResponse.configurations?.networkId || 0,
+        commsAdapter: aboutResponse.comms?.fixedAdapter || 'offline',
+        isPreview: (aboutResponse.configurations as any)?.isPreview ?? isLocalhost,
+        room: roomInfo?.roomName,
+        isConnectedSceneRoom: roomInfo?.isConnected
+      })
+    } else {
+      const realmInfoData = RealmInfo.getMutable(StaticEntities.RootEntity)
+      // Update dynamic fields that can change at runtime
+      realmInfoData.room = roomInfo?.roomName
+      realmInfoData.isConnectedSceneRoom = roomInfo?.isConnected
+    }
+  }
+
   const Transform = context.components[transformComponent.componentId]
 
   if (!Transform.has(StaticEntities.CameraEntity))
-    Transform.create(StaticEntities.CameraEntity, { position: Vector3.Zero(), scale: Vector3.One(), rotation: Quaternion.Identity(), parent: StaticEntities.RootEntity })
+    Transform.create(StaticEntities.CameraEntity, {
+      position: Vector3.Zero(),
+      scale: Vector3.One(),
+      rotation: Quaternion.Identity(),
+      parent: StaticEntities.RootEntity
+    })
   if (!Transform.has(StaticEntities.PlayerEntity))
-    Transform.create(StaticEntities.PlayerEntity, { position: Vector3.Zero(), scale: Vector3.One(), rotation: Quaternion.Identity(), parent: StaticEntities.RootEntity })
+    Transform.create(StaticEntities.PlayerEntity, {
+      position: Vector3.Zero(),
+      scale: Vector3.One(),
+      rotation: Quaternion.Identity(),
+      parent: StaticEntities.RootEntity
+    })
   if (!Transform.has(StaticEntities.GlobalCenterOfCoordinates))
-    Transform.create(StaticEntities.GlobalCenterOfCoordinates, { position: context.rootNode.position.scale(-1), scale: Vector3.One(), rotation: Quaternion.Identity(), parent: StaticEntities.RootEntity })
-
+    Transform.create(StaticEntities.GlobalCenterOfCoordinates, {
+      position: context.rootNode.position.scale(-1),
+      scale: Vector3.One(),
+      rotation: Quaternion.Identity(),
+      parent: StaticEntities.RootEntity
+    })
 
   // StaticEntities.PlayerEntity
   {
@@ -67,11 +109,7 @@ export function updateStaticEntities(context: SceneContext) {
     const engineCamera = context.babylonScene.activeCamera
     const cameraTransform = Transform.getMutable(StaticEntities.CameraEntity)
 
-    engineCamera?.getWorldMatrix().decompose(
-      undefined,
-      cameraTransform.rotation,
-      cameraTransform.position
-    )
+    engineCamera?.getWorldMatrix().decompose(undefined, cameraTransform.rotation, cameraTransform.position)
 
     // convert the camera position to scene-space coordinates
     cameraTransform.position = globalCoordinatesToSceneCoordinates(context, cameraTransform.position)
@@ -79,4 +117,3 @@ export function updateStaticEntities(context: SceneContext) {
     cameraTransform.scale.setAll(1)
   }
 }
-
