@@ -48,6 +48,9 @@ export function signedFetch(
 ) {
   const path = new URL(url).pathname
 
+  const { [AUTH_METADATA_HEADER]: initMetadata = '{}', ...restInitHeaders } =
+    (init?.headers as Record<string, string> | undefined) ?? {}
+
   const actualInit = {
     ...init,
     headers: {
@@ -56,11 +59,12 @@ export function signedFetch(
         path,
         {
           origin: 'hammurabi-server://',
-          ...additionalMetadata
+          ...additionalMetadata,
+          ...JSON.parse(initMetadata)
         },
         (payload) => Authenticator.signPayload(identity, payload)
       ),
-      ...init?.headers
+      ...restInitHeaders
     }
   } as FlatFetchInit
 
