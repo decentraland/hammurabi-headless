@@ -13,8 +13,9 @@ import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/ker
 import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
 import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen'
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
+import { Scene } from '@dcl/schemas'
 import { Authenticator } from '@dcl/crypto'
-import { userIdentity } from '../../decentraland/state'
+import { userIdentity, currentRealm } from '../../decentraland/state'
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
@@ -209,6 +210,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, SignedFetchServiceDefinition, async () => ({
     async signedFetch(req, context) {
       const identity = await userIdentity.deref()
+      const realm = await currentRealm.deref()
 
       try {
         const result = await signedFetch(
@@ -222,7 +224,12 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           },
           {
             origin: 'hammurabi-server//',
-            sceneId: context.loadableScene.urn
+            signer: 'dcl:explorer',
+            isGuest: identity.isGuest,
+            realm: { serverName: realm.aboutResponse.configurations?.realmName },
+            realmName: realm.aboutResponse.configurations?.realmName,
+            sceneId: context.loadableScene.urn,
+            parcel: (context.loadableScene.entity.metadata as Scene).scene.base
           }
         )
 
