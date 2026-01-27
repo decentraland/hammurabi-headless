@@ -226,7 +226,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
             origin: 'hammurabi-server//',
             signer: 'dcl:authoritative-server',
             isGuest: false,
-            realm: { serverName: realm.aboutResponse.configurations?.realmName },
+            realm: { serverName: realm.aboutResponse.configurations?.realmName, hostname: realm.baseUrl },
             realmName: realm.aboutResponse.configurations?.realmName,
             sceneId: context.loadableScene.urn,
             parcel: (context.loadableScene.entity.metadata as Scene).scene.base
