@@ -15,6 +15,17 @@ export const avatarBaseComponent = declareComponentUsingProtobufJs(PBAvatarBase,
 })
 
 export function setAvatarBase(entity: BabylonEntity, data: PBAvatarBase | null) {
+  // Skip visual avatar rendering in headless mode
+  if (typeof OffscreenCanvas === 'undefined') {
+    // Still store the data for queries
+    if (data) {
+      entity.appliedComponents.avatarBase = data
+    } else if (entity.appliedComponents.avatarBase) {
+      delete entity.appliedComponents.avatarBase
+    }
+    return
+  }
+
   if (data) {
     // Store avatar base data for use by avatar renderer
     entity.appliedComponents.avatarBase = data
@@ -24,14 +35,14 @@ export function setAvatarBase(entity: BabylonEntity, data: PBAvatarBase | null) 
       entity.appliedComponents.avatarRenderer = new AvatarRenderer(entity)
       entity.appliedComponents.avatarRenderer.parent = entity
     }
-    
+
     // Update with the new base data
     entity.appliedComponents.avatarRenderer.updateAvatarBase(data)
   } else {
     if (entity.appliedComponents.avatarBase) {
       delete entity.appliedComponents.avatarBase
     }
-    
+
     // Clear avatar renderer if no avatar base data
     if (entity.appliedComponents.avatarRenderer) {
       entity.appliedComponents.avatarRenderer.parent = null

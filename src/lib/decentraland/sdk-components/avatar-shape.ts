@@ -15,6 +15,9 @@ export const avatarShapeComponent = declareComponentUsingProtobufJs(PBAvatarShap
 })
 
 export function setAvatarRenderer(entity: BabylonEntity, data: PBAvatarShape | null) {
+  // Skip visual avatar rendering in headless mode
+  if (typeof OffscreenCanvas === 'undefined') return
+
   if (data) {
     if (entity.appliedComponents.avatarRenderer) {
       entity.appliedComponents.avatarRenderer.parent = null
