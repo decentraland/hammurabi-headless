@@ -51,7 +51,6 @@ export async function connectWorldsAdapter(sceneId: string, worldName: string) {
 export async function connectProductionAdapter(sceneId: string, realmName: string) {
   const identity = await userIdentity.deref()
   const gatekeeperUrl = getCommsGatekeeperUrl()
-  console.log({ url: gatekeeperUrl })
   try {
     const result = await signedFetch(
       gatekeeperUrl,
@@ -71,6 +70,7 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
     if (result.ok && result.json.adapter) {
       return await connectAdapter(result.json.adapter, identity, sceneId)
     }
+
     throw 'Invalid livekit connection'
   } catch (e: any) {
     console.log(e)
