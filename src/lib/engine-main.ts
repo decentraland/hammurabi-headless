@@ -18,7 +18,7 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
-import { userIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm } from './decentraland/state'
+import { userIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
@@ -26,11 +26,15 @@ import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 // it is a conservative number but we want to prioritize CPU time for rendering
 const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = 10
 
+import { DclEnvironment } from './decentraland/environment'
+export { DclEnvironment }
+
 export interface EngineOptions {
   canvas?: HTMLCanvasElement
   realmUrl?: string
   position?: string
   privateKey?: string
+  environment?: DclEnvironment
 }
 
 let initialized = false
@@ -69,6 +73,10 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
     : await createGuestIdentity()
 
   userIdentity.swap(identity)
+
+  // Environment defaults to 'org'
+  const environment: DclEnvironment = options.environment ?? 'org'
+  currentEnvironment.swap(environment)
 
   // Fetch realm configuration
   let realm: CurrentRealm

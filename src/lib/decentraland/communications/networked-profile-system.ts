@@ -2,6 +2,7 @@ import { Atom } from "../../misc/atom"
 import { Avatar } from "@dcl/schemas"
 import { commsLogger } from "./types"
 import { CommsTransportWrapper, RoomConnectionStatus } from "./CommsTransportWrapper"
+import { getPeerContentUrl } from "../environment"
 
 // this function creates a controller for profile synchronization and announcement.
 export function createNetworkedProfileSystem(transport: CommsTransportWrapper) {
@@ -64,8 +65,9 @@ export function createNetworkedProfileSystem(transport: CommsTransportWrapper) {
     avatarClone.userId = avatarClone.userId.toLowerCase()
     avatarClone.ethAddress = avatarClone.ethAddress.toLowerCase()
 
+    const peerContentUrl = getPeerContentUrl()
     transport.sendProfileResponse({
-      baseUrl: "https://peer.decentraland.org/content/contents/",
+      baseUrl: `${peerContentUrl}/contents/`,
       serializedProfile: JSON.stringify(avatarClone)
     })
   }

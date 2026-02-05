@@ -5,15 +5,17 @@ import { avatarShapeComponent, setAvatarRenderer } from "../../../decentraland/s
 import { PBAvatarShape } from "@dcl/protocol/out-js/decentraland/sdk/components/avatar_shape.gen"
 import { Atom } from "../../../misc/atom"
 import { Avatar } from "@dcl/schemas"
+import { getPeerContentUrl } from "../../../decentraland/environment"
 
 // this system internally creates a SceneContext to host the playerEntity
 // IMPORTANT: this behavior is not final, will be revisited while implementing AvatarAttachment component
 export async function createLocalAvatarSceneSystem(scene: Scene, currentAvatar: Avatar) {
+  const peerContentUrl = getPeerContentUrl()
   const localAvatarScene = new SceneContext(
     scene,
     {
       urn: 'localAvatarScene',
-      baseUrl: "https://peer.decentraland.org/content/contents",
+      baseUrl: `${peerContentUrl}/contents`,
       entity: {
         content: [],
         metadata: { main: "injected", scene: { base: "0,0", parcels: [] } },

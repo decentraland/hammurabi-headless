@@ -5,12 +5,10 @@ import { signedFetch } from '../identity/signed-fetch'
 import { ExplorerIdentity } from '../identity/types'
 import { CommsAdapter } from './types'
 import { isDclEns } from '../realm/resolution'
+import { getCommsGatekeeperUrl } from '../environment'
 
-// TODO: this should be an env var
-const COMMS_GATEKEEPER_URL = 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
-// 'http://localhost:3000/get-server-scene-adapter'
-const COMMS_GATEKEEPER_PROD = 'https://comms-gatekeeper.decentraland.org/get-server-scene-adapter'
-const COMMS_GATEKEEPER_ZONE = 'https://comms-gatekeeper.decentraland.zone/get-server-scene-adapter'
+// Local development gatekeeper (always uses .org)
+const COMMS_GATEKEEPER_LOCAL = 'https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter'
 
 export async function connectLocalAdapter(baseUrl: string) {
   const { urn } = await getLoadableSceneFromLocalContext(baseUrl)
@@ -18,7 +16,7 @@ export async function connectLocalAdapter(baseUrl: string) {
 
   try {
     const result = await signedFetch(
-      COMMS_GATEKEEPER_URL,
+      COMMS_GATEKEEPER_LOCAL,
       identity.authChain,
       { method: 'POST', responseBodyType: 'json' },
       {
@@ -51,12 +49,12 @@ export async function connectWorldsAdapter(sceneId: string, worldName: string) {
 }
 
 export async function connectProductionAdapter(sceneId: string, realmName: string) {
-  console.log('[CASLA]: connectProductionAdapter')
   const identity = await userIdentity.deref()
-
+  const gatekeeperUrl = getCommsGatekeeperUrl()
+  console.log({ url: gatekeeperUrl })
   try {
     const result = await signedFetch(
-      COMMS_GATEKEEPER_ZONE,
+      gatekeeperUrl,
       identity.authChain,
       { method: 'POST', responseBodyType: 'json' },
       {
