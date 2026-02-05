@@ -6,6 +6,8 @@ import { ExplorerIdentity } from "./identity/types"
 import { Atom } from "../misc/atom"
 import { TransformNode } from "@babylonjs/core"
 
+// Note: DclEnvironment type is inlined here to avoid circular dependency with environment.ts
+
 export type CurrentRealm = {
   baseUrl: string
   connectionString: string
@@ -22,3 +24,4 @@ export const playerEntityAtom = Atom<TransformNode>()
 export const loadedScenesByEntityId = new Map<string /* EntityID, not URN */, SceneContext>()
 export const realmErrors = Atom<string[]>()
 export const loadingState = Atom<{ pending: number, total: number }>()
+export const currentEnvironment = Atom<'zone' | 'org'>('org')

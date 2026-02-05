@@ -5,11 +5,13 @@ import { createLwwStore } from "../crdt-internal/last-write-win-element-set"
 import { DeleteEntity } from "../crdt-wire-protocol"
 import { playerIdentityDataComponent } from "../sdk-components/player-identity-data"
 import { avatarBaseComponent } from "../sdk-components/avatar-base"
+import { avatarEquippedDataComponent } from "../sdk-components/avatar-customizations"
 import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
 import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
 import { playerEntityManager } from "./player-entity-manager"
+import { getAssetBundleRegistryUrl } from "../environment"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -18,8 +20,9 @@ import { playerEntityManager } from "./player-entity-manager"
 export function createAvatarCommunicationSystem(transport: CommsTransportWrapper) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
+  const AvatarEquippedData = createLwwStore(avatarEquippedDataComponent)
   const Transform = createLwwStore(transformComponent)
-  const listOfComponentsToSynchronize: ComponentDefinition<any>[] = [PlayerIdentityData, AvatarBase, Transform]
+  const listOfComponentsToSynchronize: ComponentDefinition<any>[] = [PlayerIdentityData, AvatarBase, AvatarEquippedData, Transform]
 
   // Track deleted entities for DELETE_ENTITY CRDT messages
   const deletedEntities = new Map<Entity, number>()  // entity -> tick when deleted
@@ -32,19 +35,23 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     return address.toLowerCase()
   }
 
-  async function fetchProfileFromCatalyst(address: string, lambdasEndpoint?: string): Promise<any> {
+  async function fetchProfileFromCatalyst(address: string, _lambdasEndpoint?: string): Promise<any> {
     try {
-      // Use lambdasEndpoint if provided, otherwise use default Catalyst
-      const baseUrl = lambdasEndpoint || 'https://peer.decentraland.org'
-      const response = await fetch(`${baseUrl}/lambdas/profiles?id=${address}`)
+      const response = await fetch(`${getAssetBundleRegistryUrl()}/profiles`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ ids: [address] })
+      })
       if (!response.ok) {
         throw new Error(`Failed to fetch profile: ${response.status}`)
       }
 
       const data: any = await response.json()
-      return data[0].avatars?.[0] // Return the profile data
+      return data[0]?.avatars?.[0]
     } catch (error) {
-      console.error('Failed to fetch profile from Catalyst:', error)
+      console.error('Failed to fetch profile:', error)
       throw error
     }
   }
@@ -98,6 +105,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         g: profile.avatar.hair.color.g,
         b: profile.avatar.hair.color.b
       } : { r: 0.3, g: 0.2, b: 0.1 } // Default hair color
+    })
+
+    // Update AvatarEquippedData component (protobuf)
+    AvatarEquippedData.createOrReplace(entity, {
+      wearableUrns: profile.avatar?.wearables || [],
+      emoteUrns: (profile.avatar?.emotes || []).map((e: any) => e.urn).filter(Boolean)
     })
   }
 

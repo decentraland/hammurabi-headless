@@ -15,6 +15,7 @@ import { createLogger } from "../../misc/logger";
 import { BabylonEmote, createEmote } from "./adr-65/emote";
 import { AdvancedDynamicTexture, TextBlock } from "@babylonjs/gui";
 import { PLAYER_HEIGHT } from "../scene/logic/static-entities";
+import { getPeerContentUrl } from "../../decentraland/environment";
 
 const avatarRendererLogger = createLogger('AvatarRenderer')
 
@@ -221,8 +222,8 @@ export class AvatarRenderer extends TransformNode {
   setAvatarShape(shape: PBAvatarShape) {
     if (this.currentShape == shape) return
 
-    // TODO: this information is present in the realm definition (AboutResponse#content.publicUrl)
-    const contentServerBaseUrl = 'https://peer.decentraland.org/content'
+    // Use environment-aware peer content URL
+    const contentServerBaseUrl = getPeerContentUrl()
 
     if (this.textBlock) {
       this.textBlock.text = shape.name || ''
