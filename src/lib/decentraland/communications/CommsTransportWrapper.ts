@@ -75,7 +75,7 @@ export class CommsTransportWrapper {
   }
   sendParcelSceneMessage(scene: proto.Scene, destination: string[]): Promise<void> {
     return this.sendMessage(
-      false,
+      true,
       {
         message: { $case: 'scene', scene },
         protocolVersion: 100
