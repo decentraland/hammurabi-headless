@@ -64,7 +64,7 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
           serverName: realmName
         },
         realmName,
-        sceneId: isDclEns(realmName) ? realmName : sceneId
+        sceneId,
       }
     )
     if (result.ok && result.json.adapter) {
