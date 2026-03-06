@@ -43,7 +43,8 @@ rpcServer.setHandler(async function handler(port) {
   }))
 })
 
-export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadableScene: LoadableScene, isLocalSceneDevelopment: boolean = false) {
+export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadableScene: LoadableScene) {
+  const isLocalSceneDevelopment = loadableScene.baseUrl.includes('localhost') || loadableScene.baseUrl.includes('127.0.0.1')
   const scene = loadableScene.entity.metadata as Scene
     
   try {
