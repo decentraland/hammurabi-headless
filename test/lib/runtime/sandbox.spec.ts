@@ -254,7 +254,7 @@ describe('Sandbox', () => {
     allowListES2020.filter((key) => key !== 'undefined').map((key) => checkExistence(key, true))
   })
   describe('checks extra features do not exist', () => {
-    const nonExistentKeys = ['fetch', 'require', 'process', 'setTimeout', 'setInterval', 'console', 'module', 'exports']
+    const nonExistentKeys = ['require', 'process', 'setTimeout', 'setInterval', 'console', 'module', 'exports']
     nonExistentKeys.map((key) => checkExistence(key, false))
   })
 })
@@ -397,6 +397,80 @@ describe('dcl runtime', () => {
     await sceneModule.onStart!()
     await sceneModule.onUpdate(0)
     await sceneModule.onStart!()
+  })
+
+  it(`fetch is available`, async () => {
+    const context = Object.create(null)
+    const sceneModule = createModuleRuntime(null as any, console, context)
+
+    await customEvalSdk('exports.onUpdate = function() { return typeof fetch }', context, false)
+
+    expect(await sceneModule.exports.onUpdate!(0)).toEqual('function')
+  })
+
+  it(`WebSocket is available`, async () => {
+    const context = Object.create(null)
+    const sceneModule = createModuleRuntime(null as any, console, context)
+
+    await customEvalSdk('exports.onUpdate = function() { return typeof WebSocket }', context, false)
+
+    expect(await sceneModule.exports.onUpdate!(0)).toEqual('function')
+  })
+
+  it(`Headers, Request, Response are available`, async () => {
+    const context = Object.create(null)
+    const sceneModule = createModuleRuntime(null as any, console, context)
+
+    const src = 'exports.onUpdate = function() { return [typeof Headers, typeof Request, typeof Response].join(",") }'
+    await customEvalSdk(src, context, false)
+
+    expect(await sceneModule.exports.onUpdate!(0)).toEqual('function,function,function')
+  })
+
+  it(`fetch rejects http in production mode`, async () => {
+    const context = Object.create(null)
+    createModuleRuntime(null as any, console, context, false)
+
+    expect(() => context.fetch('http://example.com')).toThrow(
+      "Can't make an unsafe http request, please upgrade to https"
+    )
+  })
+
+  it(`fetch allows https in production mode`, async () => {
+    const context = Object.create(null)
+    createModuleRuntime(null as any, console, context, false)
+
+    // URL validation passes, suppress the network error from the actual fetch
+    const promise = context.fetch('https://example.com')
+    await promise.catch(() => {})
+  })
+
+  it(`fetch allows http in local development mode`, async () => {
+    const context = Object.create(null)
+    createModuleRuntime(null as any, console, context, true)
+
+    // URL validation passes, suppress the network error from the actual fetch
+    const promise = context.fetch('http://example.com')
+    await promise.catch(() => {})
+  })
+
+  it(`WebSocket rejects ws in production mode`, async () => {
+    const context = Object.create(null)
+    createModuleRuntime(null as any, console, context, false)
+
+    expect(() => {
+      new context.WebSocket('ws://example.com')
+    }).toThrow("Can't start an unsafe ws connection, please upgrade to wss")
+  })
+
+  it(`WebSocket allows ws in local development mode`, async () => {
+    const context = Object.create(null)
+    createModuleRuntime(null as any, console, context, true)
+
+    // Should not throw on URL validation (constructor succeeds, connection will fail async)
+    const ws = new context.WebSocket('ws://localhost:8080')
+    ws.on('error', () => {}) // suppress connection error
+    ws.terminate()
   })
 
   it(`scoped setImmediate is the same as globalThis.setImmediate`, async () => {

@@ -1,4 +1,5 @@
 import type { RpcClientPort } from '@dcl/rpc'
+import WebSocket from 'ws'
 import { loadModuleForPort } from '../common-runtime/modules'
 import { RpcSceneRuntimeOptions, RuntimeAbstraction } from '../common-runtime/types'
 
@@ -13,10 +14,36 @@ export type SDK7Module = RuntimeAbstraction & {
   readonly exports: Partial<SceneInterface>
 }
 
+const DEFAULT_FETCH_TIMEOUT_MS = 30_000
+
+function createRestrictedFetch(isLocalSceneDevelopment: boolean): typeof fetch {
+  return (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!isLocalSceneDevelopment && !url.toLowerCase().startsWith('https://')) {
+      throw new Error(`Can't make an unsafe http request, please upgrade to https. url=${url}`)
+    }
+    const signal = init?.signal ?? AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS)
+    return fetch(input, { ...init, signal })
+  }
+}
+
+function createRestrictedWebSocket(isLocalSceneDevelopment: boolean) {
+  return class RestrictedWebSocket extends WebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      const urlStr = url.toString()
+      if (!isLocalSceneDevelopment && !urlStr.toLowerCase().startsWith('wss://')) {
+        throw new Error(`Can't start an unsafe ws connection, please upgrade to wss. url=${urlStr}`)
+      }
+      super(url, protocols)
+    }
+  }
+}
+
 export function createModuleRuntime(
   clientPort: RpcClientPort,
   console: Pick<RpcSceneRuntimeOptions, 'log' | 'error'>,
-  globalObject: Record<string, any>
+  globalObject: Record<string, any>,
+  isLocalSceneDevelopment: boolean = false
 ): SDK7Module {
   const exports: Partial<SceneInterface> = {}
 
@@ -46,6 +73,16 @@ export function createModuleRuntime(
       error: console.error.bind(console)
     }
   })
+
+  const runtimeGlobals: Record<string, unknown> = {
+    fetch: createRestrictedFetch(isLocalSceneDevelopment),
+    Headers, Request, Response,
+    WebSocket: createRestrictedWebSocket(isLocalSceneDevelopment)
+  }
+
+  for (const [name, value] of Object.entries(runtimeGlobals)) {
+    Object.defineProperty(globalObject, name, { configurable: false, value })
+  }
 
   const loadedModules: Record<string, GenericRpcModule> = {}
 

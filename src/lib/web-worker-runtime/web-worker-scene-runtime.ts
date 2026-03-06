@@ -15,13 +15,13 @@ import { createModuleRuntime } from './context'
 import { customEvalSdk } from './sandbox'
 
 // this function starts the scene runtime as explained in ADR-133
-export async function startWebWorkerSceneRuntime(port: RpcClientPort, options: RpcSceneRuntimeOptions) {
+export async function startWebWorkerSceneRuntime(port: RpcClientPort, options: RpcSceneRuntimeOptions, isLocalSceneDevelopment: boolean = false) {
   const { mainFile } = await getStartupData(port)
- 
+
   // first create an empty sandbox
   const context: any = Object.create(null)
-  // and add to it the `module`, `exports` and `console` required by ADR-133 
-  const sceneRuntime = createModuleRuntime(port, options, context)
+  // and add to it the `module`, `exports` and `console` required by ADR-133
+  const sceneRuntime = createModuleRuntime(port, options, context, isLocalSceneDevelopment)
 
   // then run the scene
   const decoder = new TextDecoder()

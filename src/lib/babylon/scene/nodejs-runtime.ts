@@ -43,7 +43,7 @@ rpcServer.setHandler(async function handler(port) {
   }))
 })
 
-export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadableScene: LoadableScene) {
+export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadableScene: LoadableScene, isLocalSceneDevelopment: boolean = false) {
   const scene = loadableScene.entity.metadata as Scene
     
   try {
@@ -73,7 +73,7 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
       },
       // set the update loop
       updateLoop: defaultUpdateLoop
-    })
+    }, isLocalSceneDevelopment)
     
     console.log(`[NODEJS] Process runtime started successfully for scene: ${scene.display?.title}`)
   } catch (error) {
