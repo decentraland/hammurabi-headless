@@ -1,4 +1,5 @@
 import type { RpcClientPort } from '@dcl/rpc'
+import WebSocket from 'ws'
 import { loadModuleForPort } from '../common-runtime/modules'
 import { RpcSceneRuntimeOptions, RuntimeAbstraction } from '../common-runtime/types'
 
@@ -46,6 +47,12 @@ export function createModuleRuntime(
       error: console.error.bind(console)
     }
   })
+
+  const runtimeGlobals: Record<string, unknown> = { fetch, Headers, Request, Response, WebSocket }
+
+  for (const [name, value] of Object.entries(runtimeGlobals)) {
+    Object.defineProperty(globalObject, name, { configurable: false, value })
+  }
 
   const loadedModules: Record<string, GenericRpcModule> = {}
 
