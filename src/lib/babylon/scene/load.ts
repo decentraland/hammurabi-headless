@@ -14,7 +14,7 @@ import { Atom } from '../../misc/atom'
 /**
  * Creates and initializes a scene context from a loadable scene
  */
-async function createSceneContext(engineScene: BABYLON.Scene, loadableScene: LoadableScene, entityId: string, isGlobal: boolean, virtualScene?: VirtualScene): Promise<SceneContext> {
+async function createSceneContext(engineScene: BABYLON.Scene, loadableScene: LoadableScene, entityId: string, isGlobal: boolean, isLocalSceneDevelopment: boolean = false, virtualScene?: VirtualScene): Promise<SceneContext> {
   if ((loadableScene.entity.metadata as any).runtimeVersion !== '7') throw new Error('The scene is not compatible with the current runtime version. It may be using SDK6')
 
   const ctx = new SceneContext(engineScene, loadableScene, isGlobal, entityId)
@@ -26,7 +26,7 @@ async function createSceneContext(engineScene: BABYLON.Scene, loadableScene: Loa
   await ctx.initAsyncJobs()
 
   // Node.js environment - use in-process WebWorker runtime with MemoryTransport
-  connectSceneContextUsingNodeJs(ctx, loadableScene)
+  connectSceneContextUsingNodeJs(ctx, loadableScene, isLocalSceneDevelopment)
 
   loadedScenesByEntityId.set(entityId, ctx)
 
@@ -47,7 +47,7 @@ export async function loadSceneContext(engineScene: BABYLON.Scene, options: { ur
 
   const loadableScene = await getLoadableSceneFromUrl(parsed.entityId, parsed.baseUrl)
 
-  return await createSceneContext(engineScene, loadableScene, parsed.entityId, options.isGlobal, virtualScene)
+  return await createSceneContext(engineScene, loadableScene, parsed.entityId, options.isGlobal, false, virtualScene)
 }
 
 /**
@@ -57,7 +57,7 @@ export async function loadSceneContextFromLocal(sceneContext: Atom<SceneContext>
   const loadableScene = await getLoadableSceneFromLocalContext(options.baseUrl)
   const entityId = loadableScene.urn
 
-  sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, options.isGlobal, virtualScene))
+  sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, options.isGlobal, true, virtualScene))
 
   async function reloadScene() {
     unloadScene(entityId)
