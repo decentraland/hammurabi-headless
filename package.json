@@ -72,7 +72,7 @@
     "fp-future": "^1.0.1",
     "livekit-client": "^2.15.3",
     "livekit-server-sdk": "^2.13.2",
-    "protobufjs": "^7.2.3",
+    "protobufjs": "^7.2.5",
     "ws": "^8.14.2"
   },
   "devDependencies": {
