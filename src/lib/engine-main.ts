@@ -33,6 +33,7 @@ export interface EngineOptions {
   canvas?: HTMLCanvasElement
   realmUrl?: string
   position?: string
+  sceneId?: string
   privateKey?: string
   environment?: DclEnvironment
 }
@@ -144,7 +145,8 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
     // Load World scene
     ctx = await loadSceneContextFromWorld(sceneContext, scene, {
       worldName: options.realmUrl,
-      realmBaseUrl: realm.baseUrl
+      realmBaseUrl: realm.baseUrl,
+      sceneId: options.sceneId
     })
   } else if (isGenesisCity) {
     // Load scene from Genesis City position

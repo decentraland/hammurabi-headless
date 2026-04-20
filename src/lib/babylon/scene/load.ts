@@ -205,33 +205,43 @@ export async function loadSceneContextFromPosition(
 }
 
 /**
- * Loads a scene from a Decentraland World
+ * Loads a scene from a Decentraland World.
+ *
+ * When `targetSceneId` is provided, the function picks the matching URN from
+ * the world's `scenesUrn` list (multi-scene worlds). When omitted, it falls
+ * back to the first URN — which is the correct and only scene for single-scene
+ * worlds.
+ *
  * @param sceneContext The scene context atom to populate
  * @param engineScene The Babylon.js scene
- * @param options Configuration including world name and realm base URL
+ * @param options Configuration including world name, realm base URL and
+ *   optional target scene entity hash to load
  * @returns Promise resolving to the scene context atom
  */
 export async function loadSceneContextFromWorld(
   sceneContext: Atom<SceneContext>,
   engineScene: BABYLON.Scene,
-  options: { worldName: string, realmBaseUrl: string }
+  options: { worldName: string, realmBaseUrl: string, sceneId?: string }
 ): Promise<Atom<SceneContext>> {
   console.log(`🌍 Loading World: ${options.worldName}`)
 
-  // Fetch world metadata to get the scene URN
+  // Fetch world metadata to get the scene URN(s)
   const worldAboutUrl = `${options.realmBaseUrl}/about`
   const worldAboutRes = await fetch(worldAboutUrl)
   const worldAbout = await worldAboutRes.json() as any
-  // Get the scenes from the world configuration
-  const sceneUrns = worldAbout.configurations?.scenesUrn || []
+  const sceneUrns: string[] = worldAbout.configurations?.scenesUrn || []
 
   if (sceneUrns.length === 0) {
     throw new Error(`No scenes found in world ${options.worldName}`)
   }
 
-  // For now, load the first scene in the world
-  // In the future, this could be enhanced to handle multiple scenes
-  const sceneUrn = sceneUrns[0]
+  const sceneUrn = pickSceneUrn(sceneUrns, options.sceneId, options.worldName)
+
+  if (!sceneUrn) {
+    throw new Error(
+      `Scene "${options.sceneId}" not found in world "${options.worldName}"`
+    )
+  }
 
   console.log(`📦 Loading World scene: ${sceneUrn}`)
 
@@ -257,4 +267,23 @@ export async function loadSceneContextFromWorld(
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, false))
 
   return sceneContext
+}
+
+/**
+ * Pick the URN entry that matches the requested target scene. When no target
+ * is given, returns the first URN (single-scene worlds). When a target is
+ * given and the URN matches, return it.
+ * Otherwise return undefined.
+ */
+function pickSceneUrn(sceneUrns: string[], sceneId: string | undefined, worldName: string): string | undefined {
+  if (!sceneId) {
+    return sceneUrns[0]
+  }
+
+  const match = sceneUrns.find((urn) => {
+    const urnMatch = urn.match(/urn:decentraland:entity:([^?]+)/)
+    return urnMatch?.[1] === sceneId
+  })
+
+  return match
 }
