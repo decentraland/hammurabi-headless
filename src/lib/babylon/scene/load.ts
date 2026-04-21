@@ -87,14 +87,24 @@ export function unloadScene(entityId: string) {
   }
 }
 
-export async function getLoadableSceneFromUrl(entityId: string, baseUrl: string): Promise<LoadableScene> {
-  const result = await fetch(`${baseUrl}${entityId}`)
-  const entity: any = await result.json()
+/**
+ * Build a `LoadableScene` pointing at a scene entity served under `baseUrl`.
+ *
+ * When `entity` is omitted the entity is fetched from `${baseUrl}${entityId}`.
+ * Callers that already have the entity in hand (e.g. from a `/scenes`
+ * response) can pass it in to skip the extra HTTP round-trip.
+ */
+export async function getLoadableSceneFromUrl(
+  entityId: string,
+  baseUrl: string,
+  entity?: any
+): Promise<LoadableScene> {
+  const resolvedEntity = entity ?? (await (await fetch(`${baseUrl}${entityId}`)).json())
 
   return {
     urn: entityId,
-    entity,
-    baseUrl,
+    entity: resolvedEntity,
+    baseUrl
   }
 }
 
@@ -264,16 +274,12 @@ export async function loadSceneContextFromWorld(
 
   console.log(`📦 Loading World scene: ${entityId}`)
 
-  // The /scenes response inlines the entity metadata + content, so we can build
-  // the loadable scene locally instead of refetching from /contents/:id.
-  const loadableScene: LoadableScene = {
-    urn: entityId,
-    baseUrl: contentBaseUrl,
-    entity: {
-      ...targetScene.entity,
-      type: 'scene'
-    } as LoadableScene['entity']
-  }
+  // The /scenes response inlines the entity metadata + content, so we can reuse
+  // `getLoadableSceneFromUrl` with the pre-fetched entity and skip an HTTP hop.
+  const loadableScene = await getLoadableSceneFromUrl(entityId, contentBaseUrl, {
+    ...targetScene.entity,
+    type: 'scene'
+  })
 
   console.log(`✨ Loading: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
 
