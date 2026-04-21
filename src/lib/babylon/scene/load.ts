@@ -270,7 +270,12 @@ export async function loadSceneContextFromWorld(
   }
 
   const entityId = targetScene.entityId
-  const contentBaseUrl = `${options.realmBaseUrl}/contents/`
+
+  // `realmBaseUrl` points at the world-scoped URL (e.g.
+  // `https://worlds-content-server.decentraland.zone/world/<worldName>`), but
+  // content files are served from the content-server root (`<host>/contents/`).
+  // Strip the `/world/<worldName>` suffix to reach that root.
+  const contentBaseUrl = `${options.realmBaseUrl.replace(/\/world\/[^/]+\/?$/, '')}/contents/`
 
   console.log(`📦 Loading World scene: ${entityId}`)
 
