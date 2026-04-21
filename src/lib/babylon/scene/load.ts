@@ -197,15 +197,23 @@ export async function loadSceneContextFromPosition(
 
   console.log(`🌐 Fetching scene at position ${pointer} from ${contentServerUrl}`)
 
-  // Fetch the scene entity from the content server
-  const loadableScenes = await getLoadableSceneFromPointers([pointer], contentServerUrl)
+  const entities = await fetchEntitiesByPointers([pointer], contentServerUrl)
 
-  if (loadableScenes.length === 0) {
+  if (entities.length === 0) {
     throw new Error(`No scene found at position ${pointer}`)
   }
 
-  const loadableScene = loadableScenes[0]
-  const entityId = loadableScene.urn
+  const entity = entities[0]
+  const entityId = entity.id
+  const loadableScene: LoadableScene = {
+    urn: entityId,
+    entity: {
+      type: entity.type as any,
+      content: entity.content,
+      metadata: entity.metadata
+    },
+    baseUrl: `${contentServerUrl}/contents/`
+  }
 
   console.log(`📦 Loading scene: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
 

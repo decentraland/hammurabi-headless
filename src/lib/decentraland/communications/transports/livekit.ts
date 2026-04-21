@@ -30,12 +30,14 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
     this.room
       .on(RoomEvent.ParticipantConnected, (_) => {
         const address = _.identity
+        commsLogger.log(`👤 Participant connected to livekit room`, { address, room: this.room.name })
         this.events.emit('PEER_CONNECTED', {
           address: address
         })
       })
       .on(RoomEvent.ParticipantDisconnected, (_) => {
         const address = _.identity
+        commsLogger.log(`👋 Participant disconnected from livekit room`, { address, room: this.room.name })
 
         this.events.emit('PEER_DISCONNECTED', {
           address: address
@@ -72,7 +74,7 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
 
   async connect(): Promise<void> {
     await this.room.connect(this.config.url, this.config.token)
-    commsLogger.log(`Connected to livekit room ${this.room.name?.split(':')[0]}`, {
+    commsLogger.log(`Connected to livekit room ${this.room.name}`, {
       sid: await this.room.getSid(),
       metadata: this.room.metadata
     })

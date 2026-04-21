@@ -79,14 +79,19 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   const environment: DclEnvironment = options.environment ?? 'org'
   currentEnvironment.swap(environment)
 
-  // Fetch realm configuration
+  // Fetch realm configuration. When a position is provided without an explicit
+  // realm (e.g. Genesis City spawns from the orchestrator), default to the
+  // catalyst peer — matches the CLI behavior so callers don't have to hard-code
+  // the peer URL.
   let realm: CurrentRealm
-  if (!options.realmUrl) {
+  const realmUrl =
+    options.realmUrl ?? (options.position ? `https://peer.decentraland.${environment}` : undefined)
+  if (!realmUrl) {
     throw new Error('Realm URL is required')
   }
 
   // Use resolveRealmBaseUrl to handle .dcl.eth domains and other URLs properly
-  const baseUrl = await resolveRealmBaseUrl(options.realmUrl)
+  const baseUrl = await resolveRealmBaseUrl(realmUrl)
 
   console.log('🌐 Fetching realm info from:', baseUrl + '/about')
   const res = await fetch(baseUrl + '/about')
@@ -94,14 +99,14 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
 
   realm = {
     baseUrl,
-    connectionString: options.realmUrl,
+    connectionString: realmUrl,
     aboutResponse
   }
   currentRealm.swap(realm)
 
   // Determine realm type
   const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
-  const isWorld = isDclEns(options.realmUrl)
+  const isWorld = isDclEns(realmUrl)
   const isGenesisCity = !isLocalhost && !isWorld
 
   // Create identity atom for sceneComms
@@ -144,7 +149,7 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   } else if (isWorld) {
     // Load World scene
     ctx = await loadSceneContextFromWorld(sceneContext, scene, {
-      worldName: options.realmUrl,
+      worldName: realmUrl,
       realmBaseUrl: realm.baseUrl,
       sceneId: options.sceneId
     })
