@@ -205,12 +205,29 @@ export async function loadSceneContextFromPosition(
 }
 
 /**
+ * Shape of each entry returned by `GET /world/:name/scenes` on
+ * worlds-content-server. Full entity metadata is inlined so there's no need
+ * for a follow-up fetch per scene.
+ */
+interface WorldSceneEntry {
+  entityId: string
+  parcels?: string[]
+  entity: {
+    content?: { file: string; hash: string }[]
+    metadata?: unknown
+  }
+}
+
+/**
  * Loads a scene from a Decentraland World.
  *
- * When `targetSceneId` is provided, the function picks the matching URN from
- * the world's `scenesUrn` list (multi-scene worlds). When omitted, it falls
- * back to the first URN — which is the correct and only scene for single-scene
- * worlds.
+ * Scene discovery uses the worlds-content-server `/world/:name/scenes`
+ * endpoint, which is the canonical source for the full list of scenes in a
+ * world
+ *
+ * When `sceneId` is provided, the function picks the matching scene from the
+ * list (multi-scene worlds). When omitted, it falls back to the first scene in
+ * the list — correct for single-scene worlds.
  *
  * @param sceneContext The scene context atom to populate
  * @param engineScene The Babylon.js scene
@@ -225,65 +242,54 @@ export async function loadSceneContextFromWorld(
 ): Promise<Atom<SceneContext>> {
   console.log(`🌍 Loading World: ${options.worldName}`)
 
-  // Fetch world metadata to get the scene URN(s)
-  const worldAboutUrl = `${options.realmBaseUrl}/about`
-  const worldAboutRes = await fetch(worldAboutUrl)
-  const worldAbout = await worldAboutRes.json() as any
-  const sceneUrns: string[] = worldAbout.configurations?.scenesUrn || []
+  const scenesUrl = `${options.realmBaseUrl}/scenes`
+  const scenesRes = await fetch(scenesUrl)
+  const scenesBody = await scenesRes.json() as { scenes?: WorldSceneEntry[] }
+  const scenes = scenesBody.scenes ?? []
 
-  if (sceneUrns.length === 0) {
+  if (scenes.length === 0) {
     throw new Error(`No scenes found in world ${options.worldName}`)
   }
 
-  const sceneUrn = pickSceneUrn(sceneUrns, options.sceneId, options.worldName)
+  const targetScene = pickScene(scenes, options.sceneId)
 
-  if (!sceneUrn) {
+  if (!targetScene) {
     throw new Error(
       `Scene "${options.sceneId}" not found in world "${options.worldName}"`
     )
   }
 
-  console.log(`📦 Loading World scene: ${sceneUrn}`)
+  const entityId = targetScene.entityId
+  const contentBaseUrl = `${options.realmBaseUrl}/contents/`
 
-  // Parse the URN to extract entity ID and baseUrl
-  // Format: urn:decentraland:entity:<hash>?=&baseUrl=<url>
-  const urnMatch = sceneUrn.match(/urn:decentraland:entity:([^?]+)/)
-  const baseUrlMatch = sceneUrn.match(/baseUrl=([^&]+)/)
+  console.log(`📦 Loading World scene: ${entityId}`)
 
-  if (!urnMatch || !baseUrlMatch) {
-    throw new Error(`Invalid scene URN format: ${sceneUrn}`)
+  // The /scenes response inlines the entity metadata + content, so we can build
+  // the loadable scene locally instead of refetching from /contents/:id.
+  const loadableScene: LoadableScene = {
+    urn: entityId,
+    baseUrl: contentBaseUrl,
+    entity: {
+      ...targetScene.entity,
+      type: 'scene'
+    } as LoadableScene['entity']
   }
 
-  const entityId = urnMatch[1]
-  const contentBaseUrl = baseUrlMatch[1]
-
-  console.log(`📦 Fetching entity ${entityId} from ${contentBaseUrl}`)
-
-  // Fetch the scene directly using the entity ID and provided base URL
-  const loadableScene = await getLoadableSceneFromUrl(entityId, contentBaseUrl)
   console.log(`✨ Loading: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
 
-  // Use the full URN (with baseUrl) as the scene identifier
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, false))
 
   return sceneContext
 }
 
 /**
- * Pick the URN entry that matches the requested target scene. When no target
- * is given, returns the first URN (single-scene worlds). When a target is
- * given and the URN matches, return it.
- * Otherwise return undefined.
+ * Pick the scene entry that matches the requested target. When no target is
+ * given, returns the first scene (single-scene worlds). When a target is given
+ * and a scene matches, return it. Otherwise return undefined.
  */
-function pickSceneUrn(sceneUrns: string[], sceneId: string | undefined, worldName: string): string | undefined {
+function pickScene(scenes: WorldSceneEntry[], sceneId: string | undefined): WorldSceneEntry | undefined {
   if (!sceneId) {
-    return sceneUrns[0]
+    return scenes[0]
   }
-
-  const match = sceneUrns.find((urn) => {
-    const urnMatch = urn.match(/urn:decentraland:entity:([^?]+)/)
-    return urnMatch?.[1] === sceneId
-  })
-
-  return match
+  return scenes.find((scene) => scene.entityId === sceneId)
 }
