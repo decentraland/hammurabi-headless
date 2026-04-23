@@ -41,6 +41,9 @@ export async function connectLocalAdapter(baseUrl: string) {
 }
 
 export async function connectGenesisAdapter(sceneId: string) {
+  // Unity hardcodes realmName="main" for Genesis regardless of which catalyst
+  // (artemis on zone, hela on prod, …) is actually serving the about.json.
+  // We must match that so both clients land in the same LiveKit scene-room.
   return connectProductionAdapter(sceneId, 'main')
 }
 

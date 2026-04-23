@@ -7,6 +7,7 @@ import type { DclEnvironment } from './lib/decentraland/environment'
 const args = process.argv.slice(2)
 let realmUrl: string | undefined = undefined
 let position: string | undefined = undefined
+let sceneId: string | undefined = undefined
 let privateKey: string | undefined = undefined
 let environment: DclEnvironment = 'org'  // Default to 'org'
 let developmentMode = true  // Default to development mode (interactive) for manual usage
@@ -14,12 +15,14 @@ let developmentMode = true  // Default to development mode (interactive) for man
 for (const arg of args) {
   if (arg === '--help' || arg === '-h') {
     console.log(`
-Usage: npx @dcl/hammurabi-server [--realm=<url>] [--position=<x,y>] [--private-key=<hex>] [--env=<zone|org>] [--production]
+Usage: npx @dcl/hammurabi-server [--realm=<url>] [--position=<x,y>] [--scene-id=<hash>] [--private-key=<hex>] [--env=<zone|org>] [--production]
 
 Options:
   --realm=<url>      Realm URL to connect to (default: localhost:8000 for local, peer.decentraland.org for position)
                      Can be a .dcl.eth World name (e.g., boedo.dcl.eth)
   --position=<x,y>   Fetch scene at parcel coordinates from content server (required for Genesis City)
+  --scene-id=<hash>  Target scene entity hash for multi-scene worlds. When omitted, the first scene
+                     in the world's about.json is loaded
   --private-key=<hex> Use a specific private key for authentication (hex string with or without 0x prefix)
                      Can also be set via PRIVATE_KEY environment variable
   --env=<zone|org>   Environment to use for Decentraland services (default: org)
@@ -52,6 +55,10 @@ Examples:
       console.error('❌ Invalid position format. Use --position=x,y (e.g., --position=80,80)')
       process.exit(1)
     }
+  }
+
+  if (arg.startsWith('--scene-id=')) {
+    sceneId = arg.split('=')[1]
   }
 
   if (arg.startsWith('--private-key=')) {
@@ -104,7 +111,7 @@ let isRestarting = false
 
 async function start() {
   try {
-    const scene = await main({ realmUrl, position, privateKey, environment })
+    const scene = await main({ realmUrl, position, sceneId, privateKey, environment })
     if (developmentMode) {
       console.log('✅ Server running - Type "r" + Enter to restart or [Ctrl+C] to exit')
     } else {

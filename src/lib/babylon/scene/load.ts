@@ -87,14 +87,24 @@ export function unloadScene(entityId: string) {
   }
 }
 
-export async function getLoadableSceneFromUrl(entityId: string, baseUrl: string): Promise<LoadableScene> {
-  const result = await fetch(`${baseUrl}${entityId}`)
-  const entity: any = await result.json()
+/**
+ * Build a `LoadableScene` pointing at a scene entity served under `baseUrl`.
+ *
+ * When `entity` is omitted the entity is fetched from `${baseUrl}${entityId}`.
+ * Callers that already have the entity in hand (e.g. from a `/scenes`
+ * response) can pass it in to skip the extra HTTP round-trip.
+ */
+export async function getLoadableSceneFromUrl(
+  entityId: string,
+  baseUrl: string,
+  entity?: any
+): Promise<LoadableScene> {
+  const resolvedEntity = entity ?? (await (await fetch(`${baseUrl}${entityId}`)).json())
 
   return {
     urn: entityId,
-    entity,
-    baseUrl,
+    entity: resolvedEntity,
+    baseUrl
   }
 }
 
@@ -187,15 +197,23 @@ export async function loadSceneContextFromPosition(
 
   console.log(`🌐 Fetching scene at position ${pointer} from ${contentServerUrl}`)
 
-  // Fetch the scene entity from the content server
-  const loadableScenes = await getLoadableSceneFromPointers([pointer], contentServerUrl)
+  const entities = await fetchEntitiesByPointers([pointer], contentServerUrl)
 
-  if (loadableScenes.length === 0) {
+  if (entities.length === 0) {
     throw new Error(`No scene found at position ${pointer}`)
   }
 
-  const loadableScene = loadableScenes[0]
-  const entityId = loadableScene.urn
+  const entity = entities[0]
+  const entityId = entity.id
+  const loadableScene: LoadableScene = {
+    urn: entityId,
+    entity: {
+      type: entity.type as any,
+      content: entity.content,
+      metadata: entity.metadata
+    },
+    baseUrl: `${contentServerUrl}/contents/`
+  }
 
   console.log(`📦 Loading scene: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
 
@@ -205,56 +223,92 @@ export async function loadSceneContextFromPosition(
 }
 
 /**
- * Loads a scene from a Decentraland World
+ * Shape of each entry returned by `GET /world/:name/scenes` on
+ * worlds-content-server. Full entity metadata is inlined so there's no need
+ * for a follow-up fetch per scene.
+ */
+interface WorldSceneEntry {
+  entityId: string
+  parcels?: string[]
+  entity: {
+    content?: { file: string; hash: string }[]
+    metadata?: unknown
+  }
+}
+
+/**
+ * Loads a scene from a Decentraland World.
+ *
+ * Scene discovery uses the worlds-content-server `/world/:name/scenes`
+ * endpoint, which is the canonical source for the full list of scenes in a
+ * world
+ *
+ * When `sceneId` is provided, the function picks the matching scene from the
+ * list (multi-scene worlds). When omitted, it falls back to the first scene in
+ * the list — correct for single-scene worlds.
+ *
  * @param sceneContext The scene context atom to populate
  * @param engineScene The Babylon.js scene
- * @param options Configuration including world name and realm base URL
+ * @param options Configuration including world name, realm base URL and
+ *   optional target scene entity hash to load
  * @returns Promise resolving to the scene context atom
  */
 export async function loadSceneContextFromWorld(
   sceneContext: Atom<SceneContext>,
   engineScene: BABYLON.Scene,
-  options: { worldName: string, realmBaseUrl: string }
+  options: { worldName: string, realmBaseUrl: string, sceneId?: string }
 ): Promise<Atom<SceneContext>> {
   console.log(`🌍 Loading World: ${options.worldName}`)
 
-  // Fetch world metadata to get the scene URN
-  const worldAboutUrl = `${options.realmBaseUrl}/about`
-  const worldAboutRes = await fetch(worldAboutUrl)
-  const worldAbout = await worldAboutRes.json() as any
-  // Get the scenes from the world configuration
-  const sceneUrns = worldAbout.configurations?.scenesUrn || []
+  const scenesUrl = `${options.realmBaseUrl}/scenes`
+  const scenesRes = await fetch(scenesUrl)
+  const scenesBody = await scenesRes.json() as { scenes?: WorldSceneEntry[] }
+  const scenes = scenesBody.scenes ?? []
 
-  if (sceneUrns.length === 0) {
+  if (scenes.length === 0) {
     throw new Error(`No scenes found in world ${options.worldName}`)
   }
 
-  // For now, load the first scene in the world
-  // In the future, this could be enhanced to handle multiple scenes
-  const sceneUrn = sceneUrns[0]
+  const targetScene = pickScene(scenes, options.sceneId)
 
-  console.log(`📦 Loading World scene: ${sceneUrn}`)
-
-  // Parse the URN to extract entity ID and baseUrl
-  // Format: urn:decentraland:entity:<hash>?=&baseUrl=<url>
-  const urnMatch = sceneUrn.match(/urn:decentraland:entity:([^?]+)/)
-  const baseUrlMatch = sceneUrn.match(/baseUrl=([^&]+)/)
-
-  if (!urnMatch || !baseUrlMatch) {
-    throw new Error(`Invalid scene URN format: ${sceneUrn}`)
+  if (!targetScene) {
+    throw new Error(
+      `Scene "${options.sceneId}" not found in world "${options.worldName}"`
+    )
   }
 
-  const entityId = urnMatch[1]
-  const contentBaseUrl = baseUrlMatch[1]
+  const entityId = targetScene.entityId
 
-  console.log(`📦 Fetching entity ${entityId} from ${contentBaseUrl}`)
+  // `realmBaseUrl` points at the world-scoped URL (e.g.
+  // `https://worlds-content-server.decentraland.zone/world/<worldName>`), but
+  // content files are served from the content-server root (`<host>/contents/`).
+  // Strip the `/world/<worldName>` suffix to reach that root.
+  const contentBaseUrl = `${options.realmBaseUrl.replace(/\/world\/[^/]+\/?$/, '')}/contents/`
 
-  // Fetch the scene directly using the entity ID and provided base URL
-  const loadableScene = await getLoadableSceneFromUrl(entityId, contentBaseUrl)
+  console.log(`📦 Loading World scene: ${entityId}`)
+
+  // The /scenes response inlines the entity metadata + content, so we can reuse
+  // `getLoadableSceneFromUrl` with the pre-fetched entity and skip an HTTP hop.
+  const loadableScene = await getLoadableSceneFromUrl(entityId, contentBaseUrl, {
+    ...targetScene.entity,
+    type: 'scene'
+  })
+
   console.log(`✨ Loading: ${(loadableScene.entity.metadata as any)?.display?.title || entityId}`)
 
-  // Use the full URN (with baseUrl) as the scene identifier
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, false))
 
   return sceneContext
+}
+
+/**
+ * Pick the scene entry that matches the requested target. When no target is
+ * given, returns the first scene (single-scene worlds). When a target is given
+ * and a scene matches, return it. Otherwise return undefined.
+ */
+function pickScene(scenes: WorldSceneEntry[], sceneId: string | undefined): WorldSceneEntry | undefined {
+  if (!sceneId) {
+    return scenes[0]
+  }
+  return scenes.find((scene) => scene.entityId === sceneId)
 }
