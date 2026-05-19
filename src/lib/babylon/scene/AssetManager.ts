@@ -47,10 +47,17 @@ export class AssetManager {
         this.babylonScene,
         null,
         extension
-      )
+      ).then((container) => {
+        // consumers expect a fully-processed container
+        processAssetContainer(container)
+        return container
+      })
 
-      // once the assetContainer loads it needs to be processed before usage
-      ret.then(_ => processAssetContainer(_))
+      // sentinel handler so a load failure is never an unhandled rejection (would crash the process).
+      // Consumers still observe the rejection via their own handlers on the stored promise.
+      ret.catch((err) => {
+        console.error(`‼️ Failed to load model ${normalizedSrc}: ${err?.message || err}`)
+      })
 
       // store the promise in the map, it will be reused for the whole scene
       this.models.set(fileHash, ret)
