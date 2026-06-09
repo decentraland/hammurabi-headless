@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/decentraland/hammurabi-headless.git"
+    "url": "git+https://github.com/decentraland/hammurabi-headless.git"
   },
   "author": "Protocol Squad",
   "license": "Apache-2.0",
