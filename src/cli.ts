@@ -111,7 +111,7 @@ let isRestarting = false
 
 async function start() {
   try {
-    const scene = await main({ realmUrl, position, sceneId, privateKey, environment })
+    const scene = await main({ realmUrl, position, sceneId, privateKey, environment, restartOnCommsLoss: !developmentMode })
     if (developmentMode) {
       console.log('✅ Server running - Type "r" + Enter to restart or [Ctrl+C] to exit')
     } else {
