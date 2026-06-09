@@ -1,10 +1,28 @@
 import { computeAddress, createUnsafeIdentity } from '@dcl/crypto/dist/crypto'
-import * as secp256k1 from "ethereum-cryptography/secp256k1"
+import * as secp256k1Module from "ethereum-cryptography/secp256k1"
 import { hexToBytes, bytesToHex, RequestManager } from 'eth-connect'
 import { StoreableIdentity, ExplorerIdentity } from './types'
 import { Authenticator, IdentityType } from '@dcl/crypto'
 
 const ephemeralLifespanMinutes = 10_000
+
+// `ethereum-cryptography` changed its secp256k1 surface between major versions, and
+// which one we get depends on what @dcl/crypto pulls in (v1 for <3.6, v2 for >=3.6).
+// v1 exposes `getPublicKey` at the module top level and returns the uncompressed
+// 65-byte key by default. v2 moved it under a `secp256k1` export and returns a
+// *compressed* 33-byte key unless `false` is passed. Bridge both so the package keeps
+// working regardless of which version is resolved on the user's machine.
+function getUncompressedPublicKey(privateKey: Uint8Array): Uint8Array {
+  const mod = secp256k1Module as unknown as {
+    getPublicKey?: (pk: Uint8Array, compressed?: boolean) => Uint8Array
+    secp256k1?: { getPublicKey: (pk: Uint8Array, compressed?: boolean) => Uint8Array }
+  }
+  // v2: explicitly request the uncompressed (65-byte, 0x04-prefixed) form
+  if (mod.secp256k1?.getPublicKey) return mod.secp256k1.getPublicKey(privateKey, false)
+  // v1: already uncompressed by default
+  if (mod.getPublicKey) return mod.getPublicKey(privateKey, false)
+  throw new Error('ethereum-cryptography: secp256k1.getPublicKey is not available')
+}
 
 // this function creates a Decentraland AuthChain using an unsafe in-memory ephemeral
 // private key
@@ -24,7 +42,7 @@ export function explorerIdentityFromEphemeralIdentity(storeIdentity: StoreableId
   const ephemeralPrivateKey = hexToBytes(storeIdentity.ephemeralIdentity.privateKey)
 
   // remove heading 0x04
-  const publicKey = secp256k1.getPublicKey(ephemeralPrivateKey).slice(1)
+  const publicKey = getUncompressedPublicKey(ephemeralPrivateKey).slice(1)
   const ephemeralAddress = computeAddress(publicKey)
 
   const account: IdentityType = {
@@ -98,7 +116,7 @@ export async function createGuestIdentity(): Promise<ExplorerIdentity> {
 
 export async function loginFromPrivateKey(privateKey: string): Promise<StoreableIdentity> {
   const privateKeyBytes = hexToBytes(privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey)
-  const publicKey = secp256k1.getPublicKey(privateKeyBytes).slice(1)
+  const publicKey = getUncompressedPublicKey(privateKeyBytes).slice(1)
   const address = computeAddress(publicKey)
 
   const account: IdentityType = {
