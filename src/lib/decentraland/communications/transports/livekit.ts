@@ -48,8 +48,10 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
           return
         }
 
+        const clientInitiated = reason === DisconnectReason.CLIENT_INITIATED
+
         // Only show the warning if it's not a manual disconnect during restart
-        if (reason !== DisconnectReason.CLIENT_INITIATED) {
+        if (!clientInitiated) {
           console.error('\n' + '═'.repeat(60))
           console.error('⚠️  LIVEKIT DISCONNECTED - SERVER COMMUNICATION LOST')
           console.error('═'.repeat(60))
@@ -61,7 +63,7 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
         }
 
         const kicked = reason === DisconnectReason.DUPLICATE_IDENTITY
-        this.doDisconnect(kicked).catch((err) => {
+        this.doDisconnect(kicked, clientInitiated).catch((err) => {
           commsLogger.error(`error during disconnection ${err.toString()}`)
         })
       })
@@ -100,23 +102,25 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
     try {
       await this.room.localParticipant?.publishData(data, { reliable, destination_identities: destination })
     } catch (err: any) {
-      // NOTE: for tracking purposes only, this is not a "code" error, this is a failed connection or a problem with the livekit instance
-      await this.disconnect()
+      // NOTE: for tracking purposes only, this is not a "code" error, this is a failed connection or a problem with the livekit instance.
+      // This is an unexpected failure (not a clean local disconnect), so it should bubble up as a restartable disconnection.
+      await this.doDisconnect(false, false)
     }
   }
 
   async disconnect() {
-    return this.doDisconnect(false)
+    // Public disconnect is a clean, locally-initiated teardown (restart/shutdown).
+    return this.doDisconnect(false, true)
   }
 
-  async doDisconnect(kicked: boolean) {
+  async doDisconnect(kicked: boolean, clientInitiated = false) {
     if (this.disposed) {
       return
     }
 
     this.disposed = true
     await this.room.disconnect().catch(commsLogger.error)
-    this.events.emit('DISCONNECTION', { kicked })
+    this.events.emit('DISCONNECTION', { kicked, clientInitiated })
   }
 
   setVoicePosition(address: string, position: proto.Position) {

@@ -67,6 +67,10 @@ export type TransportDisconnectedEvent = {
   kicked: boolean
   // Optional error
   error?: Error
+  // True when the local client initiated a clean disconnect (e.g. a manual
+  // restart or shutdown). Absent/false means the connection was lost
+  // unexpectedly and the server should be restarted.
+  clientInitiated?: boolean
 }
 
 // PEER_CONNECTED

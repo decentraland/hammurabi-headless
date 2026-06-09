@@ -13,6 +13,7 @@ import { createCameraFollowsPlayerSystem } from './babylon/scene/logic/camera-fo
 import { createCameraObstructionSystem } from './babylon/scene/logic/hide-camera-obstuction-system'
 import { createLocalAvatarSceneSystem } from './babylon/scene/logic/local-avatar-scene'
 import { createSceneComms } from './decentraland/communications/scene-comms'
+import { commsLogger } from './decentraland/communications/types'
 import { SceneContext } from './babylon/scene/scene-context'
 import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/avatar'
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
@@ -36,6 +37,10 @@ export interface EngineOptions {
   sceneId?: string
   privateKey?: string
   environment?: DclEnvironment
+  // When true (default), the process exits on an unexpected comms loss so a
+  // supervisor can restart it with a fresh connection. Interactive/dev usage
+  // sets this to false to keep the manual "press R to restart" flow.
+  restartOnCommsLoss?: boolean
 }
 
 let initialized = false
@@ -180,6 +185,21 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
 
   sceneContext.pipe(async (ctx) => {
     ctx.attachLivekitTransport(sceneTransport)
+  })
+
+  // A headless server is useless without comms. If the transport is lost
+  // unexpectedly (i.e. not a clean local disconnect), exit so the supervising
+  // process restarts us with a fresh connection and token. LiveKit already
+  // retries internally before emitting this, so reconnecting in-process would
+  // just repeat what it already gave up on.
+  const restartOnCommsLoss = options.restartOnCommsLoss ?? true
+  sceneTransport.events.on('DISCONNECTION', (event) => {
+    if (event.clientInitiated) return
+    commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
+    if (restartOnCommsLoss) {
+      commsLogger.error('Exiting so the server can be restarted with a fresh connection')
+      process.exit(1)
+    }
   })
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)

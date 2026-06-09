@@ -55,7 +55,7 @@ export class CommsTransportWrapper {
       this.state = RoomConnectionStatus.CONNECTED
     } catch (e: any) {
       this.state = RoomConnectionStatus.DISCONNECTED
-      this.events.emit('DISCONNECTION', { error: e, kicked: false })
+      this.events.emit('DISCONNECTION', { error: e, kicked: false, clientInitiated: false })
       console.error(e)
     }
   }
