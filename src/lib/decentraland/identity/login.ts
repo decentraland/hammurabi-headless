@@ -1,5 +1,5 @@
 import { computeAddress, createUnsafeIdentity } from '@dcl/crypto/dist/crypto'
-import * as secp256k1 from "ethereum-cryptography/secp256k1"
+import { secp256k1 } from "ethereum-cryptography/secp256k1"
 import { hexToBytes, bytesToHex, RequestManager } from 'eth-connect'
 import { StoreableIdentity, ExplorerIdentity } from './types'
 import { Authenticator, IdentityType } from '@dcl/crypto'
@@ -24,7 +24,7 @@ export function explorerIdentityFromEphemeralIdentity(storeIdentity: StoreableId
   const ephemeralPrivateKey = hexToBytes(storeIdentity.ephemeralIdentity.privateKey)
 
   // remove heading 0x04
-  const publicKey = secp256k1.getPublicKey(ephemeralPrivateKey).slice(1)
+  const publicKey = secp256k1.getPublicKey(ephemeralPrivateKey, false).slice(1)
   const ephemeralAddress = computeAddress(publicKey)
 
   const account: IdentityType = {
@@ -98,7 +98,7 @@ export async function createGuestIdentity(): Promise<ExplorerIdentity> {
 
 export async function loginFromPrivateKey(privateKey: string): Promise<StoreableIdentity> {
   const privateKeyBytes = hexToBytes(privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey)
-  const publicKey = secp256k1.getPublicKey(privateKeyBytes).slice(1)
+  const publicKey = secp256k1.getPublicKey(privateKeyBytes, false).slice(1)
   const address = computeAddress(publicKey)
 
   const account: IdentityType = {
