@@ -1,8 +1,9 @@
 import { computeAddress, createUnsafeIdentity } from '@dcl/crypto/dist/crypto'
-// ethereum-cryptography is pinned to v1 (via the explicit dependency and the @dcl/crypto
-// pin in package.json) where getPublicKey is a top-level export returning the uncompressed
-// 65-byte key. v2 moved this API, so do not let the dependency float across that boundary.
-import * as secp256k1 from "ethereum-cryptography/secp256k1"
+// ethereum-cryptography v2 (matching @dcl/crypto) exposes the curve under the `secp256k1`
+// named export and returns a *compressed* key by default, so getPublicKey must be called
+// with `false` to get the uncompressed 65-byte (0x04-prefixed) form the rest of the code
+// expects. Keep the dependency pinned to v2 so this API does not float (see package.json).
+import { secp256k1 } from "ethereum-cryptography/secp256k1"
 import { hexToBytes, bytesToHex, RequestManager } from 'eth-connect'
 import { StoreableIdentity, ExplorerIdentity } from './types'
 import { Authenticator, IdentityType } from '@dcl/crypto'
@@ -26,8 +27,8 @@ export async function loginAsGuest(): Promise<StoreableIdentity> {
 export function explorerIdentityFromEphemeralIdentity(storeIdentity: StoreableIdentity): ExplorerIdentity {
   const ephemeralPrivateKey = hexToBytes(storeIdentity.ephemeralIdentity.privateKey)
 
-  // remove heading 0x04
-  const publicKey = secp256k1.getPublicKey(ephemeralPrivateKey).slice(1)
+  // remove heading 0x04 (pass false for the uncompressed key)
+  const publicKey = secp256k1.getPublicKey(ephemeralPrivateKey, false).slice(1)
   const ephemeralAddress = computeAddress(publicKey)
 
   const account: IdentityType = {
@@ -101,7 +102,7 @@ export async function createGuestIdentity(): Promise<ExplorerIdentity> {
 
 export async function loginFromPrivateKey(privateKey: string): Promise<StoreableIdentity> {
   const privateKeyBytes = hexToBytes(privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey)
-  const publicKey = secp256k1.getPublicKey(privateKeyBytes).slice(1)
+  const publicKey = secp256k1.getPublicKey(privateKeyBytes, false).slice(1)
   const address = computeAddress(publicKey)
 
   const account: IdentityType = {
