@@ -4,7 +4,6 @@ import { memoize } from '../../../misc/memoize'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { BabylonEntity } from '../BabylonEntity'
 import { bitIntersectsAndContainsAny } from '../../../misc/bit-operations'
-import { AddToggle, guiPanel } from '../../visual/ui'
 
 export const floorMeshes: AbstractMesh[] = []
 
@@ -23,20 +22,6 @@ export const colliderMaterial = memoize((scene: Scene) => {
   m.depthFunction = 2
   m.gridRatio = .1
   m.freeze()
-
-  if (typeof OffscreenCanvas !== 'undefined') {
-    AddToggle('Show Colliders', guiPanel(scene)).onIsCheckedChangedObservable.add((v) => {
-      if (v) {
-        m.opacity = 1
-        m.disableColorWrite = false
-        m.disableDepthWrite = false
-      } else {
-        m.opacity = 0
-        m.disableColorWrite = true
-        m.disableDepthWrite = true
-      }
-    })
-  }
 
   return m
 })

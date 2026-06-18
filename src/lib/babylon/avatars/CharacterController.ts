@@ -5,7 +5,6 @@ import { colliderMaterial } from "../scene/logic/colliders"
 import { DecentralandSystem } from "../../decentraland/system"
 import { PLAYER_HEIGHT } from "../scene/logic/static-entities"
 import { initKeyboard } from "../input"
-import { addCrosshair } from "../visual/reticle"
 
 export type CharacterStates = 'IDLE' | 'WALK' | 'JUMP' | 'FALL' | 'RUN'
 

@@ -3,7 +3,6 @@ import * as BABYLON from '@babylonjs/core'
 import { setupXMLHttpRequestPolyfill } from './polyfills/xmlhttprequest'
 import { Scene } from '@dcl/schemas'
 import { initEngine } from './babylon'
-import { createAvatarRendererSystem } from './babylon/avatar-rendering-system'
 import { loadSceneContextFromLocal, loadSceneContextFromPosition, loadSceneContextFromWorld } from './babylon/scene/load'
 import { PLAYER_HEIGHT } from './babylon/scene/logic/static-entities'
 import { createSceneCullingSystem } from './babylon/scene/scene-culling'
@@ -122,7 +121,6 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
 
   // then init all the rendering systems
   const avatar = identity.isGuest ? await generateRandomAvatar(identity.address) : await downloadAvatar(identity.address)
-  const avatarRenderingSystem = createAvatarRendererSystem(scene, () => loadedScenesByEntityId.values())
   const sceneCullingSystem = createSceneCullingSystem(scene, () => loadedScenesByEntityId.values())
   const sceneTickSystem = createSceneTickSystem(scene, () => loadedScenesByEntityId.values(), MS_PER_FRAME_PROCESSING_SCENE_MESSAGES)
   const localAvatarSceneSystem = await createLocalAvatarSceneSystem(scene, avatar)
@@ -136,7 +134,6 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
 
   addSystems(scene,
     sceneTickSystem,
-    avatarRenderingSystem,
     sceneCullingSystem,
     characterControllerSystem,
     localAvatarSceneSystem,
