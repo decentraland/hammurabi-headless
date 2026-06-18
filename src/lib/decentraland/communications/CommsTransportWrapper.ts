@@ -148,7 +148,10 @@ export class CommsTransportWrapper {
       message = proto.Packet.decode(data).message
     } catch (error: any) {
       commsLogger.error(`Failed to decode packet from ${address}: ${error.message}`)
-      console.log(data)
+      const buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      commsLogger.error(`  len=${buf.length}`)
+      commsLogger.error(`  hex=${buf.toString('hex')}`)
+      commsLogger.error(`  ascii=${buf.toString('latin1').replace(/[^\x20-\x7e]/g, '.')}`)
       return
     }
 
