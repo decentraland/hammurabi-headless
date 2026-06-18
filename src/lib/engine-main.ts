@@ -1,6 +1,7 @@
 // Node.js 18+ has native fetch
 import * as BABYLON from '@babylonjs/core'
 import { setupXMLHttpRequestPolyfill } from './polyfills/xmlhttprequest'
+import { robustFetch } from './misc/network'
 import { Scene } from '@dcl/schemas'
 import { initEngine } from './babylon'
 import { loadSceneContextFromLocal, loadSceneContextFromPosition, loadSceneContextFromWorld } from './babylon/scene/load'
@@ -98,7 +99,7 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   const baseUrl = await resolveRealmBaseUrl(realmUrl)
 
   console.log('🌐 Fetching realm info from:', baseUrl + '/about')
-  const res = await fetch(baseUrl + '/about')
+  const res = await robustFetch(baseUrl + '/about', {}, { label: 'realm/about' })
   const aboutResponse = (await res.json() as any)
 
   realm = {

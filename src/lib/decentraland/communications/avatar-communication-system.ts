@@ -12,6 +12,7 @@ import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
 import { playerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
+import { robustFetch } from "../../misc/network"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -37,13 +38,13 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   async function fetchProfileFromCatalyst(address: string, _lambdasEndpoint?: string): Promise<any> {
     try {
-      const response = await fetch(`${getAssetBundleRegistryUrl()}/profiles`, {
+      const response = await robustFetch(`${getAssetBundleRegistryUrl()}/profiles`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ ids: [address] })
-      })
+      }, { label: 'profiles' })
       if (!response.ok) {
         throw new Error(`Failed to fetch profile: ${response.status}`)
       }

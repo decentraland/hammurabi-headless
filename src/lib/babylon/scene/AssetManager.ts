@@ -5,6 +5,7 @@
 // buffers for each model requies us to find a reusable solution
 
 import * as BABYLON from '@babylonjs/core'
+import { robustFetch } from '../../misc/network'
 import { LoadableScene, WearableContentServerEntity, resolveFile, resolveFileAbsolute } from '../../decentraland/scene/content-server-entity'
 import { GLTFFileLoader, GLTFLoaderAnimationStartMode } from '@babylonjs/loaders/glTF/glTFFileLoader'
 import { GLTFLoader } from '@babylonjs/loaders/glTF/2.0'
@@ -73,7 +74,7 @@ export class AssetManager {
 
     const absoluteLocation = resolveFileAbsolute(this.loadableScene, file)
     if (!absoluteLocation) throw new Error(`File not found: ${file}`)
-    const res = await fetch(absoluteLocation)
+    const res = await robustFetch(absoluteLocation, {}, { label: 'asset' })
 
     if (!res.ok) throw new Error(`Error loading URL: ${absoluteLocation}`)
 
