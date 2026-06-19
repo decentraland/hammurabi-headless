@@ -1,3 +1,5 @@
+import { robustFetch } from './network'
+
 type FlatFetchResponse = {
   ok: boolean
   status: number
@@ -12,7 +14,7 @@ type BodyType = 'json' | 'text'
 export type FlatFetchInit = RequestInit & { responseBodyType?: BodyType }
 
 export async function flatFetch(url: string, init?: FlatFetchInit): Promise<FlatFetchResponse> {
-  const response = await fetch(url, init)
+  const response = await robustFetch(url, init, { label: 'signedFetch' })
   const responseBodyType = init?.responseBodyType || 'text'
   const headers: Record<string, string> = {}
 

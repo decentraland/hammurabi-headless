@@ -11,7 +11,6 @@ import { isValidBillboardCombination } from './logic/billboards'
 import { PBGltfContainer } from '@dcl/protocol/out-js/decentraland/sdk/components/gltf_container.gen'
 import { PBPointerEvents } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events.gen'
 import { PBMeshRenderer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_renderer.gen'
-import { AvatarRenderer } from '../avatars/AvatarRenderer'
 import { StaticEntities } from './logic/static-entities'
 // import { PBDelayedInterpolation } from '@dcl/protocol/out-js/decentraland/sdk/components/delayed_interpolation.gen'
 // import { applyDelayedInterpolation } from './logic/delayed-interpolation'
@@ -49,7 +48,6 @@ export type AppliedComponents = {
     instancedEntries: BABYLON.InstantiatedEntries | null
   }
   pointerEvents: PBPointerEvents
-  avatarRenderer: AvatarRenderer
   avatarBase: PBAvatarBase
   // delayedInterpolation: PBDelayedInterpolation
   tween: PBTween

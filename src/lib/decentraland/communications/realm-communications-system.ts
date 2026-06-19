@@ -1,5 +1,6 @@
 import { AboutResponse } from "@dcl/protocol/out-js/decentraland/realm/about.gen"
 import { Atom } from "../../misc/atom"
+import { robustFetch } from "../../misc/network"
 import { ExplorerIdentity } from "../identity/types"
 import { connectAdapter, connectLocalAdapter } from "./connect-adapter"
 import { connectTransport } from "./connect-transport"
@@ -107,7 +108,7 @@ export async function connectRealm(currentRealm: Atom<CurrentRealm>, realmConnec
   const baseUrl = (await resolveRealmBaseUrl(realmConnectionString)).replace(/\/$/, '')
 
   // fetch the standard /about endpoint for the realm
-  const res = await fetch(baseUrl + '/about')
+  const res = await robustFetch(baseUrl + '/about', {}, { label: 'realm/about' })
   if (res.ok) {
     const aboutResponse = await res.json() as AboutResponse
     const newRealm: CurrentRealm = {

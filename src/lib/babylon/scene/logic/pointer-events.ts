@@ -1,10 +1,7 @@
 import { Matrix, Node, PickingInfo, PointerEventTypes, Ray, Scene, Vector3 } from '@babylonjs/core'
-import * as GUI from '@babylonjs/gui'
 import { BabylonEntity } from '../BabylonEntity'
 import { getColliderLayers } from './colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
-import { memoize } from '../../../misc/memoize'
-import { advancedUiTexture } from '../../visual/ui'
 import { InputAction, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
@@ -19,21 +16,6 @@ let lastPickedEntity: BabylonEntity | null = null
 let lastPickPoint: PickingInfo | null = null
 
 let globalLamportTimestamp = 0
-
-const hoverText = memoize((scene: Scene) => {
-  const text = new GUI.TextBlock("but1", "");
-  text.width = "250px"
-  text.height = "60px";
-  text.color = "white";
-  text.fontSize = 24;
-  text.shadowColor = "black";
-  text.shadowOffsetX = 2;
-  text.shadowOffsetY = 2;
-  text.top = "100px";
-  advancedUiTexture(scene).addControl(text);
-
-  return text
-})
 
 /**
  * This function walks the parents of the provided searchEntity
@@ -113,58 +95,7 @@ function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
     interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.UNRECOGNIZED)
   }
 
-  if (entity) {
-    const instructions: string[] = []
-
-    for (const event of entity.appliedComponents.pointerEvents?.pointerEvents || []) {
-      if (event.eventInfo?.hoverText) {
-
-        let button = '[?]'
-
-        if (event.eventInfo.button === InputAction.IA_PRIMARY) {
-          button = '[E]'
-        } else if (event.eventInfo.button === InputAction.IA_SECONDARY) {
-          button = '[F]'
-        } else if (event.eventInfo.button === InputAction.IA_ACTION_3) {
-          button = '[1]'
-        } else if (event.eventInfo.button === InputAction.IA_ACTION_4) {
-          button = '[2]'
-        } else if (event.eventInfo.button === InputAction.IA_ACTION_5) {
-          button = '[3]'
-        } else if (event.eventInfo.button === InputAction.IA_ACTION_6) {
-          button = '[4]'
-        } else if (event.eventInfo.button === InputAction.IA_FORWARD) {
-          button = '[FORWARD]'
-        } else if (event.eventInfo.button === InputAction.IA_BACKWARD) {
-          button = '[BACKWARD]'
-        } else if (event.eventInfo.button === InputAction.IA_LEFT) {
-          button = '[LEFT]'
-        } else if (event.eventInfo.button === InputAction.IA_RIGHT) {
-          button = '[RIGHT]'
-        } else if (event.eventInfo.button === InputAction.IA_WALK) {
-          button = '[WALK]'
-        } else if (event.eventInfo.button === InputAction.IA_POINTER) {
-          button = '[CLICK]'
-        } else if (event.eventInfo.button === InputAction.IA_JUMP) {
-          button = '[JUMP]'
-        }
-
-        instructions.push(button + ' ' + event.eventInfo?.hoverText)
-      }
-    }
-    if (typeof OffscreenCanvas !== 'undefined') {
-      const label = hoverText(scene)
-
-      label.text = instructions.join('\n')
-      label.isVisible = true
-    }
-  } else {
-    if (typeof OffscreenCanvas !== 'undefined') {
-      const label = hoverText(scene)
-
-      label.isVisible = false
-    }
-  }
+  // headless: no hover-text label UI to update
 }
 
 /**

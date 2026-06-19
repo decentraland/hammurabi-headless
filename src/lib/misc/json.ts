@@ -1,18 +1,9 @@
-import { sleep } from './promises'
+import { robustFetch } from './network'
 
 export async function json<T>(url: string, options: RequestInit = {}, attempts = 3): Promise<T> {
-  try {
-    const resp = await fetch(url, options)
-    if (!resp.ok) {
-      throw new Error(await resp.text())
-    }
-    return resp.json() as Promise<T>
-  } catch (error) {
-    if (attempts > 0) {
-      await sleep(100)
-      return json(url, options, attempts - 1)
-    } else {
-      throw error
-    }
+  const resp = await robustFetch(url, options, { retries: Math.max(1, attempts), label: 'json' })
+  if (!resp.ok) {
+    throw new Error(await resp.text())
   }
+  return resp.json() as Promise<T>
 }

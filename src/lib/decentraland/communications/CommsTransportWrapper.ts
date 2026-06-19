@@ -148,7 +148,6 @@ export class CommsTransportWrapper {
       message = proto.Packet.decode(data).message
     } catch (error: any) {
       commsLogger.error(`Failed to decode packet from ${address}: ${error.message}`)
-      console.log(data)
       return
     }
 

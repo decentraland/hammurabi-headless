@@ -3,7 +3,6 @@ import '@babylonjs/loaders/glTF/2.0/glTFLoader'
 import { setupEnvironment } from './visual/ambientLights'
 import { addGlowLayer } from './visual/glowLayer'
 import { pickPointerEventsMesh } from './scene/logic/pointer-events'
-import { AddButton, guiPanel } from './visual/ui'
 
 export async function initEngine(canvas?: HTMLCanvasElement) {
   let babylon: BABYLON.Engine | BABYLON.WebGPUEngine | BABYLON.NullEngine
@@ -52,14 +51,6 @@ export async function initEngine(canvas?: HTMLCanvasElement) {
     pickPointerEventsMesh(scene)
     scene.cleanCachedTextureBuffer();
   })
-
-  if (typeof OffscreenCanvas !== 'undefined') {
-    const button = AddButton("Open inspector", guiPanel(scene))
-    button.onPointerClickObservable.add(async () => {
-      button.isEnabled = false
-      await scene.debugLayer.show({ showExplorer: true })
-    })
-  }
 
   // this is for debugging purposes
   Object.assign(globalThis, { scene })
