@@ -507,7 +507,7 @@ export class SceneContext implements EngineApiInterface {
     this._transport = transport
 
     // Create avatar communication system for this scene
-    this._avatarSystem = createAvatarCommunicationSystem(transport)
+    this._avatarSystem = createAvatarCommunicationSystem(transport, this)
 
     // Add the avatar system subscription to this scene's subscriptions
     this.subscriptions.push(this._avatarSystem.createSubscription())
