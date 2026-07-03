@@ -11,8 +11,7 @@ import { playerEntityAtom, currentRealm } from '../../../decentraland/state'
 export const StaticEntities = {
   RootEntity: 0 as Entity,
   PlayerEntity: 1 as Entity,
-  CameraEntity: 2 as Entity,
-  GlobalCenterOfCoordinates: 5 as Entity
+  CameraEntity: 2 as Entity
 } as const
 
 export const PLAYER_HEIGHT = 1.7
@@ -85,14 +84,6 @@ export function updateStaticEntities(context: SceneContext) {
       rotation: Quaternion.Identity(),
       parent: StaticEntities.RootEntity
     })
-  if (!Transform.has(StaticEntities.GlobalCenterOfCoordinates))
-    Transform.create(StaticEntities.GlobalCenterOfCoordinates, {
-      position: context.rootNode.position.scale(-1),
-      scale: Vector3.One(),
-      rotation: Quaternion.Identity(),
-      parent: StaticEntities.RootEntity
-    })
-
   // StaticEntities.PlayerEntity
   {
     const playerTransform = Transform.getMutable(StaticEntities.PlayerEntity)
