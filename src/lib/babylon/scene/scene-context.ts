@@ -29,6 +29,7 @@ import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-c
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
 import { StaticEntities, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
 import { engineInfoComponent } from '../../decentraland/sdk-components/engine-info'
 import { gltfContainerLoadingStateComponent } from '../../decentraland/sdk-components/gltf-loading-state'
@@ -171,11 +172,6 @@ export class SceneContext implements EngineApiInterface {
 
       const r = createParcelOutline(babylonScene, this.metadata.scene.base, this.metadata.scene.parcels)
       r.result.parent = this.rootNode
-
-      // position the GlobalCenterOfCoordinates entity
-      const GlobalCenterOfCoordinates = this.getOrCreateEntity(StaticEntities.GlobalCenterOfCoordinates)
-      GlobalCenterOfCoordinates.position.set(-this.rootNode.position.x, 0, -this.rootNode.position.z)
-      GlobalCenterOfCoordinates.parent = this.rootNode
     }
 
     // calculate a naive bounding box for the scene to calculate the distance to the outer bounds
@@ -507,7 +503,7 @@ export class SceneContext implements EngineApiInterface {
     this._transport = transport
 
     // Create avatar communication system for this scene
-    this._avatarSystem = createAvatarCommunicationSystem(transport, this)
+    this._avatarSystem = createAvatarCommunicationSystem(transport, (position) => globalCoordinatesToSceneCoordinates(this, position))
 
     // Add the avatar system subscription to this scene's subscriptions
     this.subscriptions.push(this._avatarSystem.createSubscription())

@@ -10,8 +10,6 @@ import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
 import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
-import { globalCoordinatesToSceneCoordinates } from "../../babylon/scene/coordinates"
-import type { SceneContext } from "../../babylon/scene/scene-context"
 import { playerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
 import { robustFetch } from "../../misc/network"
@@ -20,11 +18,10 @@ import { robustFetch } from "../../misc/network"
  * Single avatar communication system that handles avatar entities for a specific scene transport.
  * This system manages player entities, profiles, and avatar data for multiplayer scenarios.
  *
- * `sceneContext` is used to convert the world/global positions received from comms into
- * scene-relative coordinates, mirroring the conversion done for the local player in
- * `updateStaticEntities` (see `src/lib/babylon/scene/logic/static-entities.ts`).
+ * `worldToScene` converts world/global positions received from comms into the owning scene's
+ * coordinate system, so the Transforms written here are only valid for that scene.
  */
-export function createAvatarCommunicationSystem(transport: CommsTransportWrapper, sceneContext: SceneContext) {
+export function createAvatarCommunicationSystem(transport: CommsTransportWrapper, worldToScene: (position: Vector3) => Vector3) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
   const AvatarEquippedData = createLwwStore(avatarEquippedDataComponent)
@@ -187,16 +184,19 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     }
   }
 
+  const putPlayerTransform = (entity: Entity, data: any, rotation: Quaternion) => {
+    Transform.createOrReplace(entity, {
+      position: worldToScene(new Vector3(data.positionX, data.positionY, data.positionZ)),
+      scale: Vector3.One(),
+      rotation,
+      parent: StaticEntities.RootEntity
+    })
+  }
+
   const handlePosition = (event: { address: string, data: any }) => {
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
-      const globalPosition = new Vector3(event.data.positionX, event.data.positionY, event.data.positionZ)
-      Transform.createOrReplace(entity, {
-        position: globalCoordinatesToSceneCoordinates(sceneContext, globalPosition),
-        scale: Vector3.One(),
-        rotation: new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW),
-        parent: StaticEntities.RootEntity
-      })
+      putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
     }
   }
 
@@ -204,13 +204,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
-      const globalPosition = new Vector3(event.data.positionX, event.data.positionY, event.data.positionZ)
-      Transform.createOrReplace(entity, {
-        position: globalCoordinatesToSceneCoordinates(sceneContext, globalPosition),
-        scale: Vector3.One(),
-        rotation: Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY),
-        parent: StaticEntities.RootEntity
-      })
+      putPlayerTransform(entity, event.data, Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY))
     }
   }
 
