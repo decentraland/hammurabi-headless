@@ -1,9 +1,15 @@
 import { robustFetch } from './network'
 
+// Cap how much of an error body we splice into the thrown Error message, so a
+// large error response can't inflate the exception (which gets logged/serialized).
+const MAX_ERROR_BODY_CHARS = 512
+
 export async function json<T>(url: string, options: RequestInit = {}, attempts = 3): Promise<T> {
   const resp = await robustFetch(url, options, { retries: Math.max(1, attempts), label: 'json' })
   if (!resp.ok) {
-    throw new Error(await resp.text())
+    const body = await resp.text().catch(() => '')
+    const snippet = body.length > MAX_ERROR_BODY_CHARS ? `${body.slice(0, MAX_ERROR_BODY_CHARS)}…` : body
+    throw new Error(`${resp.status} ${resp.statusText} for ${url}: ${snippet}`)
   }
   return resp.json() as Promise<T>
 }

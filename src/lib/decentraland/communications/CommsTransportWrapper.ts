@@ -34,17 +34,43 @@ export type CommsEvents = Pick<CommsTransportEvents, 'DISCONNECTION' | 'PEER_CON
  * to serve as a reference implementation for comss. MinimumCommunicationsTransport can be an IRC
  * server, an echo server, a mocked implementation or WebSocket among many others.
  */
+// Inbound packets come from untrusted remote peers and are decoded in host code.
+// Drop anything larger than this before decoding, and rate-limit per peer so a
+// single peer can't flood the CRDT/profile pipeline.
+const MAX_INBOUND_PACKET_BYTES = 128 * 1024
+const INBOUND_RATE_WINDOW_MS = 1000
+const MAX_MESSAGES_PER_WINDOW = 300 // generous: allows ~30Hz movement + other traffic
+
 export class CommsTransportWrapper {
   readonly events = mitt<CommsEvents>()
   readonly sceneId: string
   public state: RoomConnectionStatus = RoomConnectionStatus.NONE
+
+  // Per-peer fixed-window inbound rate counters (address -> window state).
+  private readonly inboundRate = new Map<string, { windowStart: number; count: number }>()
 
   constructor(private transport: MinimumCommunicationsTransport, sceneId: string) {
     this.sceneId = sceneId
     this.transport.events.on('message', this.handleMessage.bind(this))
     this.transport.events.on('DISCONNECTION', (event) => this.events.emit('DISCONNECTION', event))
     this.transport.events.on('PEER_CONNECTED', (event) => this.events.emit('PEER_CONNECTED', event))
-    this.transport.events.on('PEER_DISCONNECTED', (event) => this.events.emit('PEER_DISCONNECTED', event))
+    this.transport.events.on('PEER_DISCONNECTED', (event) => {
+      this.inboundRate.delete(event.address)
+      this.events.emit('PEER_DISCONNECTED', event)
+    })
+  }
+
+  // Fixed-window rate limit: returns true when the peer has exceeded its quota
+  // for the current window and the message should be dropped.
+  private isRateLimited(address: string): boolean {
+    const now = Date.now()
+    const entry = this.inboundRate.get(address)
+    if (!entry || now - entry.windowStart >= INBOUND_RATE_WINDOW_MS) {
+      this.inboundRate.set(address, { windowStart: now, count: 1 })
+      return false
+    }
+    entry.count++
+    return entry.count > MAX_MESSAGES_PER_WINDOW
   }
 
   async connect(): Promise<void> {
@@ -143,6 +169,17 @@ export class CommsTransportWrapper {
   }
 
   private handleMessage({ data, address }: TransportMessageEvent) {
+    // Rate-limit FIRST so an oversized-packet flood also consumes the peer's
+    // budget (and can't spam the error log below unbounded).
+    if (this.isRateLimited(address)) {
+      return
+    }
+    // Bound untrusted inbound traffic before doing any decode work.
+    if (data.length > MAX_INBOUND_PACKET_BYTES) {
+      commsLogger.error(`Dropping oversized packet from ${address}: ${data.length} bytes`)
+      return
+    }
+
     let message: proto.Packet['message']
     try {
       message = proto.Packet.decode(data).message

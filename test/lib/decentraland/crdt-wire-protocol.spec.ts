@@ -1,6 +1,34 @@
 import { ReadWriteByteBuffer } from '../../../src/lib/decentraland/ByteBuffer'
-import { readMessage, AppendValueOperation, CrdtMessageProtocol, CrdtMessageType, CRDT_MESSAGE_HEADER_LENGTH, DeleteComponent, DeleteEntity, PutComponentMessageBody, PutComponentOperation } from '../../../src/lib/decentraland/crdt-wire-protocol'
+import { readMessage, readAllMessages, AppendValueOperation, CrdtMessageProtocol, CrdtMessageType, CRDT_MESSAGE_HEADER_LENGTH, DeleteComponent, DeleteEntity, PutComponentMessageBody, PutComponentOperation } from '../../../src/lib/decentraland/crdt-wire-protocol'
 import { Entity } from '../../../src/lib/decentraland/types'
+
+describe('readAllMessages hardening against untrusted input', () => {
+  // Regression: an unknown-but-well-formed message type used to make readAllMessages
+  // spin forever (readMessage returns null without consuming), hanging the worker.
+  it('terminates and skips an unknown message type, still yielding following valid messages', () => {
+    const buf = new ReadWriteByteBuffer()
+    // Unknown message: a complete 8-byte header (length=8) with an unknown type.
+    buf.writeUint32(8)
+    buf.writeUint32(99)
+    // A valid APPEND_VALUE message after it.
+    AppendValueOperation.write({ entityId: 1 as Entity, timestamp: 0, componentId: 1, data: Uint8Array.of(1, 2, 3) }, buf)
+
+    const messages = Array.from(readAllMessages(buf))
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0].type).toBe(CrdtMessageType.APPEND_VALUE)
+  })
+
+  it('terminates on a non-advancing (zero-length) unknown message instead of hanging', () => {
+    const buf = new ReadWriteByteBuffer()
+    buf.writeUint32(0) // length 0 — would never advance the read offset
+    buf.writeUint32(99) // unknown type
+
+    const messages = Array.from(readAllMessages(buf))
+
+    expect(messages).toHaveLength(0)
+  })
+})
 
 describe('Component operation tests', () => {
   it('validate corrupt message', () => {
@@ -29,10 +57,23 @@ describe('Component operation tests', () => {
   it('readMessage should return null if the buffer has a valid header with unkown type', () => {
     const buf = new ReadWriteByteBuffer()
 
+    buf.writeUint32(CRDT_MESSAGE_HEADER_LENGTH)
+    buf.writeUint32(99)
+    expect(CrdtMessageProtocol.peekHeader(buf)).toEqual({ length: CRDT_MESSAGE_HEADER_LENGTH, type: 99 })
+    expect(readMessage(buf)).toBe(null)
+  })
+
+  it('rejects a header whose declared length is shorter than the header itself', () => {
+    const buf = new ReadWriteByteBuffer()
+
+    // length = 4 (< 8-byte header) is malformed and must not be framed as a message.
     buf.writeUint32(4)
     buf.writeUint32(99)
-    expect(CrdtMessageProtocol.peekHeader(buf)).toEqual({ length: 4, type: 99 })
-    expect(readMessage(buf)).toBe(null)
+
+    expect(CrdtMessageProtocol.validateFullMessageAvailable(buf)).toBe(false)
+    expect(CrdtMessageProtocol.peekHeader(buf)).toBe(null)
+    expect(readMessage(buf)).toBe(undefined)
+    expect(Array.from(readAllMessages(buf))).toHaveLength(0)
   })
 
   it('appendValue identity test', () => {

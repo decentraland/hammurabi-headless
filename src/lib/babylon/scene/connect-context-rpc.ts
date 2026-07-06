@@ -15,11 +15,24 @@ import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentr
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
 import { Scene } from '@dcl/schemas'
 import { Authenticator } from '@dcl/crypto'
-import { userIdentity, currentRealm } from '../../decentraland/state'
+import { sceneIdentity, currentRealm } from '../../decentraland/state'
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
+import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { StaticEntities } from './logic/static-entities'
+
+// Per-call caps on scene→LiveKit publishing (CommunicationsController.sendBinary).
+// The request is fully scene-controlled; without caps a scene could flood the room.
+const MAX_SEND_PEERS = 256
+const MAX_SEND_MESSAGES = 512
+const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network message limit
+
+// Max redirects a scene SignedFetch will follow. Each hop is re-validated by the
+// SSRF guard so a public host can't 3xx-redirect the request onto a private
+// address (metadata endpoint, loopback admin) — the single-shot guard alone was
+// bypassable because the underlying fetch follows redirects transparently.
+const MAX_SIGNED_FETCH_REDIRECTS = 5
 
 export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
@@ -129,13 +142,23 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     },
     async sendBinary(req, context) {
       if (context.transport) {
-        for (const peerData of req.peerData) {
+        // Bound scene→LiveKit amplification: cap the peers, the total messages,
+        // and per-message size a single call can publish. Everything in `req` is
+        // scene-controlled and would otherwise publish unbounded outbound traffic.
+        // Count every ENTRY examined (including oversized ones we skip) against the
+        // cap so a scene can't force unbounded host iteration with oversized spam.
+        let processed = 0
+        for (const peerData of req.peerData.slice(0, MAX_SEND_PEERS)) {
           for (const data of peerData.data) {
+            if (processed >= MAX_SEND_MESSAGES) break
+            processed++
+            if (data.length > MAX_COMMS_MESSAGE_BYTES) continue
             void context.transport.sendParcelSceneMessage(
               { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
               peerData.address
             )
           }
+          if (processed >= MAX_SEND_MESSAGES) break
         }
       }
       return {
@@ -169,12 +192,13 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
   codegen.registerService(port, UserIdentityServiceDefinition, async () => ({
     async getUserData() {
-      const identity = await userIdentity.deref()
+      // Scene-facing: report the unprivileged guest identity, never the server's.
+      const identity = await sceneIdentity.deref()
 
       return {
         data: {
-          displayName: 'Gues2t',
-          hasConnectedWeb3: !identity.isGuest,
+          displayName: 'Guest',
+          hasConnectedWeb3: false,
           userId: identity.address,
           version: 1,
           avatar: {
@@ -200,7 +224,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       }
     },
     async getUserPublicKey() {
-      const identity = await userIdentity.deref()
+      const identity = await sceneIdentity.deref()
       return {
         address: identity.address
       }
@@ -209,29 +233,61 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
   codegen.registerService(port, SignedFetchServiceDefinition, async () => ({
     async signedFetch(req, context) {
-      const identity = await userIdentity.deref()
+      // Sign with the unprivileged scene identity (never the authoritative
+      // server), and refuse requests to non-public hosts to prevent SSRF.
+      const identity = await sceneIdentity.deref()
       const realm = await currentRealm.deref()
 
+      const metadata = {
+        origin: 'hammurabi-server//',
+        signer: 'dcl:scene-guest',
+        isGuest: true,
+        realm: { serverName: realm.aboutResponse.configurations?.realmName, hostname: realm.baseUrl },
+        realmName: realm.aboutResponse.configurations?.realmName,
+        sceneId: context.loadableScene.urn,
+        parcel: (context.loadableScene.entity.metadata as Scene).scene.base
+      }
+
       try {
-        const result = await signedFetch(
-          req.url,
-          identity.authChain,
-          {
-            method: req.init?.method || 'GET',
-            headers: req.init?.headers || {},
-            body: req.init?.body,
-            responseBodyType: 'text'
-          },
-          {
-            origin: 'hammurabi-server//',
-            signer: 'dcl:authoritative-server',
-            isGuest: false,
-            realm: { serverName: realm.aboutResponse.configurations?.realmName, hostname: realm.baseUrl },
-            realmName: realm.aboutResponse.configurations?.realmName,
-            sceneId: context.loadableScene.urn,
-            parcel: (context.loadableScene.entity.metadata as Scene).scene.base
+        // Follow redirects manually so the SSRF guard runs on EVERY hop and each
+        // hop is re-signed for its own path. Letting fetch auto-follow would skip
+        // the guard on the redirected target.
+        const originalOrigin = new URL(req.url).origin
+        let currentUrl = req.url
+        let result
+
+        for (let hop = 0; ; hop++) {
+          await assertPublicSceneUrl(currentUrl)
+
+          // Only forward scene-supplied headers while on the original origin. On a
+          // cross-origin redirect, drop them (as browsers strip Authorization etc.)
+          // so a redirect can't leak a scene's own header to a third-party host.
+          // The identity/auth headers are re-signed per hop inside signedFetch.
+          const sameOrigin = new URL(currentUrl).origin === originalOrigin
+
+          result = await signedFetch(
+            currentUrl,
+            identity.authChain,
+            {
+              method: req.init?.method || 'GET',
+              headers: sameOrigin ? req.init?.headers || {} : {},
+              body: req.init?.body,
+              responseBodyType: 'text',
+              redirect: 'manual'
+            },
+            metadata
+          )
+
+          const isRedirect = result.status >= 300 && result.status < 400
+          const location = result.headers?.location
+          if (!isRedirect || !location) break
+
+          if (hop >= MAX_SIGNED_FETCH_REDIRECTS) {
+            throw new Error('Blocked scene request: too many redirects')
           }
-        )
+          // Resolve relative Location values against the current URL.
+          currentUrl = new URL(location, currentUrl).toString()
+        }
 
         return {
           ok: result.ok,
@@ -252,7 +308,8 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     },
 
     async getHeaders(req) {
-      const identity = await userIdentity.deref()
+      // Scene-facing: sign with the unprivileged guest identity.
+      const identity = await sceneIdentity.deref()
 
       try {
         const headers = getSignedHeaders(

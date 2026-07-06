@@ -16,6 +16,12 @@ export namespace CrdtMessageProtocol {
     }
 
     const messageLength = buf.getUint32(buf.currentReadOffset())
+    // A declared length shorter than the header itself is malformed (untrusted,
+    // scene-controlled input). Reject it so the reader stops instead of trying to
+    // frame a sub-header-length "message" and mis-parsing the rest of the buffer.
+    if (messageLength < CRDT_MESSAGE_HEADER_LENGTH) {
+      return false
+    }
     if (rem < messageLength) {
       return false
     }

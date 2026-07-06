@@ -41,6 +41,12 @@ const buildWorkerBundle = {
     // Native modules that can't be bundled
     '@livekit/rtc-node',
     '@livekit/rtc-node-*',
+    // QuickJS engine: the quickjs-ng variant loads its .wasm from its own package
+    // dir at runtime, so keep it external (required from node_modules) rather than
+    // inlined — bundling would break the wasm path resolution.
+    'quickjs-emscripten-core',
+    '@jitl/quickjs-ng-wasmfile-release-sync',
+    '@jitl/quickjs-ng-wasmfile-release-sync/*',
     // Any .node files
     '*.node'
   ],

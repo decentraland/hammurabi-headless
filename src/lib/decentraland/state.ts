@@ -14,7 +14,18 @@ export type CurrentRealm = {
   aboutResponse: AboutResponse
 }
 
+// The server's own identity. When the server runs with a private key (an
+// authoritative multiplayer server) this is a PRIVILEGED identity used only for
+// host operations (e.g. obtaining a comms token). It must never be exposed to
+// scene code.
 export const userIdentity = Atom<ExplorerIdentity>()
+
+// A separate, unprivileged guest identity used to satisfy scene-facing APIs
+// (`~system/SignedFetch`, `~system/UserIdentity`). Signing scene requests with
+// this instead of `userIdentity` prevents untrusted scene code from making
+// requests that impersonate the authoritative server.
+export const sceneIdentity = Atom<ExplorerIdentity>()
+
 export const currentRealm = Atom<CurrentRealm>()
 export const selectedInputVoiceDevice = Atom<string>()
 export const voiceChatAvailable = Atom<boolean>()

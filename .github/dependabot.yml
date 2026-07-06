@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Keep dependencies patched — especially the native parsers that process
+  # untrusted scene assets / network data outside the QuickJS sandbox
+  # (@babylonjs/*, @livekit/rtc-node, protobufjs, @dcl/quickjs-emscripten).
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10

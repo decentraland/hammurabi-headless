@@ -17,9 +17,20 @@ export async function createSceneComms(
     sceneId?: string
     isWorld?: boolean
     isLocalhost?: boolean
+    // Pre-minted comms adapter from a trusted parent (authoritative-server flow).
+    commsAdapter?: string
   }
 ) {
   const identity = await userIdentity.deref()
+
+  // Fast path: a trusted parent already performed the comms-gatekeeper handshake
+  // and handed us the adapter. Connect directly — no signed handshake and no
+  // privileged identity is used in this (untrusted) worker.
+  if (options?.commsAdapter) {
+    const transport = connectTransport(options.commsAdapter, identity, scene, options.sceneId ?? 'realm')
+    transport.connect()
+    return transport
+  }
 
   let newAdapter
   if (options?.isLocalhost) {

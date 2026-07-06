@@ -44,6 +44,22 @@ describe('robustFetch', () => {
     expect(calls).toBe(2)
   })
 
+  it('releases the discarded response body when retrying a 5xx (no undici socket leak)', async () => {
+    const seen: Response[] = []
+    mockFetch(async () => {
+      const r = calls <= 1 ? res(503) : res(200)
+      seen.push(r)
+      return r
+    })
+
+    const r = await robustFetch('https://example.test/h', {}, { retries: 2 })
+
+    expect(r.status).toBe(200)
+    // the first (discarded, 503) response body must have been consumed/cancelled
+    expect(seen[0].status).toBe(503)
+    expect(seen[0].bodyUsed).toBe(true)
+  })
+
   it('does NOT retry a 4xx (returns immediately)', async () => {
     mockFetch(async () => res(404))
     const r = await robustFetch('https://example.test/d', {}, { retries: 3 })

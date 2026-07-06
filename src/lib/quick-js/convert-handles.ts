@@ -1,4 +1,4 @@
-import { QuickJSContext, QuickJSHandle } from "@dcl/quickjs-emscripten"
+import { QuickJSContext, QuickJSHandle } from "quickjs-emscripten-core"
 import { MaybeUint8Array } from "./types"
 
 
@@ -71,7 +71,23 @@ export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
   return vm.undefined
 }
 
+// Upper bound on a scene-supplied CRDT payload coerced from a plain object.
+const MAX_COERCED_BYTES = 16 * 1024 * 1024
+
 export function coerceMaybeU8Array(data: MaybeUint8Array): Uint8Array {
   if (data instanceof Uint8Array) return data
-  return new Uint8Array(Object.values(data))
+  // The scene may pass the payload as a plain object (documented fallback). Guard
+  // against null/non-objects (would throw) and cap the size so a scene can't drive
+  // an unbounded host allocation here.
+  if (!data || typeof data !== 'object') return new Uint8Array(0)
+  const keys = Object.keys(data)
+  // Enforce the cap BEFORE allocating the output buffer and filling it.
+  if (keys.length > MAX_COERCED_BYTES) {
+    throw new Error(`CRDT payload too large (${keys.length} bytes)`)
+  }
+  const out = new Uint8Array(keys.length)
+  for (let i = 0; i < keys.length; i++) {
+    out[i] = (data as any)[keys[i]]
+  }
+  return out
 }
