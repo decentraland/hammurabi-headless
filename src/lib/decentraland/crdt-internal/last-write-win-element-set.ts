@@ -19,6 +19,14 @@ export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, numbe
 // component serializers never re-enter this module.
 const serializationScratch = new ReadWriteByteBuffer()
 
+/**
+ * Serializes `value` into the shared scratch buffer and returns a VIEW over the
+ * bytes. The view is only valid until the NEXT call to this function (which
+ * resets and overwrites the same buffer): callers must copy or fully consume the
+ * bytes synchronously before serializing anything else. Every current caller
+ * does — PutComponentOperation.write copies into the out buffer, dataCompare
+ * reads immediately — do NOT stash the return value.
+ */
 function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
   serializationScratch.resetBuffer()
   serde.serialize(value, serializationScratch)

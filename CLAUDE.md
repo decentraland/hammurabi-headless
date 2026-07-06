@@ -98,11 +98,16 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   magnitude slower and silently corrupted nested payloads (empty `sendBinary`).
   The VM-side classifier/wrapper helpers are compiled BEFORE any scene code runs
   and their handles are host-private (never exposed on the VM global), so a
-  scene cannot see or replace what the host calls to read its values; every
-  primordial they touch (brand check via `Object.prototype.toString`, the
-  `%TypedArray%.prototype.buffer` getter) is captured at install time so
-  prototype poisoning can't forge host-side bytes. Per-payload (16MB) and
-  per-value (4096 buffers) caps bound host allocations; these are load-bearing.
+  scene cannot see or replace what the host calls to read its values. Binary
+  detection is the `%TypedArray%.prototype.buffer` getter — an unspoofable
+  internal-slot check (a `Symbol.toStringTag` brand is scene-controllable), and
+  the copy goes through ArrayBuffer/typed-array views only so no scene code runs
+  while marshalling. Every primordial the helpers touch (that buffer getter plus
+  byteOffset/byteLength, `Object.keys`, `Array.isArray`) is captured at install
+  time so prototype poisoning can't forge host-side bytes, and the placeholder
+  that marks an extracted buffer in the dumped tree uses a per-VM random nonce
+  key the scene can't predict or forge. Per-payload (16MB) and per-value (4096
+  buffers) caps bound host allocations; these are load-bearing.
 - **Scene bundle evaluation (`quick-js/rpc-scene-runtime.ts`).** The scene main
   file is evaluated inside a CommonJS-style function wrapper, NOT as a raw global
   script. Reference runtimes do the same and scenes depend on it: a top-level

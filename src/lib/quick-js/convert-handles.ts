@@ -40,7 +40,8 @@ const MAX_MARSHAL_DEPTH = 512
 function buildExtractBinariesSource(nonceKey: string): string {
   return `;(() => {
   const U8 = Uint8Array
-  const AB = ArrayBuffer
+  const ArrayCtor = Array
+  const arrPush = Array.prototype.push
   const getKeys = Object.keys
   const isArray = Array.isArray
   const taProto = Object.getPrototypeOf(Uint8Array.prototype)
@@ -66,14 +67,14 @@ function buildExtractBinariesSource(nonceKey: string): string {
       if (v === null || typeof v !== 'object') return v
       const bytes = copyTypedArrayBytes(v)
       if (bytes !== null) {
-        buffers.push(bufferGetter.call(bytes))
+        arrPush.call(buffers, bufferGetter.call(bytes))
         const ref = {}
         ref[NONCE] = buffers.length - 1
         return ref
       }
       if (depth >= MAX_DEPTH) return v
       if (isArray(v)) {
-        const out = new Array(v.length)
+        const out = new ArrayCtor(v.length)
         for (let i = 0; i < v.length; i++) out[i] = walk(v[i], depth + 1)
         return out
       }

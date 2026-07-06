@@ -106,6 +106,8 @@ describe('QuickJS binary marshalling is tamper-proof', () => {
         try { Object.defineProperty(Uint8Array, Symbol.species, { get() { return function () { return new Uint8Array([9, 9, 9]) } } }) } catch (e) {}
         try { Object.prototype.toString = function () { return '[object Object]' } } catch (e) {}
         try { Array.isArray = function () { return false } } catch (e) {}
+        try { Array.prototype.push = function () { throw new Error('poisoned push') } } catch (e) {}
+        try { globalThis.Array = function () { return { poisoned: true } } } catch (e) {}
         try { Object.keys = function () { return [] } } catch (e) {}
         try { globalThis.isUint8Array = function () { return [9, 9, 9] } } catch (e) {}
       `)

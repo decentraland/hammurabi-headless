@@ -150,10 +150,11 @@ export function createValueSetComponentStore<T, ComponentNumber extends number>(
       return 0
     },
     commitDirtyState() {
-      // GOVS deltas are not tick-tracked (dumpCrdtDeltas is not implemented),
-      // so committing without serializing discards the queued appends.
-      dirtyIterator.clear()
-      queuedCommands.length = 0
+      // GOVS deltas are not tick-tracked (dumpCrdtDeltas is not implemented), so
+      // there is no way to commit dirty state without losing the queued appends.
+      // No caller reaches this today (only LWW stores are delta-synchronized);
+      // throw loudly rather than silently drop data if that ever changes.
+      throw new Error('commitDirtyState is not supported for GrowOnlyValueSet components (no delta channel)')
     },
     updateFromCrdt(body, _conflictResolutionByteBuffer: ByteBuffer) {
       if (body.type === CrdtMessageType.APPEND_VALUE) {

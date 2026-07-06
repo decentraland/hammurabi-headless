@@ -84,6 +84,10 @@ export interface BaseComponent<T> {
    * bookkeeping dumpCrdtUpdates performs, minus writing bytes. For consumers
    * that only read tick-filtered deltas (dumpCrdtDeltas) and would otherwise
    * serialize every update into a throwaway buffer.
+   *
+   * @throws on GrowOnlyValueSet stores: they have no delta channel
+   * (dumpCrdtDeltas is unimplemented), so committing would drop the queued
+   * appends. Only call this on LastWriteWinElementSet stores.
    */
   commitDirtyState(): void
 

@@ -31,7 +31,6 @@ export type AppliedComponents = {
   billboard: PBBillboard
   raycast: {
     value: PBRaycast
-    helper?: BABYLON.RayHelper
     ray: BABYLON.Ray
   }
   meshCollider: {
