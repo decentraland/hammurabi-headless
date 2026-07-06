@@ -37,6 +37,7 @@ export type RunWithVmOptions = {
   provide(opts: ProvideOptions): void
 }
 
-// TODO: This type exists because there is a missing reliable and recursive way to
-// pass Uint8Array as object values from the VM context to the HOST context
+// Binary payloads normally cross the VM boundary as real Uint8Arrays (see
+// convert-handles.ts). This type survives as defense in depth for the documented
+// plain-object fallback a scene may still pass.
 export type MaybeUint8Array = Uint8Array | Record<string, number>

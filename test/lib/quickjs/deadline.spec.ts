@@ -93,21 +93,27 @@ describe('QuickJS per-turn execution deadline', () => {
   })
 })
 
-describe('QuickJS isUint8Array marshalling helper is tamper-proof', () => {
-  it('an untrusted scene cannot replace it to forge host-side bytes', async () => {
+describe('QuickJS binary marshalling is tamper-proof', () => {
+  it('an untrusted scene cannot tamper with prototypes or globals to forge host-side bytes', async () => {
     await withQuickJsVm(async (opts) => {
-      // Sloppy-mode assignment to a non-writable global silently fails; a
-      // non-configurable property also blocks delete / redefine.
+      // The marshalling helpers are host-private (there is no global for the
+      // scene to overwrite) and captured their primordials before any scene code
+      // ran, so poisoning the typed-array prototype chain, brand checks, or
+      // Object/Array statics must not change what the host reads.
       opts.eval(`
+        try { Object.defineProperty(Uint8Array.prototype, 'buffer', { get() { return new ArrayBuffer(3) } }) } catch (e) {}
+        try { Object.getPrototypeOf(Uint8Array.prototype).slice = function () { return new Uint8Array([9, 9, 9]) } } catch (e) {}
+        try { Object.defineProperty(Uint8Array, Symbol.species, { get() { return function () { return new Uint8Array([9, 9, 9]) } } }) } catch (e) {}
+        try { Object.prototype.toString = function () { return '[object Object]' } } catch (e) {}
+        try { Array.isArray = function () { return false } } catch (e) {}
+        try { Object.keys = function () { return [] } } catch (e) {}
         try { globalThis.isUint8Array = function () { return [9, 9, 9] } } catch (e) {}
-        try { delete globalThis.isUint8Array } catch (e) {}
-        try {
-          Object.defineProperty(globalThis, 'isUint8Array', { value: function () { return [9, 9, 9] } })
-        } catch (e) {}
       `)
 
       // The host must still marshal the real bytes, not the attacker's [9,9,9].
       expect(opts.eval(`new Uint8Array([1, 2, 3])`)).toEqual(new Uint8Array([1, 2, 3]))
+      // Nested payloads (the crdtSendToRenderer shape) must survive tampering too.
+      expect(opts.eval(`({ data: new Uint8Array([4, 5, 6]) })`)).toEqual({ data: new Uint8Array([4, 5, 6]) })
     })
   })
 })

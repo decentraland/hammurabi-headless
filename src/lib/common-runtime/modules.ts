@@ -3,6 +3,7 @@
  */
 
 import { EngineApiServiceDefinition, CrdtSendToRendererRequest } from '@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen'
+import { SendBinaryRequest } from '@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen'
 import { TestingServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/testing.gen'
 import { RpcClientPort } from '@dcl/rpc'
 import * as codegen from '@dcl/rpc/dist/codegen'
@@ -17,10 +18,12 @@ import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/
 
 export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
   switch (moduleName) {
-    case '~system/EngineApi':
+    case '~system/EngineApi': {
       const originalService = codegen.loadService(port, EngineApiServiceDefinition)
-      // WARNING: quickJs is not yet capable of handling Uint8Array, so we need to coerce the Uint8Array
-      //          values manually. This is a temporary solution until the proper fix is implemented
+      // Binary payloads normally cross the VM boundary as real Uint8Arrays (see
+      // quick-js/convert-handles.ts). The coercion below is defense in depth for
+      // the documented plain-object fallback: without it, protobuf encodes a
+      // byte-keyed object as an EMPTY payload and the request silently no-ops.
       return {
         ...originalService,
         async isServer() {
@@ -30,11 +33,27 @@ export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
           return await originalService.crdtSendToRenderer({ data: coerceMaybeU8Array(payload.data) })
         }
       }
-      
+    }
     case '~system/Runtime':
       return codegen.loadService(port, RuntimeServiceDefinition)
-    case '~system/CommunicationsController':
-      return codegen.loadService(port, CommunicationsControllerServiceDefinition)
+    case '~system/CommunicationsController': {
+      const commsService = codegen.loadService(port, CommunicationsControllerServiceDefinition)
+      // Same defense-in-depth coercion as crdtSendToRenderer: a plain-object
+      // payload would otherwise protobuf-encode as empty bytes and the message
+      // would be published with no data.
+      return {
+        ...commsService,
+        async sendBinary(payload: SendBinaryRequest) {
+          return await commsService.sendBinary({
+            data: (payload.data ?? []).map(coerceMaybeU8Array),
+            peerData: (payload.peerData ?? []).map((peer) => ({
+              address: peer.address ?? [],
+              data: (peer.data ?? []).map(coerceMaybeU8Array)
+            }))
+          })
+        }
+      }
+    }
     case '~system/UserIdentity':
       return codegen.loadService(port, UserIdentityServiceDefinition)
     case '~system/UserActionModule':
