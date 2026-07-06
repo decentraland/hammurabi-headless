@@ -458,6 +458,13 @@ export class SceneContext implements EngineApiInterface {
       this._avatarSystem = undefined
     }
 
+    // Unsubscribe this context's message-bus handler BEFORE dropping the
+    // transport reference (the transport itself outlives this scene).
+    if (this._transport && this.sceneMessageBusHandler) {
+      this._transport.events.off('sceneMessageBus', this.sceneMessageBusHandler)
+      this.sceneMessageBusHandler = undefined
+    }
+
     // Clear transport reference but DON'T disconnect it.
     // The transport is shared and its lifecycle is managed by the caller (engine-main.ts).
     // This allows the transport to stay connected during hot-reload.
@@ -531,6 +538,10 @@ export class SceneContext implements EngineApiInterface {
   }
 
   private incomingNetworkMessages: Uint8Array[] = []
+  // kept so dispose() can unsubscribe it — without this, every hot reload leaked
+  // a handler that kept filling its dead context's queue (same entityId check
+  // passes for the reloaded scene)
+  private sceneMessageBusHandler?: (event: { address: string; data: { sceneId: string; data: Uint8Array } }) => void
 
   getNetworkMessages(): Uint8Array[] {
     // hand over the array and start a fresh one instead of copying + truncating
@@ -548,11 +559,11 @@ export class SceneContext implements EngineApiInterface {
     // Add the avatar system subscription to this scene's subscriptions
     this.subscriptions.push(this._avatarSystem.createSubscription())
 
-    transport.events.on('sceneMessageBus', (event) => {
+    this.sceneMessageBusHandler = (event) => {
       if (event.data.sceneId === this.entityId) {
         if (event.data.data.byteLength) {
           const [_, data] = decodeMessage(event.data.data)
-          const senderBytes = new TextEncoder().encode(event.address)
+          const senderBytes = textEncoder.encode(event.address)
           // The sender length is framed in a single byte; a peer-controlled
           // identity longer than that would wrap and corrupt the framing scene
           // code parses, so drop it.
@@ -570,9 +581,12 @@ export class SceneContext implements EngineApiInterface {
           }
         }
       }
-    })
+    }
+    transport.events.on('sceneMessageBus', this.sceneMessageBusHandler)
   }
 }
+
+const textEncoder = new TextEncoder()
 
 /**
  * MsgType utils to diff between old string messages, and new uint8Array messages.

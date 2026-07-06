@@ -103,13 +103,28 @@ export class AssetManager {
 
   dispose() {
     for (const [hash, model] of Array.from(this.models.entries())) {
-      model.then((container) => {
-        /// TODO: this line should not be commented, but there is a bug in Babylon.js that
-        /// breaks the shared glTF materials when disposing the assetContainer. We will sacrifice
-        /// GPU memory for now until the bug is fixed.
-        // container.dispose()
-      })
+      // Containers MUST be disposed: their constructor registers observers on the
+      // long-lived scene AND engine (onDispose / onContextRestored) that close
+      // over the container, so an undisposed container — with all its template
+      // meshes, CPU vertex data, materials and textures — is pinned for the life
+      // of the process. Every hot reload / scene switch leaked a full copy of
+      // every model. Safe to dispose here because SceneContext.dispose() removes
+      // all entities (and their instantiated entries) BEFORE disposing this
+      // AssetManager, so no live instance references container resources anymore.
+      model
+        .then((container) => container.dispose())
+        .catch(() => {
+          // the load failed; there is nothing to dispose (the failure was
+          // already logged by the sentinel handler at load time)
+        })
       this.models.delete(hash)
+    }
+    // Drop this scene's file-resolver entry so the map doesn't grow one key per
+    // scene load for the life of the process. Guarded so a hot reload that
+    // already registered a NEW context under the same urn is not clobbered.
+    const registered = sceneContextMap.get(this.loadableScene.urn)
+    if (registered?.deref() === this.loadableScene) {
+      sceneContextMap.delete(this.loadableScene.urn)
     }
   }
 }
@@ -232,7 +247,13 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
 const tmpVector = new BABYLON.Vector3()
 
 export function instantiateAssetContainer(assetContainer: BABYLON.AssetContainer, parentNode: BABYLON.TransformNode, entity: BabylonEntity): BABYLON.InstantiatedEntries {
-  const instances = assetContainer.instantiateModelsToScene(name => name, true)
+  // cloneMaterials MUST stay false: with true, every instantiation clones every
+  // material into scene.materials, and InstantiatedEntries.dispose() does NOT
+  // dispose materials — a scene spawning/despawning GltfContainers grew host
+  // memory and the scene.materials array without bound. Headless there is no
+  // per-instance visual state, so instances share the container's (frozen)
+  // source materials, which are disposed with the container.
+  const instances = assetContainer.instantiateModelsToScene(name => name, false)
 
   for (let node of instances.rootNodes) {
     // reparent the root node inside the entity

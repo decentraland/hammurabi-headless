@@ -162,7 +162,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   function removePlayerEntity(entity: Entity, address: string) {
     for (const component of listOfComponentsToSynchronize) {
-      component.entityDeleted(entity, true)
+      // purge (not just delete): peer entity ids are generationally versioned so
+      // this id never comes back, these stores receive no remote CRDT updates
+      // (they are only written from transport events), and the removal is
+      // signaled to consumers via DELETE_ENTITY below. Keeping timestamps/tick
+      // entries would grow every map by one entry per departed peer forever —
+      // and dumpCrdtDeltas scans those maps every scene tick. (The
+      // DELETE_COMPONENT deltas this used to emit were dropped by consumers
+      // anyway: the scene context tombstones the entity on DELETE_ENTITY.)
+      component.purgeEntity(entity)
     }
 
     // Track this entity for DELETE_ENTITY message, evicting the oldest tombstone

@@ -104,6 +104,10 @@ export function createValueSetComponentStore<T, ComponentNumber extends number>(
     entityDeleted(entity: Entity): void {
       data.delete(entity)
     },
+    purgeEntity(entity: Entity): void {
+      data.delete(entity)
+      dirtyIterator.delete(entity)
+    },
     get(entity: Entity): ReadonlySet<T> {
       const values = data.get(entity)
       if (values) {

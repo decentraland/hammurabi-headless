@@ -96,6 +96,18 @@ export interface BaseComponent<T> {
   entityDeleted(entity: Entity, markAsDirty: boolean): void
 
   /**
+   * Irreversibly forgets ALL bookkeeping (value, dirty flag, Lamport timestamp,
+   * tick mark) for an entity that can never be referenced again (its
+   * generationally-versioned id is retired). Unlike entityDeleted, no
+   * synchronization message is produced and stale-update protection for the id
+   * is dropped — only use it when entity removal is signaled out-of-band (e.g.
+   * DELETE_ENTITY) and the store never receives remote CRDT updates for the id
+   * again. Without purging, long-lived stores grow one timestamp + tick entry
+   * per departed entity forever, and delta dumps scan them on every call.
+   */
+  purgeEntity(entity: Entity): void
+
+  /**
    * Get if the entity has this component
    * @param entity - entity to test
    */

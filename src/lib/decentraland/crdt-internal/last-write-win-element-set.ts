@@ -215,6 +215,12 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
         dirtyIterator.add(entity)
       }
     },
+    purgeEntity(entity: Entity): void {
+      data.delete(entity)
+      dirtyIterator.delete(entity)
+      timestamps.delete(entity)
+      updatedAtTick.delete(entity)
+    },
     getOrNull(entity: Entity): Readonly<T> | null {
       return data.get(entity) ?? null
     },
