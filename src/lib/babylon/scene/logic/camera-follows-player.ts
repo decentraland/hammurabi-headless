@@ -4,23 +4,41 @@ import { CharacterController } from "../../avatars/CharacterController";
 import { BabylonEntity } from "../BabylonEntity";
 import { Transform, applyNewTransform, transformComponent } from "../../../decentraland/sdk-components/transform-component";
 
+// Reused per-frame temporaries (single-threaded). CAMERA_TARGET_OFFSET is
+// read-only: it only feeds addToRef.
+const tmpCapsulePosition = new Vector3()
+const CAMERA_TARGET_OFFSET = new Vector3(0, PLAYER_HEIGHT, 0)
+
 export function createCameraFollowsPlayerSystem(camera: ArcRotateCamera, playerEntity: BabylonEntity, characterController: CharacterController) {
 
   // this function updates the PlayerEntity position using the CharacterController.capsule's position
   function updatePlayerEntityPositionFromCapsule(playerEntity: BabylonEntity, capsule: TransformNode) {
-    const pos = capsule.absolutePosition.clone()
-    pos.y -= 1 // don't know why
+    tmpCapsulePosition.copyFrom(capsule.absolutePosition)
+    tmpCapsulePosition.y -= 1 // don't know why
+
+    const localAvatarScene = playerEntity.context.deref()!
+    const store = localAvatarScene.components[transformComponent.componentId]
+
+    // Only write (dirty + re-serialize + re-send) when the player actually
+    // moved. The stored transform owns copies of the capsule state, never
+    // references to the live Babylon objects.
+    const current = store.get(StaticEntities.PlayerEntity)
+    if (
+      current &&
+      current.position.equals(tmpCapsulePosition) &&
+      current.rotation.equals(capsule.absoluteRotationQuaternion)
+    ) {
+      return
+    }
 
     const t: Transform = {
       parent: StaticEntities.RootEntity,
-      position: pos,
-      rotation: capsule.absoluteRotationQuaternion,
+      position: tmpCapsulePosition.clone(),
+      rotation: capsule.absoluteRotationQuaternion.clone(),
       scale: Vector3.One(),
     }
 
-    const localAvatarScene = playerEntity.context.deref()!
-
-    localAvatarScene.components[transformComponent.componentId].createOrReplace(StaticEntities.PlayerEntity, t)
+    store.createOrReplace(StaticEntities.PlayerEntity, t)
     applyNewTransform(playerEntity, t)
   }
 
@@ -34,7 +52,7 @@ export function createCameraFollowsPlayerSystem(camera: ArcRotateCamera, playerE
       const playerVisible = !characterController.inFirstPerson
 
       playerEntity.setEnabled(playerVisible)
-      playerEntity.absolutePosition.addToRef(new Vector3(0, PLAYER_HEIGHT, 0), camera.target);
+      playerEntity.absolutePosition.addToRef(CAMERA_TARGET_OFFSET, camera.target);
     }
   }
 }

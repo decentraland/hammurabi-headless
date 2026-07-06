@@ -1,7 +1,7 @@
 import { Vector3, Quaternion } from '@babylonjs/core'
 import { transformComponent } from '../../../decentraland/sdk-components/transform-component'
 import type { SceneContext } from '../scene-context'
-import { globalCoordinatesToSceneCoordinates } from '../coordinates'
+import { globalCoordinatesToSceneCoordinatesToRef } from '../coordinates'
 import { Entity } from '../../../decentraland/types'
 import { engineInfoComponent } from '../../../decentraland/sdk-components/engine-info'
 import { realmInfoComponent } from '../../../decentraland/sdk-components/realm-info'
@@ -17,6 +17,13 @@ export const StaticEntities = {
 export const PLAYER_HEIGHT = 1.7
 export const MAX_RESERVED_ENTITY = 512
 export const AVATAR_ENTITY_RANGE: [number, number] = [128, MAX_RESERVED_ENTITY]
+
+// Reused temporaries for the per-frame static-entity update (single-threaded).
+// The read-only constants are never mutated — they only feed copyFrom/compares.
+const tmpPosition = new Vector3()
+const tmpRotation = new Quaternion()
+const READONLY_ZERO = Vector3.Zero()
+const READONLY_IDENTITY = Quaternion.Identity()
 
 // this function defines if the engine should accept updates to the entity by its
 // entity number
@@ -61,10 +68,15 @@ export function updateStaticEntities(context: SceneContext) {
         isConnectedSceneRoom: roomInfo?.isConnected
       })
     } else {
-      const realmInfoData = RealmInfo.getMutable(StaticEntities.RootEntity)
-      // Update dynamic fields that can change at runtime
-      realmInfoData.room = roomInfo?.roomName
-      realmInfoData.isConnectedSceneRoom = roomInfo?.isConnected
+      // Only mark dirty when a dynamic field actually changed: getMutable
+      // unconditionally re-serializes and re-sends the whole component
+      // (including its URL strings) to the scene every tick otherwise.
+      const current = RealmInfo.getOrNull(StaticEntities.RootEntity)!
+      if (current.room !== roomInfo?.roomName || current.isConnectedSceneRoom !== roomInfo?.isConnected) {
+        const realmInfoData = RealmInfo.getMutable(StaticEntities.RootEntity)
+        realmInfoData.room = roomInfo?.roomName
+        realmInfoData.isConnectedSceneRoom = roomInfo?.isConnected
+      }
     }
   }
 
@@ -86,25 +98,45 @@ export function updateStaticEntities(context: SceneContext) {
     })
   // StaticEntities.PlayerEntity
   {
-    const playerTransform = Transform.getMutable(StaticEntities.PlayerEntity)
-
     const player = playerEntityAtom.getOrNull()
 
-    // convert the camera position to scene-space coordinates
-    playerTransform.position = globalCoordinatesToSceneCoordinates(context, player?.absolutePosition ?? Vector3.Zero())
-    playerTransform.rotation = player?.absoluteRotationQuaternion ?? Quaternion.Identity()
+    // convert the player position to scene-space coordinates (into a reused temp)
+    globalCoordinatesToSceneCoordinatesToRef(context, player?.absolutePosition ?? READONLY_ZERO, tmpPosition)
+    const rotation = player?.absoluteRotationQuaternion ?? READONLY_IDENTITY
+
+    // Only dirty (re-serialize + re-send) the transform when it actually moved.
+    // The stored vectors are copies (copyFrom), never references to live Babylon
+    // objects — aliasing a live object would make this comparison see no change.
+    const playerTransform = Transform.get(StaticEntities.PlayerEntity)!
+    if (!playerTransform.position.equals(tmpPosition) || !playerTransform.rotation.equals(rotation)) {
+      const mutable = Transform.getMutable(StaticEntities.PlayerEntity)
+      mutable.position.copyFrom(tmpPosition)
+      mutable.rotation.copyFrom(rotation)
+    }
   }
 
   // StaticEntities.CameraEntity
   {
     const engineCamera = context.babylonScene.activeCamera
-    const cameraTransform = Transform.getMutable(StaticEntities.CameraEntity)
+    if (engineCamera) {
+      engineCamera.getWorldMatrix().decompose(undefined, tmpRotation, tmpPosition)
 
-    engineCamera?.getWorldMatrix().decompose(undefined, cameraTransform.rotation, cameraTransform.position)
+      // convert the camera position to scene-space coordinates
+      globalCoordinatesToSceneCoordinatesToRef(context, tmpPosition, tmpPosition)
 
-    // convert the camera position to scene-space coordinates
-    cameraTransform.position = globalCoordinatesToSceneCoordinates(context, cameraTransform.position)
-
-    cameraTransform.scale.setAll(1)
+      const cameraTransform = Transform.get(StaticEntities.CameraEntity)!
+      if (
+        !cameraTransform.position.equals(tmpPosition) ||
+        !cameraTransform.rotation.equals(tmpRotation) ||
+        cameraTransform.scale.x !== 1 ||
+        cameraTransform.scale.y !== 1 ||
+        cameraTransform.scale.z !== 1
+      ) {
+        const mutable = Transform.getMutable(StaticEntities.CameraEntity)
+        mutable.position.copyFrom(tmpPosition)
+        mutable.rotation.copyFrom(tmpRotation)
+        mutable.scale.setAll(1)
+      }
+    }
   }
 }
