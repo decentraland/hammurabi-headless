@@ -10,7 +10,6 @@ import { createSceneCullingSystem } from './babylon/scene/scene-culling'
 import { createSceneTickSystem } from './babylon/scene/update-scheduler'
 import { createCharacterControllerSystem } from './babylon/avatars/CharacterController'
 import { createCameraFollowsPlayerSystem } from './babylon/scene/logic/camera-follows-player'
-import { createCameraObstructionSystem } from './babylon/scene/logic/hide-camera-obstuction-system'
 import { createLocalAvatarSceneSystem } from './babylon/scene/logic/local-avatar-scene'
 import { createSceneComms } from './decentraland/communications/scene-comms'
 import { commsLogger } from './decentraland/communications/types'
@@ -23,8 +22,8 @@ import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, play
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
-// we only spend ONE millisecond per frame procesing messages from scenes,
-// it is a conservative number but we want to prioritize CPU time for rendering
+// per-frame budget for processing messages from scenes. headless there is no
+// GPU work to prioritize, so scenes get a generous slice of the frame
 const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = 10
 
 import { DclEnvironment } from './decentraland/environment'
@@ -139,7 +138,10 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   const sceneTickSystem = createSceneTickSystem(scene, () => loadedScenesByEntityId.values(), MS_PER_FRAME_PROCESSING_SCENE_MESSAGES)
   const localAvatarSceneSystem = await createLocalAvatarSceneSystem(scene, avatar)
   const cameraFollowsPlayerSystem = createCameraFollowsPlayerSystem(characterControllerSystem.camera, localAvatarSceneSystem.playerEntity, characterControllerSystem)
-  const cameraObstructionSystem = createCameraObstructionSystem(scene, characterControllerSystem.camera)
+  // NOTE: no camera-obstruction system on the headless server. It ran a
+  // multiPickWithRay over every physics collider every frame to "elastically"
+  // move a camera that nobody renders — its only observable effect was a
+  // slightly different camera transform reported to scenes.
 
   // Use player entity atom if it exists
   if (typeof playerEntityAtom !== 'undefined') {
@@ -151,8 +153,7 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
     sceneCullingSystem,
     characterControllerSystem,
     localAvatarSceneSystem,
-    cameraFollowsPlayerSystem,
-    cameraObstructionSystem
+    cameraFollowsPlayerSystem
   )
 
   const sceneContext: Atom<SceneContext> = Atom()

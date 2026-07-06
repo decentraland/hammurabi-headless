@@ -267,7 +267,10 @@ export function instantiateAssetContainer(assetContainer: BABYLON.AssetContainer
         enumerable: true,
         configurable: true,
         get() {
-          return !entity.context.deref()?.rootNode.isEnabled || (mesh._masterMesh !== null && mesh._masterMesh !== undefined)
+          // isEnabled is a METHOD — referencing it as a property is always
+          // truthy, which made this override (and the isInFrustum early-out
+          // below) never cull anything when the scene root was disabled.
+          return !entity.context.deref()?.rootNode.isEnabled() || (mesh._masterMesh !== null && mesh._masterMesh !== undefined)
         },
       })
 
@@ -283,10 +286,12 @@ export function instantiateAssetContainer(assetContainer: BABYLON.AssetContainer
        * or are too small based on the distance to the camera.
        */
       mesh.isInFrustum = function (this: BABYLON.AbstractMesh, frustumPlanes: BABYLON.Plane[]): boolean {
-        if (!entity.context.deref()?.rootNode.isEnabled) return false
+        if (!entity.context.deref()?.rootNode.isEnabled()) return false
 
         if (this.absolutePosition) {
-          const distanceToObject = tmpVector.copyFrom(this.absolutePosition).subtract(this.getScene().activeCamera!.position).length()
+          // subtractInPlace: .subtract() allocated a fresh Vector3 per mesh per
+          // frame, defeating the tmpVector reuse
+          const distanceToObject = tmpVector.copyFrom(this.absolutePosition).subtractInPlace(this.getScene().activeCamera!.position).length()
 
           // cull out elements farther than 300meters
           if (distanceToObject > 300)

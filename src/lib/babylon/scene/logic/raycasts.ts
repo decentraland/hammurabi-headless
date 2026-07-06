@@ -161,7 +161,6 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
  * Converts a result of a raycast (PickingInfo) into a RaycastHit of the Decentraland Protocol
  */
 export function pickingToRaycastHit(scene: SceneContext, pickingInfo: BABYLON.PickingInfo, ray: BABYLON.Ray): RaycastHit {
-  if (!pickingInfo.pickedPoint) debugger
   return {
     normalHit: pickingInfo.getNormal(true) || undefined,
     direction: ray.direction,

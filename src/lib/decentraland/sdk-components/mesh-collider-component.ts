@@ -1,9 +1,18 @@
 import { declareComponentUsingProtobufJs } from "./pb-based-component-helper";
 import { ColliderLayer, PBMeshCollider } from "@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen";
 import { ComponentType } from "../crdt-internal/components";
-import { MeshBuilder } from '@babylonjs/core';
+import { MeshBuilder, Scene } from '@babylonjs/core';
 import { setColliderMask } from "../../babylon/scene/logic/colliders";
+import { memoize } from "../../misc/memoize";
 
+// template collider box, cloned per entity so all collider boxes share one
+// geometry instead of building fresh vertex buffers per put (same pattern as
+// mesh-renderer-component's baseBox)
+const baseColliderBox = memoize((scene: Scene) => {
+  const ret = MeshBuilder.CreateBox('base-box_collider', { updatable: false }, scene)
+  ret.setEnabled(false)
+  return ret
+})
 
 // TODO: this component is a stub that will be replaced by the real implementation later in a dedicated PR
 export const meshColliderComponent = declareComponentUsingProtobufJs(PBMeshCollider, 1019, (entity, componentStorage) => {
@@ -24,17 +33,16 @@ export const meshColliderComponent = declareComponentUsingProtobufJs(PBMeshColli
   }
 
   if (isAddingNewValue || isReplacingValue) {
-    // create a box and attach it to an entity
-    const baseBox = MeshBuilder.CreateBox('box_collider', {
-      updatable: false,
-    })
+    // clone the shared template box (clones share geometry) and attach it to the entity
+    const colliderBox = baseColliderBox(entity.getScene()).clone('box_collider', entity)
+    colliderBox.setEnabled(true)
 
     const DEFAULT_COLLIDER_LAYERS = ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
-    setColliderMask(baseBox, newValue?.collisionMask ?? DEFAULT_COLLIDER_LAYERS)
-    baseBox.parent = entity
+    setColliderMask(colliderBox, newValue?.collisionMask ?? DEFAULT_COLLIDER_LAYERS)
+    colliderBox.parent = entity
 
     entity.appliedComponents.meshCollider = {
-      collider: baseBox,
+      collider: colliderBox,
       info: newValue!
     }
   }

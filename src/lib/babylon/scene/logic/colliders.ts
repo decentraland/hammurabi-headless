@@ -47,8 +47,10 @@ export function setColliderMask(mesh: AbstractMesh, layers: number) {
 }
 
 function addFloorMesh(mesh: AbstractMesh) {
+  // add only when NOT already present (the previous inverted check meant no
+  // collider mesh was ever added — only the ambient ground reached the list)
   const ix = floorMeshes.indexOf(mesh)
-  if (ix !== -1) {
+  if (ix === -1) {
     floorMeshes.push(mesh)
   }
 }
