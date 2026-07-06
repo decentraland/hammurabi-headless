@@ -160,6 +160,30 @@ describe('scene runtime end-to-end (QuickJS + RPC, fully in-memory)', () => {
     ])
   })
 
+  it('evaluates the bundle in a module scope: top-level var does not collide with a globalThis flag', async () => {
+    // Regression: the SDK's message-bus-sync declares
+    //   var DEBUG_NETWORK_MESSAGES = () => globalThis.DEBUG_NETWORK_MESSAGES ?? false
+    // and scenes enable debug logging with `globalThis.DEBUG_NETWORK_MESSAGES = true`.
+    // When the bundle was evaluated as a raw global script the var landed on
+    // globalThis, the flag assignment overwrote the function, and the next call
+    // crashed the scene with "not a function" (seen live with Tower of Madness on
+    // player join). Reference runtimes evaluate scenes in a function scope.
+    const source = `
+      var DEBUG_NETWORK_MESSAGES = () => globalThis.DEBUG_NETWORK_MESSAGES ?? false
+      globalThis.DEBUG_NETWORK_MESSAGES = true
+      module.exports.onStart = async function () {
+        console.log('flagIsBoolean', typeof globalThis.DEBUG_NETWORK_MESSAGES)
+        console.log('debugEnabled', DEBUG_NETWORK_MESSAGES())
+      }
+      module.exports.onUpdate = async function () {}
+    `
+
+    const { logs, errors } = await runScene(source)
+
+    expect(errors).toEqual([])
+    expect(logs).toEqual(['flagIsBoolean', 'boolean', 'debugEnabled', true])
+  })
+
   it('keeps the sandbox closed for untrusted scene code driven through the runtime', async () => {
     const source = `
       module.exports.onStart = async function () {
