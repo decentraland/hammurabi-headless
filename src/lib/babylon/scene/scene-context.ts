@@ -432,6 +432,12 @@ export class SceneContext implements EngineApiInterface {
       this.outgoingMessagesBuffer.incrementReadOffset(-this.outgoingMessagesBuffer.currentReadOffset())
     }
 
+    // TIMING HAZARD: outMessages holds toBinary() VIEWS into subscriptionsBuffer
+    // and outgoingMessagesBuffer, whose write offsets were just reset for reuse.
+    // This is safe ONLY because the futures resolved below are consumed (RPC
+    // protobuf-encodes, i.e. copies, the bytes) on a microtask before the next
+    // frame writes into these buffers. If that scheduling ever changes, switch
+    // to toCopiedBinary() here.
     // finally resolve the future so the function "receiveBatch" is unblocked
     // and the next scripting frame is allowed to happen
     this.nextFrameFutures.forEach((fut) => fut.resolve({ data: outMessages }))
