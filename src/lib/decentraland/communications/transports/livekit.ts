@@ -89,8 +89,8 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
     }
 
     if (data.length > MAXIMUM_NETWORK_MSG_LENGTH) {
-      const message = proto.Packet.decode(data)
-      commsLogger.error('Skipping big message over comms', message)
+      // don't decode the packet just to log it — report size and drop
+      commsLogger.error(`Skipping big message over comms (${data.length} bytes)`)
       return
     }
 

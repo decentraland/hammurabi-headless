@@ -51,10 +51,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     return address.toLowerCase()
   }
 
-  function allFinite(...values: any[]): boolean {
-    return values.every((v) => typeof v === 'number' && Number.isFinite(v))
-  }
-
   async function fetchProfileFromCatalyst(address: string, _lambdasEndpoint?: string): Promise<any> {
     try {
       const response = await robustFetch(`${getAssetBundleRegistryUrl()}/profiles`, {
@@ -241,9 +237,14 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     }
   }
 
+  // reused input temp: worldToScene produces the (fresh) vector the store
+  // retains; this only avoids the second, intermediate allocation per packet
+  const tmpWorldPosition = new Vector3()
+
   const putPlayerTransform = (entity: Entity, data: any, rotation: Quaternion) => {
+    tmpWorldPosition.set(data.positionX, data.positionY, data.positionZ)
     Transform.createOrReplace(entity, {
-      position: worldToScene(new Vector3(data.positionX, data.positionY, data.positionZ)),
+      position: worldToScene(tmpWorldPosition),
       scale: Vector3.One(),
       rotation,
       parent: StaticEntities.RootEntity
@@ -254,7 +255,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     const d = event.data
     // Reject non-finite coordinates from untrusted peers before they poison the
     // scene's transform state (NaN/Infinity propagate through Babylon math).
-    if (!allFinite(d.positionX, d.positionY, d.positionZ, d.rotationX, d.rotationY, d.rotationZ, d.rotationW)) return
+    // Inlined checks: a rest-args helper allocated an array per packet.
+    if (
+      !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
+      !Number.isFinite(d.rotationX) || !Number.isFinite(d.rotationY) || !Number.isFinite(d.rotationZ) ||
+      !Number.isFinite(d.rotationW)
+    ) return
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
       putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
@@ -263,7 +269,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   const handleMovement = (event: { address: string, data: any }) => {
     const d = event.data
-    if (!allFinite(d.positionX, d.positionY, d.positionZ, d.rotationY)) return
+    if (
+      !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
+      !Number.isFinite(d.rotationY)
+    ) return
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
@@ -283,8 +292,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   const handleChatMessage = (event: { address: string, data: any }) => {
-    const address = normalizeAddress(event.address)
-    const _cached = profileCache.get(address)
     findPlayerEntityByAddress(event.address, true)
   }
 
