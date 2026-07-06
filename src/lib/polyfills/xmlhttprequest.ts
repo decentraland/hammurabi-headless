@@ -19,6 +19,11 @@ export function setupXMLHttpRequestPolyfill() {
   const MAX_ATTEMPTS = 2
   const backoffMs = (attempt: number) => Math.min(250 * 2 ** (attempt - 1), 2000)
 
+  // Per-request start/success logs are opt-in: a Genesis City scene load makes
+  // hundreds of requests, each log line being a synchronous stdout write.
+  // Errors and timeouts are always logged.
+  const XHR_DEBUG = !!process.env.HAMMURABI_XHR_DEBUG
+
   // Cap the response body size. Scene assets (glTF/GLB) are fetched through this
   // polyfill and handed to Babylon's NATIVE glTF parser, which runs outside the
   // QuickJS sandbox. Bounding the bytes limits both worker-heap exhaustion and the
@@ -86,7 +91,7 @@ export function setupXMLHttpRequestPolyfill() {
       const attempt = (n: number) => {
         const t0 = Date.now()
         let sizeExceeded = false
-        console.log(`[XHR] #${id} → ${this.method} ${this.url}${n > 1 ? ` (retry ${n}/${MAX_ATTEMPTS})` : ''}`)
+        if (XHR_DEBUG) console.log(`[XHR] #${id} → ${this.method} ${this.url}${n > 1 ? ` (retry ${n}/${MAX_ATTEMPTS})` : ''}`)
 
         const req = client.request(options, (res: any) => {
           this.status = res.statusCode
@@ -124,13 +129,20 @@ export function setupXMLHttpRequestPolyfill() {
             const buffer = Buffer.concat(chunks)
 
             if (this.responseType === 'arraybuffer') {
-              this.response = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+              // Buffer.concat already allocated a fresh buffer. Whenever it owns
+              // its whole ArrayBuffer (any response larger than Node's small
+              // allocation pool), hand that ArrayBuffer over directly instead of
+              // copying the entire asset a second time.
+              this.response =
+                buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength
+                  ? buffer.buffer
+                  : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
             } else {
               this.responseText = buffer.toString('utf8')
               this.response = this.responseText
             }
 
-            console.log(`[XHR] #${id} ✓ ${res.statusCode} ${this.method} ${this.url} (${buffer.length}b in ${Date.now() - t0}ms)`)
+            if (XHR_DEBUG) console.log(`[XHR] #${id} ✓ ${res.statusCode} ${this.method} ${this.url} (${buffer.length}b in ${Date.now() - t0}ms)`)
             this.readyState = 4
             this._setReadyState(4)
             this._triggerLoad()

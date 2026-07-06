@@ -132,7 +132,9 @@ export class AssetManager {
 BABYLON.SceneLoader.OnPluginActivatedObservable.add(function (plugin) {
   if (plugin instanceof GLTFFileLoader) {
     plugin.animationStartMode = GLTFLoaderAnimationStartMode.NONE
-    plugin.compileMaterials = true
+    // no shader compilation on a NullEngine: effects are stubs, so
+    // forceCompilationAsync per material x mesh is pure load-time overhead
+    plugin.compileMaterials = false
     plugin.validate = false
     plugin.createInstances = true
     plugin.animationStartMode = 0
@@ -173,12 +175,23 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
   // by default, the models will be added to the scene at 0,0,0. We will remove that instance
   assetContainer.removeAllFromScene()
 
+  // Set-based dedupe: Array.includes inside the per-mesh/per-submesh loops was
+  // O(n²) on large models (load-time only, but large scenes have thousands of
+  // submeshes)
+  const knownGeometries = new Set(assetContainer.geometries)
+  const knownMaterials = new Set(assetContainer.materials)
+
+  function registerGeometry(geometry: BABYLON.Geometry) {
+    if (!knownGeometries.has(geometry)) {
+      knownGeometries.add(geometry)
+      assetContainer.geometries.push(geometry)
+    }
+  }
+
   // keep track of every generated mes and submesh
   assetContainer.meshes.forEach((mesh) => {
     if (mesh instanceof BABYLON.Mesh) {
-      if (mesh.geometry && !assetContainer.geometries.includes(mesh.geometry)) {
-        assetContainer.geometries.push(mesh.geometry)
-      }
+      if (mesh.geometry) registerGeometry(mesh.geometry)
     }
 
     if (mesh.subMeshes) {
@@ -188,9 +201,7 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
 
         const mesh = subMesh.getMesh()
         if (mesh instanceof BABYLON.Mesh) {
-          if (mesh.geometry && !assetContainer.geometries.includes(mesh.geometry)) {
-            assetContainer.geometries.push(mesh.geometry)
-          }
+          if (mesh.geometry) registerGeometry(mesh.geometry)
         }
       })
     }
@@ -198,10 +209,9 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
     // Find all the materials from all the meshes and add to $.materials
     mesh.cullingStrategy = BABYLON.AbstractMesh.CULLINGSTRATEGY_BOUNDINGSPHERE_ONLY
 
-    if (mesh.material) {
-      if (!assetContainer.materials.includes(mesh.material)) {
-        assetContainer.materials.push(mesh.material)
-      }
+    if (mesh.material && !knownMaterials.has(mesh.material)) {
+      knownMaterials.add(mesh.material)
+      assetContainer.materials.push(mesh.material)
     }
 
     if (mesh.name.endsWith('_collider')) {
@@ -213,13 +223,15 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
 
   // Find the textures in the materials that share the same domain as the context
   // then add the textures to the $.textures
+  const knownTextures = new Set(assetContainer.textures)
   assetContainer.materials.forEach((material: BABYLON.Material | BABYLON.PBRMaterial) => {
     // register all textures for the scene
     for (let i in material) {
       const t = (material as any)[i]
 
       if (i.endsWith('Texture') && t instanceof BABYLON.Texture) {
-        if (!assetContainer.textures.includes(t)) {
+        if (!knownTextures.has(t)) {
+          knownTextures.add(t)
           assetContainer.textures.push(t)
         }
       }
