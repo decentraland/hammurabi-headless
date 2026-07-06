@@ -17,14 +17,16 @@ export function readMessage(buf: ByteBuffer): CrdtMessage | null | undefined {
   const header = CrdtMessageProtocol.peekHeader(buf)
   if (!header) return undefined
 
+  // Pass the peeked header down so the type-specific readers don't re-validate
+  // and re-read it (this loop runs for every message of every frame).
   if (header.type === CrdtMessageType.PUT_COMPONENT) {
-    return PutComponentOperation.read(buf)
+    return PutComponentOperation.read(buf, header)
   } else if (header.type === CrdtMessageType.DELETE_COMPONENT) {
-    return DeleteComponent.read(buf)
+    return DeleteComponent.read(buf, header)
   } else if (header.type === CrdtMessageType.APPEND_VALUE) {
-    return AppendValueOperation.read(buf)
+    return AppendValueOperation.read(buf, header)
   } else if (header.type === CrdtMessageType.DELETE_ENTITY) {
-    return DeleteEntity.read(buf)
+    return DeleteEntity.read(buf, header)
   }
 
   return null

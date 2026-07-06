@@ -1,6 +1,12 @@
 import { CrdtMessageProtocol } from './crdtMessageProtocol'
 import { ByteBuffer } from '../ByteBuffer'
-import { AppendValueMessage, AppendValueMessageBody, CrdtMessageType, CRDT_MESSAGE_HEADER_LENGTH } from './types'
+import {
+  AppendValueMessage,
+  AppendValueMessageBody,
+  CrdtMessageType,
+  CrdtMessageHeader,
+  CRDT_MESSAGE_HEADER_LENGTH
+} from './types'
 import { Entity } from '../types'
 
 /**
@@ -30,12 +36,18 @@ export namespace AppendValueOperation {
     buf.writeBuffer(message.data, false)
   }
 
-  export function read(buf: ByteBuffer): AppendValueMessage | null {
-    const header = CrdtMessageProtocol.readHeader(buf)
-
-    /* istanbul ignore if */
-    if (!header) {
-      return null
+  /** See PutComponentOperation.read for the peekedHeader contract. */
+  export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): AppendValueMessage | null {
+    let header = peekedHeader
+    if (header) {
+      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
+    } else {
+      const readHeader = CrdtMessageProtocol.readHeader(buf)
+      /* istanbul ignore if */
+      if (!readHeader) {
+        return null
+      }
+      header = readHeader
     }
 
     /* istanbul ignore if */
@@ -44,7 +56,8 @@ export namespace AppendValueOperation {
     }
 
     return {
-      ...header,
+      length: header.length,
+      type: CrdtMessageType.APPEND_VALUE,
       entityId: buf.readUint32() as Entity,
       componentId: buf.readUint32(),
       timestamp: buf.readUint32(),

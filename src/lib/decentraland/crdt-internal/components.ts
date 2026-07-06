@@ -71,12 +71,21 @@ export interface BaseComponent<T> {
    * This function writes CRDT updates into a outBuffer filtering by the updates with
    * a tick greater than the one provided. It returns the biggest tick written
    * to the buffer.
-   * 
+   *
    * WARNING! this function ignores the dirty state. To commit the dirty state please first call
-   * dumpCrdtUpdates. That will increase the counters for each dirty entity and will allow
-   * this function to filter by tick.
+   * dumpCrdtUpdates (or commitDirtyState). That will increase the counters for each dirty entity
+   * and will allow this function to filter by tick.
    */
   dumpCrdtDeltas(outBuffer: ByteBuffer, fromTick: number): number
+
+  /**
+   * Advances the internal tick and per-entity timestamps for every dirty entity
+   * and clears the dirty state WITHOUT serializing values — exactly the
+   * bookkeeping dumpCrdtUpdates performs, minus writing bytes. For consumers
+   * that only read tick-filtered deltas (dumpCrdtDeltas) and would otherwise
+   * serialize every update into a throwaway buffer.
+   */
+  commitDirtyState(): void
 
   /**
    * Marks the entity as deleted and signals it cannot be used ever again. It must

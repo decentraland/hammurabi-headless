@@ -1,6 +1,10 @@
 import { Writer } from "protobufjs/minimal"
 import { ApplyComponentOperation, ComponentDeclaration } from "../crdt-internal/components"
 
+// One writer reused for every component serialization (single-threaded; encode()
+// is self-contained and finish() detaches the output before the next reset).
+const sharedWriter = new Writer()
+
 /**
  * This function creates a serializer and deserializer based on a Protobufjs type
  */
@@ -15,9 +19,9 @@ export function declareComponentUsingProtobufJs<T, Num extends number>(protobufT
       return protobufType.decode(buffer.toBinary())
     },
     serialize(value, buffer) {
-      const writer = new Writer()
-      protobufType.encode(value, writer)
-      buffer.writeBuffer(writer.finish(), false)
+      sharedWriter.reset()
+      protobufType.encode(value, sharedWriter)
+      buffer.writeBuffer(sharedWriter.finish(), false)
     },
   }
 }

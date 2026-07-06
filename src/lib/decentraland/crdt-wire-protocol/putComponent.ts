@@ -1,6 +1,12 @@
 import { CrdtMessageProtocol } from './crdtMessageProtocol'
 import { ByteBuffer } from '../ByteBuffer'
-import { CrdtMessageType, CRDT_MESSAGE_HEADER_LENGTH, PutComponentMessage, PutComponentMessageBody } from './types'
+import {
+  CrdtMessageType,
+  CrdtMessageHeader,
+  CRDT_MESSAGE_HEADER_LENGTH,
+  PutComponentMessage,
+  PutComponentMessageBody
+} from './types'
 import { Entity } from '../types'
 
 /**
@@ -30,11 +36,20 @@ export namespace PutComponentOperation {
     buf.writeBuffer(message.data, false)
   }
 
-  export function read(buf: ByteBuffer): PutComponentMessage | null {
-    const header = CrdtMessageProtocol.readHeader(buf)
-
-    if (!header) {
-      return null
+  /**
+   * @param peekedHeader - a header already peeked (validated, not consumed) by
+   * the caller, so the hot read loop validates each message exactly once.
+   */
+  export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): PutComponentMessage | null {
+    let header = peekedHeader
+    if (header) {
+      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
+    } else {
+      const readHeader = CrdtMessageProtocol.readHeader(buf)
+      if (!readHeader) {
+        return null
+      }
+      header = readHeader
     }
 
     if (header.type !== CrdtMessageType.PUT_COMPONENT) {
@@ -42,7 +57,8 @@ export namespace PutComponentOperation {
     }
 
     return {
-      ...header,
+      length: header.length,
+      type: CrdtMessageType.PUT_COMPONENT,
       entityId: buf.readUint32() as Entity,
       componentId: buf.readUint32(),
       timestamp: buf.readUint32(),

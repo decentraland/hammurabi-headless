@@ -296,10 +296,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // Update function to be called each frame
     update() {
       currentTick++
-      const updates = new ReadWriteByteBuffer()
       for (const component of listOfComponentsToSynchronize) {
-        // Commit updates and clean dirty iterators
-        component.dumpCrdtUpdates(updates)
+        // Advance ticks/timestamps and clear the dirty state; serialization
+        // happens per-subscription in getUpdates (dumpCrdtDeltas). This
+        // previously serialized every dirty component into a throwaway buffer
+        // allocated every frame.
+        component.commitDirtyState()
       }
     },
 

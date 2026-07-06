@@ -142,6 +142,10 @@ export class SceneContext implements EngineApiInterface {
     [realmInfoComponent.componentId]: createLwwStore(realmInfoComponent)
   } as const
 
+  // cached because lateUpdate iterates the components every frame and
+  // Object.values allocates a fresh array per call
+  private readonly componentList = Object.values(this.components)
+
   // this flag is changed every time an entity changed its parent. the change
   // in the hierarchy is not immediately applied, instead, it should be queued
   // in the unparentedEntities set. Once there, at the end of the "tick", the
@@ -402,7 +406,7 @@ export class SceneContext implements EngineApiInterface {
     this.updateStaticEntities()
 
     // write all the CRDT updates in the outgoingMessagesBuffer
-    for (const component of Object.values(this.components)) {
+    for (const component of this.componentList) {
       component.dumpCrdtUpdates(this.outgoingMessagesBuffer)
     }
 
@@ -529,8 +533,9 @@ export class SceneContext implements EngineApiInterface {
   private incomingNetworkMessages: Uint8Array[] = []
 
   getNetworkMessages(): Uint8Array[] {
-    const messages = [...this.incomingNetworkMessages]
-    this.incomingNetworkMessages.length = 0
+    // hand over the array and start a fresh one instead of copying + truncating
+    const messages = this.incomingNetworkMessages
+    this.incomingNetworkMessages = []
     return messages
   }
 

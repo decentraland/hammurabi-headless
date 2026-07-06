@@ -1,6 +1,12 @@
 import { CrdtMessageProtocol } from './crdtMessageProtocol'
 import { ByteBuffer } from '../ByteBuffer'
-import { CrdtMessageType, CRDT_MESSAGE_HEADER_LENGTH, DeleteEntityMessage, DeleteEntityMessageBody } from './types'
+import {
+  CrdtMessageType,
+  CrdtMessageHeader,
+  CRDT_MESSAGE_HEADER_LENGTH,
+  DeleteEntityMessage,
+  DeleteEntityMessageBody
+} from './types'
 import { Entity } from '../types'
 
 /**
@@ -18,10 +24,17 @@ export namespace DeleteEntity {
     buf.writeUint32(message.entityId)
   }
 
-  export function read(buf: ByteBuffer): DeleteEntityMessage | null {
-    const header = CrdtMessageProtocol.readHeader(buf)
-    if (!header) {
-      return null
+  /** See PutComponentOperation.read for the peekedHeader contract. */
+  export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): DeleteEntityMessage | null {
+    let header = peekedHeader
+    if (header) {
+      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
+    } else {
+      const readHeader = CrdtMessageProtocol.readHeader(buf)
+      if (!readHeader) {
+        return null
+      }
+      header = readHeader
     }
 
     if (header.type !== CrdtMessageType.DELETE_ENTITY) {
@@ -29,7 +42,8 @@ export namespace DeleteEntity {
     }
 
     return {
-      ...header,
+      length: header.length,
+      type: CrdtMessageType.DELETE_ENTITY,
       entityId: buf.readUint32() as Entity
     }
   }
