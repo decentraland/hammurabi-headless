@@ -89,6 +89,15 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   helper is installed non-writable/non-configurable so a scene can't replace it to
   forge host-side bytes; `require()` results are cached so repeated calls don't
   leak host handles; VM teardown always disposes even if job-draining times out.
+- **Scene bundle evaluation (`quick-js/rpc-scene-runtime.ts`).** The scene main
+  file is evaluated inside a CommonJS-style function wrapper, NOT as a raw global
+  script. Reference runtimes do the same and scenes depend on it: a top-level
+  `var` in the bundle must not become a `globalThis` property (e.g. the SDK's
+  `var DEBUG_NETWORK_MESSAGES = () => globalThis.DEBUG_NETWORK_MESSAGES ?? false`
+  vs. the documented `globalThis.DEBUG_NETWORK_MESSAGES = true` debug flag —
+  global-scope eval lets the flag overwrite the function and the scene crashes
+  with "not a function" when a player joins). The wrapper is single-line so
+  bundle stack-trace line numbers are preserved.
 - Scene assets can only be fetched from the scene's own content manifest
   (`baseUrl + content-hash`); arbitrary-URL/host asset fetches are not possible,
   and only the glTF/GLB loader is registered.

@@ -26,7 +26,20 @@ export async function startQuickJsSceneRuntime(port: RpcClientPort, options: Rpc
     })
 
     const decoder = new TextDecoder()
-    await opts.eval(decoder.decode(mainFile.content), mainFileName)
+    // Evaluate the scene bundle inside a CommonJS-style function scope instead of
+    // as a raw global script. Reference runtimes (scene-runtime, explorers) do the
+    // same, and scenes depend on those semantics: a top-level `var` in the bundle
+    // must NOT become a globalThis property. Example that crashes otherwise: the
+    // SDK declares `var DEBUG_NETWORK_MESSAGES = () => globalThis.DEBUG_NETWORK_MESSAGES ?? false`
+    // and scenes enable debugging via `globalThis.DEBUG_NETWORK_MESSAGES = true` —
+    // at global scope that assignment overwrites the SDK's function and the next
+    // call throws "not a function". The wrapper stays on one line so the bundle's
+    // stack-trace line numbers are preserved.
+    const sceneCode = decoder.decode(mainFile.content)
+    await opts.eval(
+      `;(function (module, exports) { ${sceneCode}\n}).call(module.exports, module, module.exports);`,
+      mainFileName
+    )
 
     await options.updateLoop({ ...opts, isRunning: () => (port.state === 'open') })
   })
