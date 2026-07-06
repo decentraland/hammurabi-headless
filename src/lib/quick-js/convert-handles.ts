@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto"
 import { QuickJSContext, QuickJSHandle, Scope } from "quickjs-emscripten-core"
 import { MaybeUint8Array } from "./types"
 
@@ -8,41 +9,67 @@ const MAX_COERCED_BYTES = 16 * 1024 * 1024
 // Upper bound on how many binary payloads one value crossing the boundary may
 // contain (sendBinary batches many small messages; anything past this is abuse).
 const MAX_MARSHAL_BUFFERS = 4096
-// Placeholder key the VM-side extractor uses to mark where a Uint8Array was
-// lifted out of the value tree. Host side re-injects the real bytes at these
-// spots after dumping the (now binary-free) tree as JSON.
-const U8_REF_KEY = '__hostU8Ref__'
+// Max object/array nesting the extractor descends before giving up on a value.
+// Doubles as cycle protection. A (real, but pathologically deep) Uint8Array past
+// this depth is left in the tree and dumped as a byte-keyed object; that is
+// slower but still correct — the downstream coercion (coerceMaybeU8Array) turns
+// it back into bytes — so this only ever costs performance, never correctness.
+const MAX_MARSHAL_DEPTH = 512
 
 /**
- * VM-side classifier: walks a value, copies every Uint8Array it contains into a
- * fresh ArrayBuffer (collected into `buffers`) and replaces it with a
- * `{ __hostU8Ref__: n }` placeholder. Returns `false` when the value contains no
- * binary data at all (the host then falls back to a plain `vm.dump`).
+ * Builds the VM-side classifier source. It walks a value, copies every typed
+ * array it contains into a fresh ArrayBuffer (collected into `buffers`) and
+ * replaces it with a `{ [nonceKey]: n }` placeholder. Returns `false` when the
+ * value contains no binary data at all (the host then falls back to a plain
+ * `vm.dump`).
  *
  * Untrusted scene code never gets a reference to this function — the host holds
- * the only handle (see installMarshalHelpers) — and every primordial it relies
- * on (Object.prototype.toString brand check, the %TypedArray%.prototype.buffer
- * getter, Object.keys, Array.isArray) is captured BEFORE any scene code runs, so
- * a scene cannot tamper with prototypes to forge what the host reads.
+ * the only handle (see installMarshalHelpers). Every primordial it relies on
+ * (the %TypedArray%.prototype buffer/byteOffset/byteLength getters, Object.keys,
+ * Array.isArray) is captured BEFORE any scene code runs, so a scene cannot tamper
+ * with prototypes to forge what the host reads. Binary detection uses the
+ * %TypedArray% buffer getter (an internal-slot check that throws for non-typed
+ * arrays) rather than a spoofable `Object.prototype.toString` brand — so a plain
+ * object cannot masquerade as a typed array, and no scene-controlled code (an
+ * array-like `Symbol.iterator`/getter path) is ever invoked while copying.
+ *
+ * `nonceKey` is a per-VM random string embedded here and known only to the host,
+ * so a scene cannot hand-craft a `{ [nonceKey]: n }` object that the host would
+ * mistake for an extracted-buffer placeholder.
  */
-const EXTRACT_BINARIES_SOURCE = `;(() => {
+function buildExtractBinariesSource(nonceKey: string): string {
+  return `;(() => {
   const U8 = Uint8Array
-  const tag = Object.prototype.toString
+  const AB = ArrayBuffer
   const getKeys = Object.keys
   const isArray = Array.isArray
-  const bufferGetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'buffer').get
-  const MAX_DEPTH = 64
+  const taProto = Object.getPrototypeOf(Uint8Array.prototype)
+  const bufferGetter = Object.getOwnPropertyDescriptor(taProto, 'buffer').get
+  const byteOffsetGetter = Object.getOwnPropertyDescriptor(taProto, 'byteOffset').get
+  const byteLengthGetter = Object.getOwnPropertyDescriptor(taProto, 'byteLength').get
+  const NONCE = ${JSON.stringify(nonceKey)}
+  const MAX_DEPTH = ${MAX_MARSHAL_DEPTH}
+  // Returns a tightly-sized copy of a typed array's bytes, or null if v is not a
+  // real typed array. The buffer getter throws (internal-slot check) on anything
+  // that only looks like one, and every step below (ArrayBuffer + integer view,
+  // typed-array-to-typed-array copy) uses internal slots — no scene code runs.
+  const copyTypedArrayBytes = (v) => {
+    let backing
+    try { backing = bufferGetter.call(v) } catch (e) { return null }
+    const view = new U8(backing, byteOffsetGetter.call(v), byteLengthGetter.call(v))
+    return new U8(view)
+  }
   return (value) => {
     if (value === null || typeof value !== 'object') return false
     const buffers = []
     const walk = (v, depth) => {
       if (v === null || typeof v !== 'object') return v
-      if (tag.call(v) === '[object Uint8Array]') {
-        // new Uint8Array(typedArray) copies via internal slots (no user code, no
-        // species constructor), yielding a tightly-sized buffer at offset 0.
-        const copy = new U8(v)
-        buffers.push(bufferGetter.call(copy))
-        return { ${U8_REF_KEY}: buffers.length - 1 }
+      const bytes = copyTypedArrayBytes(v)
+      if (bytes !== null) {
+        buffers.push(bufferGetter.call(bytes))
+        const ref = {}
+        ref[NONCE] = buffers.length - 1
+        return ref
       }
       if (depth >= MAX_DEPTH) return v
       if (isArray(v)) {
@@ -59,10 +86,12 @@ const EXTRACT_BINARIES_SOURCE = `;(() => {
     return buffers.length === 0 ? false : { tree, buffers }
   }
 })()`
+}
 
 type MarshalHelpers = {
   extractBinaries: QuickJSHandle
   wrapBytes: QuickJSHandle
+  nonceKey: string
 }
 
 const marshalHelpers = new WeakMap<QuickJSContext, MarshalHelpers>()
@@ -74,9 +103,12 @@ const marshalHelpers = new WeakMap<QuickJSContext, MarshalHelpers>()
  * the VM global object), so scene code cannot see or replace them.
  */
 export function installMarshalHelpers(vm: QuickJSContext) {
-  const extractBinaries = vm.unwrapResult(vm.evalCode(EXTRACT_BINARIES_SOURCE, 'hostExtractBinaries.js'))
+  // Per-VM random placeholder key. Unpredictable to the scene, so it cannot forge
+  // an extracted-buffer placeholder (see reinjectBinaries).
+  const nonceKey = '__hostU8Ref_' + randomBytes(16).toString('hex') + '__'
+  const extractBinaries = vm.unwrapResult(vm.evalCode(buildExtractBinariesSource(nonceKey), 'hostExtractBinaries.js'))
   const wrapBytes = vm.unwrapResult(vm.evalCode('(ab) => new Uint8Array(ab)', 'hostWrapBytes.js'))
-  marshalHelpers.set(vm, { extractBinaries, wrapBytes })
+  marshalHelpers.set(vm, { extractBinaries, wrapBytes, nonceKey })
 }
 
 /** Disposes the cached helper handles. Must run before `vm.dispose()`. */
@@ -98,39 +130,43 @@ export function disposeMarshalHelpers(vm: QuickJSContext) {
  * measured 3 orders of magnitude slower for CRDT-sized payloads.
  */
 export function dumpAndDispose(vm: QuickJSContext, val: QuickJSHandle) {
-  // Primitives can't contain binary payloads: dump them straight away instead of
-  // paying a VM call to classify every string/number that crosses the boundary.
-  if (vm.typeof(val) === 'object') {
-    const helpers = marshalHelpers.get(vm)
-    if (helpers) {
-      const callResult = vm.callFunction(helpers.extractBinaries, vm.undefined, val)
-      if ('error' in callResult && callResult.error) {
-        // Classifier failed (e.g. detached buffer): fall through to plain dump,
-        // which preserves today's behavior for exotic values.
-        callResult.error.dispose()
-      } else {
-        const extracted = vm.unwrapResult(callResult)
-        try {
-          // The extractor returns `false` (typeof boolean) when there is no
-          // binary data anywhere in the value.
-          if (vm.typeof(extracted) === 'object') {
-            const value = readExtractedBinaries(vm, extracted)
-            val.dispose()
-            return value
+  // Dispose `val` on every exit — including when readExtractedBinaries throws on
+  // a hostile value (over-cap buffer count/size). A leaked handle would make
+  // vm.dispose() throw at teardown and mask the real error.
+  try {
+    // Primitives can't contain binary payloads: dump them straight away instead
+    // of paying a VM call to classify every string/number that crosses the
+    // boundary.
+    if (vm.typeof(val) === 'object') {
+      const helpers = marshalHelpers.get(vm)
+      if (helpers) {
+        const callResult = vm.callFunction(helpers.extractBinaries, vm.undefined, val)
+        if ('error' in callResult && callResult.error) {
+          // Classifier failed (e.g. detached buffer): fall through to plain dump,
+          // which preserves today's behavior for exotic values.
+          callResult.error.dispose()
+        } else {
+          const extracted = vm.unwrapResult(callResult)
+          try {
+            // The extractor returns `false` (typeof boolean) when there is no
+            // binary data anywhere in the value.
+            if (vm.typeof(extracted) === 'object') {
+              return readExtractedBinaries(vm, extracted, helpers.nonceKey)
+            }
+          } finally {
+            extracted.dispose()
           }
-        } finally {
-          extracted.dispose()
         }
       }
     }
+    return vm.dump(val)
+  } finally {
+    val.dispose()
   }
-  const ret = vm.dump(val)
-  val.dispose()
-  return ret
 }
 
 /** Reads `{ tree, buffers }` produced by the VM-side extractor. */
-function readExtractedBinaries(vm: QuickJSContext, extracted: QuickJSHandle): any {
+function readExtractedBinaries(vm: QuickJSContext, extracted: QuickJSHandle, nonceKey: string): any {
   const buffers: Uint8Array[] = []
   Scope.withScope((scope) => {
     const buffersHandle = scope.manage(vm.getProp(extracted, 'buffers'))
@@ -153,21 +189,21 @@ function readExtractedBinaries(vm: QuickJSContext, extracted: QuickJSHandle): an
     }
   })
   const tree = vm.getProp(extracted, 'tree').consume((h) => vm.dump(h))
-  return reinjectBinaries(tree, buffers)
+  return reinjectBinaries(tree, buffers, nonceKey)
 }
 
-/** Replaces `{ __hostU8Ref__: n }` placeholders in the dumped tree with the real bytes. */
-function reinjectBinaries(node: any, buffers: Uint8Array[]): any {
+/** Replaces `{ [nonceKey]: n }` placeholders in the dumped tree with the real bytes. */
+function reinjectBinaries(node: any, buffers: Uint8Array[], nonceKey: string): any {
   if (node === null || typeof node !== 'object') return node
-  if (typeof node[U8_REF_KEY] === 'number' && Object.keys(node).length === 1) {
-    return buffers[node[U8_REF_KEY]] ?? new Uint8Array(0)
+  if (typeof node[nonceKey] === 'number' && Object.keys(node).length === 1) {
+    return buffers[node[nonceKey]] ?? new Uint8Array(0)
   }
   if (Array.isArray(node)) {
-    for (let i = 0; i < node.length; i++) node[i] = reinjectBinaries(node[i], buffers)
+    for (let i = 0; i < node.length; i++) node[i] = reinjectBinaries(node[i], buffers, nonceKey)
     return node
   }
   for (const key of Object.keys(node)) {
-    node[key] = reinjectBinaries(node[key], buffers)
+    node[key] = reinjectBinaries(node[key], buffers, nonceKey)
   }
   return node
 }

@@ -116,4 +116,48 @@ describe('QuickJS binary marshalling is tamper-proof', () => {
       expect(opts.eval(`({ data: new Uint8Array([4, 5, 6]) })`)).toEqual({ data: new Uint8Array([4, 5, 6]) })
     })
   })
+
+  it('a plain object cannot masquerade as a Uint8Array via Symbol.toStringTag', async () => {
+    await withQuickJsVm(async (opts) => {
+      // Detection uses the %TypedArray% buffer getter (an internal-slot check),
+      // NOT Object.prototype.toString, so an object merely LABELED Uint8Array is
+      // not treated as binary — and its array-like getters/iterator are never
+      // invoked while copying. It marshals as an ordinary object instead.
+      const out = opts.eval(`({
+        [Symbol.toStringTag]: 'Uint8Array',
+        get 0() { throw new Error('scene getter must not run during marshalling') },
+        length: 3
+      })`)
+      expect(out).not.toBeInstanceOf(Uint8Array)
+    })
+  })
+
+  it('a scene cannot forge an extracted-buffer placeholder to corrupt a sibling value', async () => {
+    await withQuickJsVm(async (opts) => {
+      // The placeholder key is a per-VM random nonce the scene cannot predict, so
+      // a literal object shaped like the (old, fixed) sentinel is passed through
+      // verbatim even when a real Uint8Array elsewhere triggers extraction.
+      const out: any = opts.eval(`({
+        real: new Uint8Array([1, 2, 3]),
+        fake: { __hostU8Ref__: 0 }
+      })`)
+      expect(out.real).toEqual(new Uint8Array([1, 2, 3]))
+      expect(out.fake).toEqual({ __hostU8Ref__: 0 })
+    })
+  })
+
+  it('marshals a deeply nested Uint8Array without silent corruption', async () => {
+    await withQuickJsVm(async (opts) => {
+      const out: any = opts.eval(`
+        (() => {
+          let node = { data: new Uint8Array([7, 7, 7]) }
+          for (let i = 0; i < 40; i++) node = { child: node }
+          return node
+        })()
+      `)
+      let cursor = out
+      for (let i = 0; i < 40; i++) cursor = cursor.child
+      expect(cursor.data).toEqual(new Uint8Array([7, 7, 7]))
+    })
+  })
 })
