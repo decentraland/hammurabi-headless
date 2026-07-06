@@ -415,7 +415,13 @@ export class SceneContext implements EngineApiInterface {
       subscription.getUpdates(this.subscriptionsBuffer)
 
       if (this.subscriptionsBuffer.currentWriteOffset()) {
-        const binary = this.subscriptionsBuffer.toBinary()
+        // COPY, not a view: subscriptionsBuffer is shared across subscriptions and
+        // reset+rewritten in place on the NEXT loop iteration, which would clobber
+        // this subscription's still-referenced bytes (both the outMessages entry
+        // and the incomingMessages buffer below) before they are consumed. Unlike
+        // outgoingMessagesBuffer (a single view consumed on a microtask), this one
+        // is reused synchronously within the same frame.
+        const binary = this.subscriptionsBuffer.toCopiedBinary()
         // send the messages from the subscriptions to the scenes
         outMessages.push(binary)
         // auto process the messages from the subscriptions
