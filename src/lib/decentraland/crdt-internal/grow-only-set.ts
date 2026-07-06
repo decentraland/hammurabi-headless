@@ -17,7 +17,9 @@ function freezeSet<T>(set: Set<T>): ReadonlySet<T> {
 const emptyReadonlySet = freezeSet(new Set())
 
 function sortByTimestamp(a: { timestamp: number }, b: { timestamp: number }) {
-  return a.timestamp > b.timestamp ? 1 : -1
+  // Return 0 for equal timestamps (the previous `? 1 : -1` never returned 0,
+  // giving an inconsistent comparator that reorders equal-timestamp entries).
+  return a.timestamp - b.timestamp
 }
 
 /**

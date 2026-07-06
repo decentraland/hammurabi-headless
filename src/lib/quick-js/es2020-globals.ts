@@ -1,0 +1,66 @@
+/**
+ * The set of standard ES2020 globals that a scene runtime is expected to expose.
+ * QuickJS provides all of these natively inside its sandbox, so scene code has a
+ * complete standard library WITHOUT any access to host (Node) globals such as
+ * `process`, `require`, or the host `Function`/`eval`.
+ *
+ * Kept as a checked list so `test/lib/runtime/quick-js-globals.spec.ts` can
+ * assert the QuickJS context really does provide them.
+ */
+export const allowListES2020: Array<keyof typeof globalThis> = [
+  'Array',
+  'ArrayBuffer',
+  'BigInt',
+  'BigInt64Array',
+  'BigUint64Array',
+  'Boolean',
+  'DataView',
+  'Date',
+  'decodeURI',
+  'decodeURIComponent',
+  'encodeURI',
+  'encodeURIComponent',
+  'Error',
+  'escape',
+  'eval',
+  'EvalError',
+  'Float32Array',
+  'Float64Array',
+  'Function',
+  'globalThis',
+  'Infinity',
+  'Int16Array',
+  'Int32Array',
+  'Int8Array',
+  'isFinite',
+  'isNaN',
+  'JSON',
+  'Map',
+  'Math',
+  'NaN',
+  'Number',
+  'Object',
+  'parseFloat',
+  'parseInt',
+  'Promise',
+  'Proxy',
+  'RangeError',
+  'ReferenceError',
+  'Reflect',
+  'RegExp',
+  'Set',
+  'SharedArrayBuffer',
+  'String',
+  'Symbol',
+  'SyntaxError',
+  'TypeError',
+  'Uint16Array',
+  'Uint32Array',
+  'Uint8Array',
+  'Uint8ClampedArray',
+  'undefined',
+  'unescape',
+  'URIError',
+  'WeakMap',
+  'WeakSet'
+]

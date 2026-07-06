@@ -32,6 +32,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fail on high/critical advisories in RUNTIME deps — these are the native
+      # parsers that handle untrusted scene assets / network data.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Build project
         run: npm run build
 

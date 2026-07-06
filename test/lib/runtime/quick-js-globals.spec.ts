@@ -1,10 +1,14 @@
 
-import { getQuickJS } from "@dcl/quickjs-emscripten"
+import { newQuickJSWASMModuleFromVariant } from "quickjs-emscripten-core"
+import { quickJsVariant } from "../../../src/lib/quick-js/variant"
 import future from 'fp-future'
-import { allowListES2020 } from "../../../src/lib/web-worker-runtime/sandbox"
+import { allowListES2020 } from "../../../src/lib/quick-js/es2020-globals"
+
+let modulePromise: ReturnType<typeof newQuickJSWASMModuleFromVariant> | undefined
+const getModule = () => (modulePromise ??= newQuickJSWASMModuleFromVariant(quickJsVariant))
 
 async function evaluate(code: string) {
-  const QuickJS = await getQuickJS()
+  const QuickJS = await getModule()
   const vm = QuickJS.newContext()
   const fut = future<any[]>()
 

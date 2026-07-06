@@ -46,7 +46,52 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 **Scene Runtime (`src/lib/babylon/scene/`)**
 - `SceneContext`: Central state manager for CRDT messages and entity lifecycle
 - `BabylonEntity`: Component-based wrapper around Babylon.js objects
-- In-process WebWorker using QuickJS with MemoryTransport (no actual worker threads)
+- Scene code runs inside a **QuickJS (WASM) sandbox** (`src/lib/quick-js/`),
+  communicating with the host only over `@dcl/rpc` on a `MemoryTransport`. This
+  is the security boundary: scene code is untrusted (authored by scene
+  deployers) and the QuickJS interpreter gives it no access to Node globals
+  (`process`, `require`, host `Function`/`eval`), so it cannot read the worker's
+  private key or execute host code. The VM is bounded by memory / stack ceilings
+  and a per-turn execution deadline (`withQuickJsVm`).
+- DO NOT run scene code via `new Function`/`eval` in the host realm. A previous
+  `with (proxy)` + allowlist "sandbox" was removed because it was trivially
+  escapable (`Function('return this')()` reaches the real global); all scene
+  execution must go through the QuickJS runtime.
+- Scene-facing capability APIs (`~system/SignedFetch`, `~system/UserIdentity`)
+  use a separate **unprivileged guest identity** (`sceneIdentity`), never the
+  server's authoritative identity, and `SignedFetch` enforces an SSRF egress
+  guard (`src/lib/misc/ssrf.ts`).
+- **Untrusted-input bounds (do not remove).** Scene CRDT/assets and remote-peer
+  comms are parsed in HOST code, outside the VM's limits, so these caps are
+  load-bearing:
+  the CRDT reader (`crdt-wire-protocol/message.ts` `readAllMessages`) must never
+  spin on an unknown/zero-length message (host hang), and `crdtMessageProtocol.ts`
+  rejects a declared length shorter than the 8-byte header; `scene-context.ts`
+  caps live entities, delete-tombstones, and CRDT payload size / queue depth;
+  `connect-context-rpc.ts` `sendBinary` caps peers/messages/size to bound
+  scene→LiveKit amplification, and its `signedFetch` follows redirects MANUALLY,
+  re-running the SSRF guard on every hop (fetch would otherwise auto-follow a
+  redirect onto a private host); both `scene.update()` and `scene.lateUpdate()`
+  are wrapped in try/catch (`update-scheduler.ts`) so a malformed CRDT can't crash
+  the shared render loop; the XHR polyfill caps response size and treats non-2xx
+  as an error (never feeds an error body to the native glTF parser);
+  `coerceMaybeU8Array` guards null / caps size.
+  Inbound comms: `CommsTransportWrapper.handleMessage` drops oversized packets and
+  rate-limits per peer before decoding; the avatar system dedupes + rate-limits
+  per-peer profile fetches (`avatar-communication-system.ts`) to bound Catalyst
+  amplification, drops non-finite peer transforms, and caps its tombstone map.
+- **QuickJS execution deadline (`quick-js/index.ts`).** The per-turn deadline is
+  reset at the START of every synchronous entry into the VM (eval / onStart /
+  onUpdate / each setImmediate callback / each `executePendingJobs`), NOT
+  cumulatively — a time-based "reset on gap" heuristic false-kills long-lived
+  scenes once the sum of their turns crosses the budget. A separate async-turn
+  timeout bounds a never-settling onUpdate promise. The `isUint8Array` marshalling
+  helper is installed non-writable/non-configurable so a scene can't replace it to
+  forge host-side bytes; `require()` results are cached so repeated calls don't
+  leak host handles; VM teardown always disposes even if job-draining times out.
+- Scene assets can only be fetched from the scene's own content manifest
+  (`baseUrl + content-hash`); arbitrary-URL/host asset fetches are not possible,
+  and only the glTF/GLB loader is registered.
 - Entity ID allocation: 1 for local player, 32-255 for remote players
 
 **Communications System**

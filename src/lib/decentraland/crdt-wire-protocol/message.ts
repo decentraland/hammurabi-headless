@@ -32,12 +32,30 @@ export function readMessage(buf: ByteBuffer): CrdtMessage | null | undefined {
 
 /**
  * Reads CRDT messages and consumes them from the byteBuffer.
- * 
+ *
  * Once it finishes, the ByteBuffer can be considered fully read.
+ *
+ * SECURITY: the buffer is untrusted (scene-controlled) and this runs in host
+ * code, outside the QuickJS interrupt/memory limits. A well-formed header with
+ * an unrecognized `type` makes `readMessage` return `null` WITHOUT consuming any
+ * bytes; naively looping on that spins forever and hangs the worker. So we skip
+ * an unrecognized message by its declared length and, as a hard backstop, stop
+ * the moment an iteration fails to advance the read offset.
  */
 export function* readAllMessages(buf: ByteBuffer): Iterable<CrdtMessage> {
-  let msg: CrdtMessage | null | undefined
-  while ((msg = readMessage(buf)) !== undefined) {
-    if (msg) yield msg
+  while (true) {
+    const offsetBefore = buf.currentReadOffset()
+    const msg = readMessage(buf)
+    if (msg === undefined) return // no complete header left
+
+    if (msg) {
+      yield msg
+    } else {
+      // Unrecognized message type: skip it (by its declared length) so later
+      // valid messages can still be processed.
+      CrdtMessageProtocol.consumeMessage(buf)
+    }
+
+    if (buf.currentReadOffset() <= offsetBefore) return // no forward progress → stop
   }
 }

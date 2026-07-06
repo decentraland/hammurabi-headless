@@ -51,7 +51,10 @@ export async function downloadAvatar(address: string): Promise<Avatar> {
   const peerContentUrl = getPeerContentUrl()
   const entities = await fetchEntitiesByPointers([address], peerContentUrl)
 
-  if (!entities.length) return generateRandomAvatar(address)
+  // Fall back to a random avatar when the profile is missing or malformed
+  // (no metadata / empty avatars array) instead of throwing during startup.
+  const avatar = entities[0]?.metadata?.avatars?.[0]
+  if (!avatar) return generateRandomAvatar(address)
 
-  return entities[0].metadata.avatars[0]
+  return avatar
 }

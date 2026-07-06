@@ -79,12 +79,18 @@ export function createUpdateLwwFromCrdt<T>(
     switch (action) {
       case ProcessMessageResultType.StateUpdatedData:
       case ProcessMessageResultType.StateUpdatedTimestamp: {
-        timestamps.set(entityId, msg.timestamp)
-
         if (msg.type === CrdtMessageType.PUT_COMPONENT) {
+          // Deserialize BEFORE advancing the timestamp / mutating state. A peer
+          // can send malformed component bytes; if deserialize throws after we've
+          // bumped the timestamp, our state would claim the new version while
+          // still holding the old value (and reject the correct resend). Commit
+          // the timestamp and value together, only on success.
           const buf = new ReadWriteByteBuffer(msg.data!)
-          data.set(entityId, schema.deserialize(buf))
+          const value = schema.deserialize(buf)
+          timestamps.set(entityId, msg.timestamp)
+          data.set(entityId, value)
         } else {
+          timestamps.set(entityId, msg.timestamp)
           data.delete(entityId)
         }
 

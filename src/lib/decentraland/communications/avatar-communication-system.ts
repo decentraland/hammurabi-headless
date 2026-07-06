@@ -12,7 +12,7 @@ import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
 import { playerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
-import { robustFetch } from "../../misc/network"
+import { robustFetch, drainResponse } from "../../misc/network"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -30,13 +30,29 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   // Track deleted entities for DELETE_ENTITY CRDT messages
   const deletedEntities = new Map<Entity, number>()  // entity -> tick when deleted
+  // Bound the tombstone map: peers churn through versioned entity ids over a long
+  // session, and this grows once per departed peer. Oldest entries are evicted.
+  const MAX_DELETED_ENTITIES = 4096
   let currentTick = 0
 
   // Cache for profiles fetched from Catalyst
   const profileCache = new Map<string, {profile: any, version: number}>()
 
+  // Per-peer guard against profile-fetch amplification. A remote peer announces
+  // its profile version over comms; without this, a peer that announces an
+  // ever-increasing (or simply un-cacheable) version forces an outbound Catalyst
+  // fetch on every packet. We record the highest version we've ATTEMPTED (so a
+  // lying peer whose real profile version is lower than announced can't make us
+  // refetch), and rate-limit fetches per peer regardless of announced version.
+  const profileFetchState = new Map<string, { attemptedVersion: number; lastFetchAt: number }>()
+  const PROFILE_FETCH_COOLDOWN_MS = 10_000
+
   function normalizeAddress(address: string) {
     return address.toLowerCase()
+  }
+
+  function allFinite(...values: any[]): boolean {
+    return values.every((v) => typeof v === 'number' && Number.isFinite(v))
   }
 
   async function fetchProfileFromCatalyst(address: string, _lambdasEndpoint?: string): Promise<any> {
@@ -49,6 +65,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         body: JSON.stringify({ ids: [address] })
       }, { label: 'profiles' })
       if (!response.ok) {
+        await drainResponse(response) // release the socket before discarding the response
         throw new Error(`Failed to fetch profile: ${response.status}`)
       }
 
@@ -66,20 +83,45 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     announcedVersion: number,
     lambdasEndpoint?: string
   ) {
+    // Ignore non-numeric / non-finite announced versions from untrusted peers.
+    if (!Number.isFinite(announcedVersion)) return
+
     const cached = profileCache.get(address)
+    // Already have this version (or newer) cached — nothing to do.
+    if (cached && cached.version >= announcedVersion) return
 
-    // Only fetch if we don't have this version cached
-    if (!cached || cached.version < announcedVersion) {
-      try {
-        const profile = await fetchProfileFromCatalyst(address, lambdasEndpoint)
+    const state = profileFetchState.get(address)
+    // Already got a definitive answer for this announced version (or a higher
+    // one) — don't refetch, even if the peer's real profile came back with a
+    // lower version than it announced (otherwise every packet would trigger a
+    // fetch). `attemptedVersion` is only advanced once a fetch COMPLETES (below),
+    // so a transient failure is still retried after the cooldown.
+    if (state && announcedVersion <= state.attemptedVersion) return
+    // Rate-limit per peer so a peer announcing ever-higher versions can't drive
+    // unbounded outbound fetches.
+    const now = Date.now()
+    if (state && now - state.lastFetchAt < PROFILE_FETCH_COOLDOWN_MS) return
 
-        if (profile && profile.version >= announcedVersion) {
-          profileCache.set(address, {profile, version: profile.version})
-          updatePlayerComponents(entity, address, profile)
-                  }
-      } catch (error) {
-        console.error('Failed to handle profile version announcement:', error)
+    // Reserve the fetch slot (for the cooldown) but keep any prior attemptedVersion
+    // so an in-flight failure doesn't wrongly suppress a retry.
+    profileFetchState.set(address, { attemptedVersion: state?.attemptedVersion ?? -1, lastFetchAt: now })
+
+    try {
+      const profile = await fetchProfileFromCatalyst(address, lambdasEndpoint)
+
+      // The fetch resolved: this announced version has a definitive answer, so
+      // don't fetch it again even if the profile's real version was lower.
+      const current = profileFetchState.get(address)
+      if (current) current.attemptedVersion = Math.max(current.attemptedVersion, announcedVersion)
+
+      if (profile && profile.version >= announcedVersion) {
+        profileCache.set(address, {profile, version: profile.version})
+        updatePlayerComponents(entity, address, profile)
       }
+    } catch (error) {
+      // Leave attemptedVersion unadvanced so a transient failure is retried once
+      // the per-peer cooldown elapses.
+      console.error('Failed to handle profile version announcement:', error)
     }
   }
 
@@ -123,15 +165,22 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       component.entityDeleted(entity, true)
     }
 
-    // Track this entity for DELETE_ENTITY message
+    // Track this entity for DELETE_ENTITY message, evicting the oldest tombstone
+    // once the map is full so it can't grow without bound over a long session.
     deletedEntities.set(entity, currentTick)
+    while (deletedEntities.size > MAX_DELETED_ENTITIES) {
+      const oldest = deletedEntities.keys().next().value
+      if (oldest === undefined) break
+      deletedEntities.delete(oldest)
+    }
 
     // Free the entity in the player entity manager
     playerEntityManager.freeEntityForPlayer(address)
 
-    // Clear from profile cache
+    // Clear from profile cache and per-peer fetch state
     const normalizedAddress = normalizeAddress(address)
     profileCache.delete(normalizedAddress)
+    profileFetchState.delete(normalizedAddress)
   }
 
   function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
@@ -194,6 +243,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   const handlePosition = (event: { address: string, data: any }) => {
+    const d = event.data
+    // Reject non-finite coordinates from untrusted peers before they poison the
+    // scene's transform state (NaN/Infinity propagate through Babylon math).
+    if (!allFinite(d.positionX, d.positionY, d.positionZ, d.rotationX, d.rotationY, d.rotationZ, d.rotationW)) return
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
       putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
@@ -201,6 +254,8 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   const handleMovement = (event: { address: string, data: any }) => {
+    const d = event.data
+    if (!allFinite(d.positionX, d.positionY, d.positionZ, d.rotationY)) return
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
@@ -262,6 +317,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
           // Clear player entity manager and profile cache
           playerEntityManager.clear()
           profileCache.clear()
+          profileFetchState.clear()
           deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {

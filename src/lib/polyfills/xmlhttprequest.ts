@@ -19,6 +19,12 @@ export function setupXMLHttpRequestPolyfill() {
   const MAX_ATTEMPTS = 2
   const backoffMs = (attempt: number) => Math.min(250 * 2 ** (attempt - 1), 2000)
 
+  // Cap the response body size. Scene assets (glTF/GLB) are fetched through this
+  // polyfill and handed to Babylon's NATIVE glTF parser, which runs outside the
+  // QuickJS sandbox. Bounding the bytes limits both worker-heap exhaustion and the
+  // size of hostile input reaching that native parser.
+  const MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
   class XMLHttpRequestPolyfill {
     static _seq = 0
     public readyState = 0
@@ -79,6 +85,7 @@ export function setupXMLHttpRequestPolyfill() {
       // retry transient connect failures/timeouts with backoff before giving up
       const attempt = (n: number) => {
         const t0 = Date.now()
+        let sizeExceeded = false
         console.log(`[XHR] #${id} → ${this.method} ${this.url}${n > 1 ? ` (retry ${n}/${MAX_ATTEMPTS})` : ''}`)
 
         const req = client.request(options, (res: any) => {
@@ -86,8 +93,32 @@ export function setupXMLHttpRequestPolyfill() {
           this.statusText = res.statusMessage
           this._setReadyState(3)
 
+          // Non-2xx responses (including un-followed 3xx redirects) must not have
+          // their body handed to Babylon's native glTF parser as if it were a
+          // valid asset. Drain and surface an error instead.
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            console.error(`[XHR] #${id} ✗ ${res.statusCode} ${this.method} ${this.url}`)
+            res.resume() // discard the body
+            this.readyState = 4
+            this._setReadyState(4)
+            this._triggerError()
+            return
+          }
+
           const chunks: Buffer[] = []
-          res.on('data', (chunk: Buffer) => chunks.push(chunk))
+          let received = 0
+          res.on('data', (chunk: Buffer) => {
+            received += chunk.length
+            if (received > MAX_RESPONSE_BYTES) {
+              console.error(`[XHR] #${id} ✗ response exceeded ${MAX_RESPONSE_BYTES}b cap: ${this.method} ${this.url}`)
+              // Deterministic failure: the asset is simply too big, so abort
+              // without retrying (retrying would re-download the hostile asset).
+              sizeExceeded = true
+              req.destroy(new Error(`response exceeded ${MAX_RESPONSE_BYTES} bytes`))
+              return
+            }
+            chunks.push(chunk)
+          })
 
           res.on('end', () => {
             const buffer = Buffer.concat(chunks)
@@ -114,7 +145,8 @@ export function setupXMLHttpRequestPolyfill() {
         req.on('error', (error: any) => {
           const cause = error?.code || error?.message || error
           console.error(`[XHR] #${id} ✗ FAILED in ${Date.now() - t0}ms (attempt ${n}/${MAX_ATTEMPTS}): ${this.method} ${this.url} — ${cause}`)
-          if (n < MAX_ATTEMPTS) {
+          // A size-cap abort is deterministic — don't retry it.
+          if (!sizeExceeded && n < MAX_ATTEMPTS) {
             setTimeout(() => attempt(n + 1), backoffMs(n))
           } else {
             this._triggerError()

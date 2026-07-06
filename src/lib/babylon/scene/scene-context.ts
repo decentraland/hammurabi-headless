@@ -52,6 +52,20 @@ import {
 
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
+// Untrusted-input bounds. Scene CRDT is fully attacker-controlled and is applied
+// in HOST code, outside the QuickJS VM's memory/interrupt limits — so these caps
+// are what keep a hostile scene from exhausting the worker's heap. Drops are
+// silent by design: logging per drop would let a scene amplify into log spam.
+const MAX_LIVE_ENTITIES = 100_000 // concurrent host BabylonEntity objects per scene
+const MAX_DELETED_TOMBSTONES = 100_000 // retained delete tombstones per scene
+const MAX_CRDT_PAYLOAD_BYTES = 8 * 1024 * 1024 // per crdtSendToRenderer call
+const MAX_INCOMING_QUEUE = 1024 // queued CRDT buffers awaiting processing
+// Inbound ADR-104 scene-bus messages from remote peers, awaiting the scene to
+// drain them via CommunicationsController.sendBinary. A scene that never uses the
+// MessageBus never drains this, so it must be bounded or a peer can drive the
+// worker's heap up with scene-cased packets (drop-oldest).
+const MAX_NETWORK_MESSAGE_QUEUE = 1024
+
 let incrementalId = 0
 
 export class SceneContext implements EngineApiInterface {
@@ -230,6 +244,12 @@ export class SceneContext implements EngineApiInterface {
 
   removeEntity(entityId: Entity) {
     this.deletedEntities.add(entityId)
+    // Bound the tombstone set: a scene can DELETE_ENTITY unbounded distinct ids.
+    // Evict the oldest tombstone once over the cap (insertion order).
+    if (this.deletedEntities.size > MAX_DELETED_TOMBSTONES) {
+      const oldest = this.deletedEntities.values().next().value
+      if (oldest !== undefined) this.deletedEntities.delete(oldest)
+    }
     const entity = this.getEntityOrNull(entityId)
     if (entity) {
       entity.dispose()
@@ -279,6 +299,14 @@ export class SceneContext implements EngineApiInterface {
           case CrdtMessageType.PUT_COMPONENT: {
             // ignore updates of entities outside range
             // if (!entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) continue
+
+            // Bound host memory: a scene can stream PUT/APPEND for unbounded
+            // distinct entity ids (entity number + generational version), each
+            // allocating a host BabylonEntity. Refuse to create NEW entities past
+            // a hard ceiling; updates to already-live entities still apply.
+            if (!this.entities.has(crdtMessage.entityId) && this.entities.size >= MAX_LIVE_ENTITIES) {
+              continue
+            }
 
             const entity = this.getOrCreateEntity(crdtMessage.entityId)
             const component = (this.components as any)[crdtMessage.componentId] as ComponentDefinition<any> | void
@@ -457,7 +485,14 @@ export class SceneContext implements EngineApiInterface {
   }
 
   private async _crdtSendToRenderer(data: Uint8Array) {
-    if (data.byteLength) {
+    // Drop oversized batches and shed load when the queue is saturated so a scene
+    // cannot exhaust host memory via huge or high-frequency CRDT payloads. Silent
+    // by design (see the MAX_* constants) — do not log per drop.
+    if (
+      data.byteLength &&
+      data.byteLength <= MAX_CRDT_PAYLOAD_BYTES &&
+      this.incomingMessages.length < MAX_INCOMING_QUEUE
+    ) {
       this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE })
     }
 
@@ -513,12 +548,21 @@ export class SceneContext implements EngineApiInterface {
         if (event.data.data.byteLength) {
           const [_, data] = decodeMessage(event.data.data)
           const senderBytes = new TextEncoder().encode(event.address)
+          // The sender length is framed in a single byte; a peer-controlled
+          // identity longer than that would wrap and corrupt the framing scene
+          // code parses, so drop it.
+          if (senderBytes.byteLength > 255) return
           const messageLength = senderBytes.byteLength + data.byteLength + 1
           const serializedMessage = new Uint8Array(messageLength)
           serializedMessage.set(new Uint8Array([senderBytes.byteLength]), 0)
           serializedMessage.set(senderBytes, 1)
           serializedMessage.set(data, senderBytes.byteLength + 1)
           this.incomingNetworkMessages.push(serializedMessage)
+          // Bound the queue: if the scene never drains it (doesn't use the
+          // MessageBus), a peer could otherwise grow it without limit.
+          if (this.incomingNetworkMessages.length > MAX_NETWORK_MESSAGE_QUEUE) {
+            this.incomingNetworkMessages.shift()
+          }
         }
       }
     })

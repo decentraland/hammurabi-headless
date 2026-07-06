@@ -8,6 +8,23 @@ const DEFAULT_RETRIES = 2
 
 export type RobustFetchOptions = { timeoutMs?: number; retries?: number; label?: string }
 
+/**
+ * Release a fetch Response body that will NOT be read.
+ *
+ * Node's global `fetch` (undici) keeps the underlying socket checked out of the
+ * keep-alive pool until the body is consumed or cancelled. Any path that obtains
+ * a Response and discards it without reading (a retry, a `!res.ok` early return)
+ * therefore leaks a socket until GC. Call this before dropping such a response.
+ */
+export async function drainResponse(res: {
+  bodyUsed: boolean
+  body?: { cancel(): Promise<void> } | null
+}): Promise<void> {
+  if (!res.bodyUsed) {
+    await res.body?.cancel().catch(() => undefined)
+  }
+}
+
 function backoffMs(attempt: number) {
   return Math.min(250 * 2 ** (attempt - 1), 2000)
 }
@@ -40,6 +57,9 @@ export async function robustFetch(url: string, init: RequestInit = {}, opts: Rob
       const res = await fetch(url, { ...init, signal: controller.signal })
       if ((res.status >= 500 || res.status === 429) && attempt < retries) {
         logger.error(`${label} ${res.status} ${url} (attempt ${attempt}/${retries}) — retrying`)
+        // Release the discarded response so undici returns the socket to the pool
+        // instead of pinning it until GC across every retry.
+        await drainResponse(res)
         await sleep(backoffMs(attempt))
         continue
       }

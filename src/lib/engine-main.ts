@@ -19,7 +19,7 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
-import { userIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment } from './decentraland/state'
+import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
@@ -37,6 +37,11 @@ export interface EngineOptions {
   sceneId?: string
   privateKey?: string
   environment?: DclEnvironment
+  // A pre-minted comms adapter string (e.g. "livekit:wss://…?access_token=…")
+  // supplied by a trusted parent/orchestrator. When present, this (untrusted)
+  // worker connects comms directly with it and NEVER holds or signs with the
+  // authoritative private key — no signed handshake happens in this process.
+  commsAdapter?: string
   // When true (default), the process exits on an unexpected comms loss so a
   // supervisor can restart it with a fresh connection. Interactive/dev usage
   // sets this to false to keep the manual "press R to restart" flow.
@@ -73,12 +78,20 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   initialized = true
   const { scene } = await initEngine(options.canvas)
 
-  // Create identity based on private key or as guest
-  const identity = options.privateKey
+  // Create identity based on private key or as guest. When a parent supplies a
+  // pre-minted commsAdapter, the worker never needs the authoritative identity,
+  // so it always runs as a guest even if a private key were somehow passed.
+  const identity = options.privateKey && !options.commsAdapter
     ? await createIdentityFromPrivateKey(options.privateKey)
     : await createGuestIdentity()
 
   userIdentity.swap(identity)
+
+  // Scene-facing APIs get a SEPARATE, always-unprivileged guest identity so that
+  // untrusted scene code (via ~system/SignedFetch / ~system/UserIdentity) can
+  // never sign requests as — or leak the address of — the authoritative server
+  // identity above.
+  sceneIdentity.swap(await createGuestIdentity())
 
   // Environment defaults to 'org'
   const environment: DclEnvironment = options.environment ?? 'org'
@@ -178,7 +191,8 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
     isGenesisScene: isGenesisCity,
     sceneId,
     isWorld,
-    isLocalhost
+    isLocalhost,
+    commsAdapter: options.commsAdapter
   })
 
   sceneContext.pipe(async (ctx) => {

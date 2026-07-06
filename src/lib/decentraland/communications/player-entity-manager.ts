@@ -58,21 +58,29 @@ export class PlayerEntityManager {
       return entityId
     }
     
-    // For remote players, try to reuse an entity with incremented version first
+    // For remote players, reuse a slot vacated by a departed peer: one whose
+    // CURRENT version is no longer allocated. Bump its version so stale references
+    // to the previous occupant don't alias the new one.
+    //
+    // The previous check tested `(entityNumber, currentVersion + 1)` for
+    // membership, which is ALWAYS free (allocations only ever use the current
+    // version), so it reused — and version-bumped — slots that were still held by
+    // a connected peer, colliding two live players on the same entity number.
     for (const [entityNumber, currentVersion] of this.entityVersions) {
-      if (entityNumber >= OTHER_PLAYER_ENTITIES_FROM && entityNumber < OTHER_PLAYER_ENTITIES_TO) {
-        if (currentVersion < MAX_U16) {
-          const newEntity = EntityUtils.toEntityId(entityNumber, currentVersion + 1)
-          if (!this.allocatedEntities.has(newEntity)) {
-            this.entityVersions.set(entityNumber, currentVersion + 1)
-            this.allocatedEntities.add(newEntity)
-            this.addressToEntityMap.set(normalizedAddress, newEntity)
-            this.entityToAddressMap.set(newEntity, normalizedAddress)
-            console.log(`Reused entity ${entityNumber} version ${currentVersion + 1} (id: ${newEntity}) for ${normalizedAddress}`)
-            return newEntity
-          }
-        }
-      }
+      if (entityNumber < OTHER_PLAYER_ENTITIES_FROM || entityNumber >= OTHER_PLAYER_ENTITIES_TO) continue
+      if (currentVersion >= MAX_U16) continue
+
+      const currentEntity = EntityUtils.toEntityId(entityNumber, currentVersion)
+      // Skip slots still in use by a live peer — only vacated slots are reusable.
+      if (this.allocatedEntities.has(currentEntity)) continue
+
+      const newEntity = EntityUtils.toEntityId(entityNumber, currentVersion + 1)
+      this.entityVersions.set(entityNumber, currentVersion + 1)
+      this.allocatedEntities.add(newEntity)
+      this.addressToEntityMap.set(normalizedAddress, newEntity)
+      this.entityToAddressMap.set(newEntity, normalizedAddress)
+      console.log(`Reused entity ${entityNumber} version ${currentVersion + 1} (id: ${newEntity}) for ${normalizedAddress}`)
+      return newEntity
     }
     
     // Allocate new entity number if no reusable entities available

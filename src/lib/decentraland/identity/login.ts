@@ -65,11 +65,14 @@ export async function loginUsingEthereumProvider(provider: any): Promise<Storeab
   if (!address) throw new Error("Couldn't get an address from the Ethereum provider")
 
   async function signer(message: string): Promise<string> {
-    while (true) {
+    // Bound the retry loop so a provider that keeps returning empty can't spin
+    // forever.
+    const MAX_SIGN_ATTEMPTS = 10
+    for (let attempt = 0; attempt < MAX_SIGN_ATTEMPTS; attempt++) {
       const result = await requestManager.personal_sign(message, address!, '')
-      if (!result) continue
-      return result
+      if (result) return result
     }
+    throw new Error('Ethereum provider did not return a signature')
   }
 
   return identityFromSigner(address, signer, false)
