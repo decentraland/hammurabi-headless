@@ -63,8 +63,14 @@ function requestRenewal(): Promise<StorageDelegation | null> {
     const timer = setTimeout(() => finish(null), RENEWAL_TIMEOUT_MS)
     process.on('message', onMessage)
     // process.send exists only when forked with an IPC channel (the production
-    // orchestrator path); guarded by the caller.
-    process.send!({ type: STORAGE_DELEGATION_REQUEST })
+    // orchestrator path; guarded by the caller). It can still throw
+    // ERR_IPC_CHANNEL_CLOSED if the channel closed since — treat that as a failed
+    // renewal (→ fall back to the current delegation) rather than rejecting.
+    try {
+      process.send!({ type: STORAGE_DELEGATION_REQUEST })
+    } catch {
+      finish(null)
+    }
   })
 }
 

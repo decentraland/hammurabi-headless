@@ -58,6 +58,18 @@ describe('getFreshStorageDelegation', () => {
     expect(process.send).not.toHaveBeenCalled()
   })
 
+  it('falls back to the current delegation (does not reject) when the IPC channel is closed', async () => {
+    const current = parseStorageDelegation(encode({ expiration: Date.now() + 60_000 }))!
+    storageDelegation.swap(current)
+    process.send = jest.fn(() => {
+      throw new Error('ERR_IPC_CHANNEL_CLOSED')
+    }) as any
+
+    const result = await getFreshStorageDelegation()
+
+    expect(result).toBe(current)
+  })
+
   it('renews over IPC when the current delegation is near expiry and swaps in the fresh one', async () => {
     storageDelegation.swap(parseStorageDelegation(encode({ expiration: Date.now() + 60_000 }))!)
     const renewedExpiration = Date.now() + 3_600_000
