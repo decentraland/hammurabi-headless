@@ -13,8 +13,12 @@ import { pickPointerEventsMesh } from './scene/logic/pointer-events'
 const DEFAULT_HEADLESS_FPS = 30
 
 function installFramePacing() {
-  const fps = Number(process.env.HAMMURABI_FPS) > 0 ? Number(process.env.HAMMURABI_FPS) : DEFAULT_HEADLESS_FPS
-  const frameIntervalMs = 1000 / Math.min(fps, 60)
+  // Clamp to [1, 60]: a tiny positive value (e.g. HAMMURABI_FPS=0.5) would
+  // otherwise yield multi-second frame intervals and look like a hang; invalid
+  // values (NaN/0/non-numeric) fall back to the default.
+  const parsed = Number(process.env.HAMMURABI_FPS)
+  const fps = parsed > 0 ? Math.min(Math.max(parsed, 1), 60) : DEFAULT_HEADLESS_FPS
+  const frameIntervalMs = 1000 / fps
 
   // Override Babylon's static frame scheduler rather than defining a global
   // requestAnimationFrame: a RAF global could flip feature detection in

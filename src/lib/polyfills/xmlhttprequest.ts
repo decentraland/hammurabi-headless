@@ -21,8 +21,10 @@ export function setupXMLHttpRequestPolyfill() {
 
   // Per-request start/success logs are opt-in: a Genesis City scene load makes
   // hundreds of requests, each log line being a synchronous stdout write.
-  // Errors and timeouts are always logged.
-  const XHR_DEBUG = !!process.env.HAMMURABI_XHR_DEBUG
+  // Errors and timeouts are always logged. Only affirmative values enable it, so
+  // HAMMURABI_XHR_DEBUG=0 / =false (the natural way to say "off") stays off
+  // rather than being truthy-enabled.
+  const XHR_DEBUG = ['1', 'true', 'yes', 'on'].includes((process.env.HAMMURABI_XHR_DEBUG ?? '').toLowerCase())
 
   // Cap the response body size. Scene assets (glTF/GLB) are fetched through this
   // polyfill and handed to Babylon's NATIVE glTF parser, which runs outside the

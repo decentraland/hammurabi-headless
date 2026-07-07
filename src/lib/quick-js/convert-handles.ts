@@ -108,7 +108,11 @@ export function installMarshalHelpers(vm: QuickJSContext) {
   // an extracted-buffer placeholder (see reinjectBinaries).
   const nonceKey = '__hostU8Ref_' + randomBytes(16).toString('hex') + '__'
   const extractBinaries = vm.unwrapResult(vm.evalCode(buildExtractBinariesSource(nonceKey), 'hostExtractBinaries.js'))
-  const wrapBytes = vm.unwrapResult(vm.evalCode('(ab) => new Uint8Array(ab)', 'hostWrapBytes.js'))
+  // Capture Uint8Array at install time (like the extractor) so a scene poisoning
+  // globalThis.Uint8Array afterward can't intercept host→VM binary delivery.
+  const wrapBytes = vm.unwrapResult(
+    vm.evalCode('(() => { const U8 = Uint8Array; return (ab) => new U8(ab) })()', 'hostWrapBytes.js')
+  )
   marshalHelpers.set(vm, { extractBinaries, wrapBytes, nonceKey })
 }
 

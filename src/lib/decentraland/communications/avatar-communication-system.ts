@@ -28,8 +28,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const Transform = createLwwStore(transformComponent)
   const listOfComponentsToSynchronize: ComponentDefinition<any>[] = [PlayerIdentityData, AvatarBase, AvatarEquippedData, Transform]
 
-  // Track deleted entities for DELETE_ENTITY CRDT messages
-  const deletedEntities = new Map<Entity, number>()  // entity -> tick when deleted
+  // Track deleted entities for DELETE_ENTITY CRDT messages: entity -> the
+  // deletion sequence number when it was removed. The sequence is a dedicated
+  // monotonic counter (NOT the per-frame tick): a subscription emits every
+  // tombstone whose sequence exceeds the highest it has already emitted. Using
+  // the frame tick here raced — a disconnect stamped between frames got the tick
+  // the last getUpdates had already marked as emitted, so DELETE_ENTITY never
+  // fired and departed avatars lingered forever.
+  const deletedEntities = new Map<Entity, number>()
+  let deletionSequence = 0
   // Bound the tombstone map: peers churn through versioned entity ids over a long
   // session, and this grows once per departed peer. Oldest entries are evicted.
   const MAX_DELETED_ENTITIES = 4096
@@ -161,17 +168,17 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       // purge (not just delete): peer entity ids are generationally versioned so
       // this id never comes back, these stores receive no remote CRDT updates
       // (they are only written from transport events), and the removal is
-      // signaled to consumers via DELETE_ENTITY below. Keeping timestamps/tick
-      // entries would grow every map by one entry per departed peer forever —
-      // and dumpCrdtDeltas scans those maps every scene tick. (The
-      // DELETE_COMPONENT deltas this used to emit were dropped by consumers
-      // anyway: the scene context tombstones the entity on DELETE_ENTITY.)
+      // signaled to consumers via the DELETE_ENTITY tombstone below. Keeping
+      // timestamps/tick entries would grow every map by one entry per departed
+      // peer forever — and dumpCrdtDeltas scans those maps every scene tick.
+      // Because purge drops those maps, DELETE_ENTITY is now the ONLY removal
+      // signal, so it must be delivered reliably (see deletionSequence).
       component.purgeEntity(entity)
     }
 
     // Track this entity for DELETE_ENTITY message, evicting the oldest tombstone
     // once the map is full so it can't grow without bound over a long session.
-    deletedEntities.set(entity, currentTick)
+    deletedEntities.set(entity, ++deletionSequence)
     while (deletedEntities.size > MAX_DELETED_ENTITIES) {
       const oldest = deletedEntities.keys().next().value
       if (oldest === undefined) break
@@ -325,7 +332,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       const state = new Map<ComponentDefinition<any>, number>(
         listOfComponentsToSynchronize.map(component => [component, -1])
       )
-      let lastDeleteTick = -1  // Track last processed delete tick
+      let lastEmittedDeletionSeq = 0  // highest deletion sequence already emitted
 
       return {
         range: [32, 256] as [number, number],
@@ -338,13 +345,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
           deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {
-          // Write DELETE_ENTITY messages for removed players
-          for (const [entityId, tick] of deletedEntities) {
-            if (tick > lastDeleteTick) {
+          // Write DELETE_ENTITY messages for players removed since we last ran.
+          // Keyed on the monotonic deletion sequence, not the frame tick, so a
+          // disconnect that lands between frames is still delivered exactly once.
+          for (const [entityId, seq] of deletedEntities) {
+            if (seq > lastEmittedDeletionSeq) {
               DeleteEntity.write({ entityId }, writer)
             }
           }
-          lastDeleteTick = currentTick
+          lastEmittedDeletionSeq = deletionSequence
 
           // Serialize all component updates from the last tick until now
           for (const [component, tick] of state) {

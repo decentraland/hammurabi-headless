@@ -5,7 +5,7 @@ import { CommsEvents, CommsTransportWrapper } from '../../../src/lib/decentralan
 import { createAvatarCommunicationSystem } from '../../../src/lib/decentraland/communications/avatar-communication-system'
 import { StaticEntities } from '../../../src/lib/babylon/scene/logic/static-entities'
 import { transformComponent } from '../../../src/lib/decentraland/sdk-components/transform-component'
-import { CrdtMessageType, PutComponentMessage, readAllMessages } from '../../../src/lib/decentraland/crdt-wire-protocol'
+import { CrdtMessageType, DeleteEntityMessage, PutComponentMessage, readAllMessages } from '../../../src/lib/decentraland/crdt-wire-protocol'
 
 // Regression test for https://github.com/decentraland/hammurabi-headless/issues/26:
 // comms positions arrive in world coordinates and must be written scene-relative.
@@ -80,5 +80,51 @@ describe('avatar communication system - scene-relative positions', () => {
     })
 
     expectSceneRelative(transform, worldPosition)
+  })
+})
+
+// Regression: a peer that disconnects BETWEEN frames must still produce a
+// DELETE_ENTITY, or its avatar lingers in every scene as a frozen ghost. The
+// deletion signal must not depend on the per-frame tick (which the disconnect
+// races against).
+describe('avatar communication system - departed players are removed', () => {
+  const worldToScene = (position: Vector3) => position
+
+  function drainDeleteEntities(subscription: { getUpdates(w: ReadWriteByteBuffer): void }): number[] {
+    const buffer = new ReadWriteByteBuffer()
+    subscription.getUpdates(buffer)
+    return Array.from(readAllMessages(new ReadWriteByteBuffer(buffer.toBinary())))
+      .filter((m): m is DeleteEntityMessage => m.type === CrdtMessageType.DELETE_ENTITY)
+      .map((m) => m.entityId)
+  }
+
+  test('emits DELETE_ENTITY for a peer that disconnects after an earlier frame already drained', () => {
+    const events = mitt<CommsEvents>()
+    const transport = { events } as unknown as CommsTransportWrapper
+    const system = createAvatarCommunicationSystem(transport, worldToScene)
+    const subscription = system.createSubscription()
+
+    // A peer joins and moves; frame 1 processes and drains updates.
+    events.emit('position', {
+      address: '0xAAA',
+      data: { positionX: 1, positionY: 0, positionZ: 1, rotationX: 0, rotationY: 0, rotationZ: 0, rotationW: 1, index: 1, timestamp: 0 }
+    } as any)
+    system.update()
+    const entityId = drainDeleteEntities(subscription) // no deletes yet
+    expect(entityId).toEqual([])
+
+    // Peer disconnects BETWEEN frames (after frame 1's getUpdates already ran).
+    events.emit('PEER_DISCONNECTED', { address: '0xAAA' } as any)
+
+    // Frame 2: the tombstone must be delivered exactly once.
+    system.update()
+    const deleted = drainDeleteEntities(subscription)
+    expect(deleted.length).toBe(1)
+
+    // And not re-delivered on subsequent frames.
+    system.update()
+    expect(drainDeleteEntities(subscription)).toEqual([])
+
+    system.dispose()
   })
 })

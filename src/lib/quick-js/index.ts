@@ -36,6 +36,16 @@ export type QuickJsVmLimits = {
   maxSyncExecutionMs?: number
 }
 
+// executePendingJobs returns a Disposable result whose FAIL branch owns a
+// QuickJS error handle; dropping it leaks one VM handle per throwing microtask
+// job, which eventually makes vm.dispose() throw and get misreported as leaking.
+// Always dispose that handle. Callers must run startSyncTurn() first — draining
+// jobs executes untrusted scene code, so it gets its own deadline turn.
+function drainPendingJobs(vm: QuickJSContext) {
+  const result = vm.runtime.executePendingJobs()
+  if ('error' in result && result.error) result.error.dispose()
+}
+
 export async function withQuickJsVm<T>(
   cb: (opts: RunWithVmOptions) => Promise<T>,
   limits: QuickJsVmLimits = {}
@@ -145,7 +155,7 @@ export async function withQuickJsVm<T>(
         // adding up to a frame of latency. Job execution is untrusted scene
         // code, so it gets its own deadline turn.
         startSyncTurn()
-        vm.runtime.executePendingJobs()
+        drainPendingJobs(vm)
 
         // Convert the promise handle into a native promise and await it (bounded).
         // Dispose the handle in a finally so an async-turn timeout (or a throw
@@ -168,7 +178,7 @@ export async function withQuickJsVm<T>(
         // See onUpdate: settle VM-internal promise chains without waiting for
         // the 16ms interval pump.
         startSyncTurn()
-        vm.runtime.executePendingJobs()
+        drainPendingJobs(vm)
 
         // See onUpdate: always dispose the promise handle.
         try {
@@ -293,7 +303,7 @@ export function setupSetImmediate(vm: QuickJSContext, startSyncTurn: () => void 
 
     // Draining microtasks (resolved scene promises) is also untrusted execution.
     startSyncTurn()
-    vm.runtime.executePendingJobs()
+    drainPendingJobs(vm)
   }, 16)
 
   return {
