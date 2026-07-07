@@ -44,25 +44,34 @@ export function signedFetch(
   url: string,
   identity: AuthIdentity,
   init?: FlatFetchInit,
-  additionalMetadata: Record<string, any> = {}
+  additionalMetadata: Record<string, any> = {},
+  // Optional overrides for privileged, non-guest signing (e.g. the world-scoped
+  // storage delegation). When `chainProvider` is given it replaces the default
+  // `signPayload(identity, …)`, and the signed identity/auth headers plus
+  // `extraHeaders` take precedence over any caller-supplied `init.headers` so
+  // untrusted scene headers can never override the auth chain or scope claim.
+  options?: { chainProvider?: (payload: string) => AuthChain; extraHeaders?: Record<string, string> }
 ) {
   const path = new URL(url).pathname
+  const chainProvider = options?.chainProvider ?? ((payload: string) => Authenticator.signPayload(identity, payload))
 
-  const actualInit = {
-    ...init,
-    headers: {
-      ...getSignedHeaders(
-        init?.method ?? 'get',
-        path,
-        {
-          origin: 'hammurabi-server://',
-          ...additionalMetadata
-        },
-        (payload) => Authenticator.signPayload(identity, payload)
-      ),
-      ...init?.headers
-    }
-  } as FlatFetchInit
+  const signedHeaders = getSignedHeaders(
+    init?.method ?? 'get',
+    path,
+    {
+      origin: 'hammurabi-server://',
+      ...additionalMetadata
+    },
+    chainProvider
+  )
+
+  const headers = options
+    ? // Privileged path: auth headers + extraHeaders win over caller headers.
+      { ...init?.headers, ...signedHeaders, ...options.extraHeaders }
+    : // Default (guest) path: unchanged ordering.
+      { ...signedHeaders, ...init?.headers }
+
+  const actualInit = { ...init, headers } as FlatFetchInit
 
   return flatFetch(url, actualInit)
 }

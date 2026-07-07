@@ -19,7 +19,7 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
-import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment } from './decentraland/state'
+import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation, StorageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
@@ -46,6 +46,40 @@ export interface EngineOptions {
   // supervisor can restart it with a fresh connection. Interactive/dev usage
   // sets this to false to keep the manual "press R to restart" flow.
   restartOnCommsLoss?: boolean
+  // Base64-encoded, world-scoped storage delegation minted by a trusted parent
+  // (see StorageDelegation). When present, the worker signs `storage.decentraland.*`
+  // requests with the enclosed ephemeral so the authoritative world storage
+  // authorizes them — WITHOUT this worker ever holding the authoritative key.
+  storageDelegation?: string
+}
+
+/**
+ * Decode and validate the base64 storage delegation. Returns undefined (and warns)
+ * on any malformed input so a bad delegation can never break scene startup — the
+ * worker simply falls back to the guest identity for storage (unauthorized, as before).
+ */
+function parseStorageDelegation(encoded: string): StorageDelegation | undefined {
+  try {
+    const json = typeof Buffer !== 'undefined' ? Buffer.from(encoded, 'base64').toString('utf8') : atob(encoded)
+    const parsed = JSON.parse(json)
+    const valid =
+      parsed &&
+      parsed.v === 1 &&
+      typeof parsed.world === 'string' &&
+      parsed.ephemeral?.privateKey &&
+      parsed.ephemeral?.address &&
+      parsed.scope?.payload &&
+      parsed.scope?.signature &&
+      typeof parsed.expiration === 'number'
+    if (!valid) {
+      console.warn('Ignoring malformed storage delegation')
+      return undefined
+    }
+    return parsed as StorageDelegation
+  } catch (error) {
+    console.warn('Failed to parse storage delegation:', error instanceof Error ? error.message : String(error))
+    return undefined
+  }
 }
 
 let initialized = false
@@ -92,6 +126,15 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   // never sign requests as — or leak the address of — the authoritative server
   // identity above.
   sceneIdentity.swap(await createGuestIdentity())
+
+  // Optional world-scoped storage delegation. Kept separate from both identities
+  // above and used ONLY for storage.decentraland.* requests (see connect-context-rpc).
+  if (options.storageDelegation) {
+    const delegation = parseStorageDelegation(options.storageDelegation)
+    if (delegation) {
+      storageDelegation.swap(delegation)
+    }
+  }
 
   // Environment defaults to 'org'
   const environment: DclEnvironment = options.environment ?? 'org'

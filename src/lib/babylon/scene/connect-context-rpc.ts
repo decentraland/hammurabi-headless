@@ -15,7 +15,7 @@ import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentr
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
 import { Scene } from '@dcl/schemas'
 import { Authenticator } from '@dcl/crypto'
-import { sceneIdentity, currentRealm } from '../../decentraland/state'
+import { sceneIdentity, currentRealm, storageDelegation, StorageDelegation, CurrentRealm } from '../../decentraland/state'
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
@@ -33,6 +33,73 @@ const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network messag
 // address (metadata endpoint, loopback admin) — the single-shot guard alone was
 // bypassable because the underlying fetch follows redirects transparently.
 const MAX_SIGNED_FETCH_REDIRECTS = 5
+
+// The world-storage-service. Requests to these hosts are signed with the
+// world-scoped storage delegation (when present) instead of the guest identity.
+// Exact host match only, so a lookalike (storage.decentraland.zone.evil.com) is
+// never treated as first-party.
+const STORAGE_HOSTS = new Set(['storage.decentraland.org', 'storage.decentraland.zone'])
+
+/**
+ * Decide, per redirect hop, how to sign a scene SignedFetch. Returns a privileged
+ * storage-signing strategy ONLY when the hop targets the world-storage-service AND
+ * a valid, unexpired world-scoped delegation exists; otherwise `null` (caller uses
+ * the guest identity). Scoping the delegation to storage hosts — re-checked every
+ * hop — keeps a scene from ever obtaining an authoritative-signed request for an
+ * arbitrary URL (preserves the SSRF/impersonation guarantees).
+ */
+export function getStorageSigningStrategy(
+  url: string,
+  delegation: StorageDelegation | null,
+  realm: CurrentRealm,
+  context: SceneContext
+): { metadata: Record<string, any>; options: { chainProvider: (payload: string) => any; extraHeaders: Record<string, string> } } | null {
+  if (!delegation) return null
+
+  let host: string
+  try {
+    host = new URL(url).hostname.toLowerCase()
+  } catch {
+    return null
+  }
+  if (!STORAGE_HOSTS.has(host)) return null
+  if (Date.now() >= delegation.expiration) return null
+
+  const account = {
+    privateKey: delegation.ephemeral.privateKey,
+    publicKey: delegation.ephemeral.publicKey,
+    address: delegation.ephemeral.address
+  }
+
+  const metadata = {
+    origin: 'hammurabi-server//',
+    signer: 'dcl:authoritative-server',
+    isGuest: false,
+    // Report the delegation's world so the storage service derives exactly the
+    // world the scope claim is bound to (scope.world === derived worldName).
+    realm: { serverName: delegation.world, hostname: realm.baseUrl },
+    realmName: delegation.world,
+    sceneId: context.loadableScene.urn,
+    parcel: (context.loadableScene.entity.metadata as Scene).scene.base
+  }
+
+  const scopeHeader =
+    typeof Buffer !== 'undefined'
+      ? Buffer.from(JSON.stringify(delegation.scope), 'utf8').toString('base64')
+      : btoa(JSON.stringify(delegation.scope))
+
+  return {
+    metadata,
+    options: {
+      // Standalone ephemeral (owner = ephemeral address). It does NOT resolve to
+      // the authoritative address, so it can't hit the broad allow-list path in
+      // the storage service — only the world-scoped claim below authorizes it.
+      chainProvider: (payload: string) =>
+        Authenticator.createSimpleAuthChain(payload, account.address, Authenticator.createSignature(account, payload)),
+      extraHeaders: { 'x-authoritative-scope': scopeHeader }
+    }
+  }
+}
 
 export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
@@ -237,6 +304,9 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       // server), and refuse requests to non-public hosts to prevent SSRF.
       const identity = await sceneIdentity.deref()
       const realm = await currentRealm.deref()
+      // Optional — present only for authoritative world workers. getOrNull() so an
+      // absent delegation (Genesis, or no delegation minted) never blocks.
+      const delegation = storageDelegation.getOrNull()
 
       const metadata = {
         origin: 'hammurabi-server//',
@@ -265,6 +335,11 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           // The identity/auth headers are re-signed per hop inside signedFetch.
           const sameOrigin = new URL(currentUrl).origin === originalOrigin
 
+          // Re-evaluated every hop: only the world-storage host gets the scoped
+          // storage delegation; anything else (including a redirect target) is
+          // signed with the guest identity.
+          const storageStrategy = getStorageSigningStrategy(currentUrl, delegation, realm, context)
+
           result = await signedFetch(
             currentUrl,
             identity.authChain,
@@ -275,7 +350,8 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
               responseBodyType: 'text',
               redirect: 'manual'
             },
-            metadata
+            storageStrategy ? storageStrategy.metadata : metadata,
+            storageStrategy?.options
           )
 
           const isRedirect = result.status >= 300 && result.status < 400
