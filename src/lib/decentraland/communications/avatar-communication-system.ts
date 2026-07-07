@@ -178,6 +178,13 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
     // Track this entity for DELETE_ENTITY message, evicting the oldest tombstone
     // once the map is full so it can't grow without bound over a long session.
+    // TRADEOFF: this cap is a load-bearing memory bound (CLAUDE.md), and since
+    // purgeEntity dropped the delta-channel removal fallback, DELETE_ENTITY is
+    // the only removal signal. If a scene's VM stalls (its getUpdates stops
+    // running) while > MAX_DELETED_ENTITIES distinct peers disconnect, the oldest
+    // tombstones evict before that scene emits them, leaving a few ghost avatars
+    // until it reloads. Deliberately accepted: the bound matters more than a
+    // cosmetic glitch that needs 4096+ departures during a single hang.
     deletedEntities.set(entity, ++deletionSequence)
     while (deletedEntities.size > MAX_DELETED_ENTITIES) {
       const oldest = deletedEntities.keys().next().value
