@@ -63,7 +63,6 @@ export function getStorageSigningStrategy(
     return null
   }
   if (!STORAGE_HOSTS.has(host)) return null
-  if (Date.now() >= delegation.expiration) return null
 
   const account = {
     privateKey: delegation.ephemeral.privateKey,

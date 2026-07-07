@@ -14,17 +14,18 @@ export type CurrentRealm = {
   aboutResponse: AboutResponse
 }
 
-// A short-lived, WORLD-SCOPED storage credential minted by a trusted parent
-// orchestrator (never derived in this untrusted worker). The worker signs
+// A WORLD-SCOPED storage credential minted by a trusted parent orchestrator
+// (never derived in this untrusted worker). The worker signs
 // `storage.decentraland.*` requests with `ephemeral` and forwards the root-signed
 // `scope` claim; the world-storage-service authorizes it only for `world`, so a
-// worker compromise leaks at most this one world's ephemeral until `expiration`.
+// worker compromise leaks at most this one world's ephemeral. It has no expiry —
+// it lives for the life of this worker, which keeps signing storage requests with
+// it until the process exits.
 export type StorageDelegation = {
   v: number
   world: string
   ephemeral: { privateKey: string; publicKey: string; address: string }
   scope: { payload: string; signature: string }
-  expiration: number
 }
 
 // The server's own identity. When the server runs with a private key (an

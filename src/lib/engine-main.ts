@@ -69,8 +69,7 @@ function parseStorageDelegation(encoded: string): StorageDelegation | undefined 
       parsed.ephemeral?.privateKey &&
       parsed.ephemeral?.address &&
       parsed.scope?.payload &&
-      parsed.scope?.signature &&
-      typeof parsed.expiration === 'number'
+      parsed.scope?.signature
     if (!valid) {
       console.warn('Ignoring malformed storage delegation')
       return undefined

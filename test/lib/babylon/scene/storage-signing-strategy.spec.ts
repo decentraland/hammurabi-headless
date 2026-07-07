@@ -27,7 +27,6 @@ function makeDelegation(overrides: Partial<StorageDelegation> = {}): StorageDele
     world: 'boedo.dcl.eth',
     ephemeral: { privateKey: ephemeral.privateKey, publicKey: ephemeral.publicKey, address: ephemeral.address },
     scope: { payload: 'Decentraland Authoritative Storage Delegation\n...', signature: '0xsig' },
-    expiration: Date.now() + 60_000,
     ...overrides
   }
 }
@@ -49,13 +48,6 @@ describe('getStorageSigningStrategy', () => {
     it('rejects lookalike hosts', () => {
       const url = 'https://storage.decentraland.zone.evil.com/values/x'
       expect(getStorageSigningStrategy(url, makeDelegation(), realm, sceneCtx)).toBeNull()
-    })
-  })
-
-  describe('when the delegation has expired', () => {
-    it('returns null', () => {
-      const expired = makeDelegation({ expiration: Date.now() - 1 })
-      expect(getStorageSigningStrategy(STORAGE_URL, expired, realm, sceneCtx)).toBeNull()
     })
   })
 
