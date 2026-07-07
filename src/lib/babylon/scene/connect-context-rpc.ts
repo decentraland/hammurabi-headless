@@ -15,8 +15,9 @@ import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentr
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
 import { Scene } from '@dcl/schemas'
 import { Authenticator } from '@dcl/crypto'
-import { sceneIdentity, currentRealm, storageDelegation, StorageDelegation, CurrentRealm } from '../../decentraland/state'
+import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '../../decentraland/state'
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
+import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
@@ -63,6 +64,7 @@ export function getStorageSigningStrategy(
     return null
   }
   if (!STORAGE_HOSTS.has(host)) return null
+  if (Date.now() >= delegation.expiration) return null
 
   const account = {
     privateKey: delegation.ephemeral.privateKey,
@@ -303,9 +305,6 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       // server), and refuse requests to non-public hosts to prevent SSRF.
       const identity = await sceneIdentity.deref()
       const realm = await currentRealm.deref()
-      // Optional — present only for authoritative world workers. getOrNull() so an
-      // absent delegation (Genesis, or no delegation minted) never blocks.
-      const delegation = storageDelegation.getOrNull()
 
       const metadata = {
         origin: 'hammurabi-server//',
@@ -336,7 +335,16 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
           // Re-evaluated every hop: only the world-storage host gets the scoped
           // storage delegation; anything else (including a redirect target) is
-          // signed with the guest identity.
+          // signed with the guest identity. Fetch a fresh delegation (renewing
+          // over IPC if near expiry) only for storage hops, so non-storage
+          // requests never wait on a renewal.
+          let hopHost: string | undefined
+          try {
+            hopHost = new URL(currentUrl).hostname.toLowerCase()
+          } catch {
+            hopHost = undefined
+          }
+          const delegation = hopHost && STORAGE_HOSTS.has(hopHost) ? await getFreshStorageDelegation() : null
           const storageStrategy = getStorageSigningStrategy(currentUrl, delegation, realm, context)
 
           result = await signedFetch(

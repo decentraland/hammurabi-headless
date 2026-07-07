@@ -19,8 +19,9 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
-import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation, StorageDelegation } from './decentraland/state'
+import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
+import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
 // we only spend ONE millisecond per frame procesing messages from scenes,
@@ -51,34 +52,6 @@ export interface EngineOptions {
   // requests with the enclosed ephemeral so the authoritative world storage
   // authorizes them — WITHOUT this worker ever holding the authoritative key.
   storageDelegation?: string
-}
-
-/**
- * Decode and validate the base64 storage delegation. Returns undefined (and warns)
- * on any malformed input so a bad delegation can never break scene startup — the
- * worker simply falls back to the guest identity for storage (unauthorized, as before).
- */
-function parseStorageDelegation(encoded: string): StorageDelegation | undefined {
-  try {
-    const json = typeof Buffer !== 'undefined' ? Buffer.from(encoded, 'base64').toString('utf8') : atob(encoded)
-    const parsed = JSON.parse(json)
-    const valid =
-      parsed &&
-      parsed.v === 1 &&
-      typeof parsed.world === 'string' &&
-      parsed.ephemeral?.privateKey &&
-      parsed.ephemeral?.address &&
-      parsed.scope?.payload &&
-      parsed.scope?.signature
-    if (!valid) {
-      console.warn('Ignoring malformed storage delegation')
-      return undefined
-    }
-    return parsed as StorageDelegation
-  } catch (error) {
-    console.warn('Failed to parse storage delegation:', error instanceof Error ? error.message : String(error))
-    return undefined
-  }
 }
 
 let initialized = false
