@@ -57,13 +57,19 @@ export function getStorageSigningStrategy(
 ): { metadata: Record<string, any>; options: { chainProvider: (payload: string) => any; extraHeaders: Record<string, string> } } | null {
   if (!delegation) return null
 
-  let host: string
+  let parsed: URL
   try {
-    host = new URL(url).hostname.toLowerCase()
+    parsed = new URL(url)
   } catch {
     return null
   }
-  if (!STORAGE_HOSTS.has(host)) return null
+  // HTTPS only. The scene controls this URL and `assertPublicSceneUrl` permits
+  // http:, so without this gate a scene could force `http://storage.decentraland.*`
+  // and the ephemeral auth-chain + root-signed scope claim would go out in
+  // cleartext (before any server-side http→https redirect) for an on-path attacker
+  // to capture and replay for the credential's TTL.
+  if (parsed.protocol !== 'https:') return null
+  if (!STORAGE_HOSTS.has(parsed.hostname.toLowerCase())) return null
   if (Date.now() >= delegation.expiration) return null
 
   const account = {

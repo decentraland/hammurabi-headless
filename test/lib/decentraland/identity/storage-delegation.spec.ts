@@ -43,6 +43,18 @@ describe('parseStorageDelegation', () => {
     expect(parseStorageDelegation(encode({ parcel: undefined }))).toBeUndefined()
   })
 
+  it('rejects a non-finite expiration (NaN/Infinity would defeat the expiry guard)', () => {
+    expect(parseStorageDelegation(encode({ expiration: Number.NaN }))).toBeUndefined()
+    // JSON has no Infinity literal; it serializes to null → typeof !== number anyway,
+    // but assert the finite check via a string that our validator must reject.
+    expect(parseStorageDelegation(encode({ expiration: 'soon' as any }))).toBeUndefined()
+  })
+
+  it('rejects non-string ephemeral/scope fields', () => {
+    expect(parseStorageDelegation(encode({ ephemeral: { privateKey: 1, publicKey: '0x2', address: '0xeph' } }))).toBeUndefined()
+    expect(parseStorageDelegation(encode({ scope: { payload: 'claim', signature: 42 } }))).toBeUndefined()
+  })
+
   it('rejects non-base64 / non-JSON input', () => {
     expect(parseStorageDelegation('not-valid')).toBeUndefined()
   })
@@ -98,5 +110,26 @@ describe('getFreshStorageDelegation', () => {
     expect(process.send).toHaveBeenCalledWith({ type: 'storage-delegation:request' })
     expect(result?.expiration).toBe(renewedExpiration)
     expect(storageDelegation.getOrNull()?.expiration).toBe(renewedExpiration)
+  })
+
+  it('rejects a renewal reply bound to a different scene (does not rebind)', async () => {
+    const current = parseStorageDelegation(encode({ expiration: Date.now() + 60_000 }))!
+    storageDelegation.swap(current)
+    process.send = jest.fn(() => {
+      // Parent replies with a delegation for a DIFFERENT scene — must be rejected.
+      setImmediate(() =>
+        process.emit('message' as any, {
+          type: 'storage-delegation:response',
+          delegation: encode({ sceneId: 'bafkrei-other', expiration: Date.now() + 3_600_000 })
+        })
+      )
+      return true
+    }) as any
+
+    const result = await getFreshStorageDelegation()
+
+    // Falls back to the current (near-expiry) delegation; the atom is NOT rebound.
+    expect(result).toBe(current)
+    expect(storageDelegation.getOrNull()?.sceneId).toBe('bafkrei-scene')
   })
 })

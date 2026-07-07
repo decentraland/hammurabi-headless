@@ -26,12 +26,15 @@ export function parseStorageDelegation(encoded: string): StorageDelegation | und
       typeof parsed.world === 'string' &&
       typeof parsed.sceneId === 'string' &&
       typeof parsed.parcel === 'string' &&
-      parsed.ephemeral?.privateKey &&
-      parsed.ephemeral?.publicKey &&
-      parsed.ephemeral?.address &&
-      parsed.scope?.payload &&
-      parsed.scope?.signature &&
-      typeof parsed.expiration === 'number'
+      typeof parsed.ephemeral?.privateKey === 'string' &&
+      typeof parsed.ephemeral?.publicKey === 'string' &&
+      typeof parsed.ephemeral?.address === 'string' &&
+      typeof parsed.scope?.payload === 'string' &&
+      typeof parsed.scope?.signature === 'string' &&
+      // Finite, not just `typeof number`: NaN/Infinity would defeat the expiry
+      // guard (Date.now() >= NaN is false → signs forever) and trigger a renewal
+      // on every request (Date.now() < NaN is false).
+      Number.isFinite(parsed.expiration)
     if (!valid) {
       console.warn('Ignoring malformed storage delegation')
       return undefined
@@ -62,8 +65,20 @@ function requestRenewal(): Promise<StorageDelegation | null> {
     const onMessage = (message: any) => {
       if (!message || message.type !== STORAGE_DELEGATION_RESPONSE) return
       const parsed = typeof message.delegation === 'string' ? parseStorageDelegation(message.delegation) : undefined
-      if (parsed) storageDelegation.swap(parsed)
-      finish(parsed ?? null)
+      // Defense-in-depth: only accept a renewal that stays bound to the same scene
+      // this worker already holds. The parent mints per-child, so a differing
+      // world/sceneId/parcel means a confused/misrouted reply — reject it rather
+      // than silently rebind to another scene's credential.
+      const current = storageDelegation.getOrNull()
+      const sameScene =
+        !current ||
+        (parsed?.world === current.world && parsed?.sceneId === current.sceneId && parsed?.parcel === current.parcel)
+      if (parsed && sameScene) {
+        storageDelegation.swap(parsed)
+        finish(parsed)
+        return
+      }
+      finish(null)
     }
     const timer = setTimeout(() => finish(null), RENEWAL_TIMEOUT_MS)
     process.on('message', onMessage)

@@ -54,6 +54,13 @@ describe('getStorageSigningStrategy', () => {
     })
   })
 
+  describe('when the storage URL is http (not https)', () => {
+    it('returns null so the credential is never sent in cleartext', () => {
+      const httpUrl = 'http://storage.decentraland.zone/values/globalLeaderboard'
+      expect(getStorageSigningStrategy(httpUrl, makeDelegation(), realm, sceneCtx)).toBeNull()
+    })
+  })
+
   describe('when the delegation has expired', () => {
     it('returns null (so the worker falls back to guest until renewal succeeds)', () => {
       const expired = makeDelegation({ expiration: Date.now() - 1 })
