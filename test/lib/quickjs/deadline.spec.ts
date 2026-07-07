@@ -148,6 +148,22 @@ describe('QuickJS binary marshalling is tamper-proof', () => {
     })
   })
 
+  it('does not leak a handle when a scene queues a throwing microtask each tick', async () => {
+    // executePendingJobs returns a Disposable error handle on the fail branch;
+    // the per-turn drains must dispose it, or a scene that throws in a microtask
+    // every frame leaks a handle and makes vm.dispose() report leaking at teardown.
+    const { leaking } = await withQuickJsVm(async (opts) => {
+      opts.provide({ log() {}, error() {}, require() { throw new Error('not implemented') } })
+      opts.eval(`
+        module.exports.onUpdate = function () {
+          Promise.resolve().then(() => { throw new Error('microtask boom') })
+        }
+      `)
+      for (let i = 0; i < 5; i++) await opts.onUpdate(0.016)
+    })
+    expect(leaking).toBe(false)
+  })
+
   it('marshals a deeply nested Uint8Array without silent corruption', async () => {
     await withQuickJsVm(async (opts) => {
       const out: any = opts.eval(`

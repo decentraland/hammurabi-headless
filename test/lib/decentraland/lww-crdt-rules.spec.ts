@@ -382,4 +382,31 @@ describe('integration lww', () => {
 
     assertCrdtUpdates('DELETE_COMPONENT c=1 e=0xde t=1')
   })
+
+  it('purgeEntity clears data, dirty, and tick bookkeeping and emits nothing', () => {
+    // Fresh store: this test inspects dumpCrdtDeltas, which reads updatedAtTick
+    // accumulated across the shared store's other tests.
+    const store = createLwwStore(decl)
+    const entity = 0x51 as Entity
+    store.createOrReplace(entity, { u8: 9 })
+    // flush the create so its dirty/tick state exists (and isn't counted later)
+    store.dumpCrdtUpdates(new ReadWriteByteBuffer())
+    expect(store.has(entity)).toBe(true)
+
+    store.purgeEntity(entity)
+
+    // Unlike entityDeleted, purge produces NO removal message: it drops the
+    // entity entirely (data + dirty + updatedAtTick), so neither dumpCrdtUpdates
+    // nor a tick-0 dumpCrdtDeltas re-emits anything for it.
+    expect(store.has(entity)).toBe(false)
+    expect(Array.from(store.dirtyIterator())).toEqual([])
+
+    const updates = new ReadWriteByteBuffer()
+    store.dumpCrdtUpdates(updates)
+    expect(Array.from(readAllMessages(updates))).toEqual([])
+
+    const deltas = new ReadWriteByteBuffer()
+    store.dumpCrdtDeltas(deltas, 0)
+    expect(Array.from(readAllMessages(deltas))).toEqual([])
+  })
 })

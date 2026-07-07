@@ -97,6 +97,21 @@ describe('ByteBuffer tests', () => {
     expect(buf.buffer().byteLength).toBeGreaterThan(4)
   })
 
+  it('reads back correctly after a grow when the backing buffer is a non-zero-offset subarray', () => {
+    // Regression: after a grow, the DataView must be rebuilt at offset 0 of the
+    // fresh buffer (data is copied there), NOT at the original subarray's
+    // byteOffset — otherwise every read/write past the grow is misaligned.
+    const backing = new Uint8Array(600)
+    // capacity is the subarray length (88 bytes) at byteOffset 512
+    const buf = new ReadWriteByteBuffer(backing.subarray(512), 0, 0)
+
+    const N = 50 // 50 * 4 = 200 bytes forces at least one grow past the 88-byte start
+    for (let i = 0; i < N; i++) buf.writeUint32(i * 7)
+
+    expect(buf.buffer().byteLength).toBeGreaterThan(88)
+    for (let i = 0; i < N; i++) expect(buf.readUint32()).toBe(i * 7)
+  })
+
   it('should test increment offset and types with custom offset', () => {
     const position = new ReadWriteByteBuffer()
     const writeOffset = position.incrementWriteOffset(12)
