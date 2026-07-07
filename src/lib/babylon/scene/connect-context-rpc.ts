@@ -76,12 +76,14 @@ export function getStorageSigningStrategy(
     origin: 'hammurabi-server//',
     signer: 'dcl:authoritative-server',
     isGuest: false,
-    // Report the delegation's world so the storage service derives exactly the
-    // world the scope claim is bound to (scope.world === derived worldName).
+    // Report the delegation's world/scene/parcel (not the worker's own context) so
+    // the storage service derives exactly the placeId the scope claim is bound to
+    // and can match scope.world/sceneId/parcel to the request. The parcel pins the
+    // placeId (placeId = f(world, parcel)); sceneId is the explicit scene identity.
     realm: { serverName: delegation.world, hostname: realm.baseUrl },
     realmName: delegation.world,
-    sceneId: context.loadableScene.urn,
-    parcel: (context.loadableScene.entity.metadata as Scene).scene.base
+    sceneId: delegation.sceneId,
+    parcel: delegation.parcel
   }
 
   const scopeHeader =

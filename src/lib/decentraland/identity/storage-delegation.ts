@@ -24,7 +24,10 @@ export function parseStorageDelegation(encoded: string): StorageDelegation | und
       parsed &&
       parsed.v === 1 &&
       typeof parsed.world === 'string' &&
+      typeof parsed.sceneId === 'string' &&
+      typeof parsed.parcel === 'string' &&
       parsed.ephemeral?.privateKey &&
+      parsed.ephemeral?.publicKey &&
       parsed.ephemeral?.address &&
       parsed.scope?.payload &&
       parsed.scope?.signature &&
@@ -34,8 +37,10 @@ export function parseStorageDelegation(encoded: string): StorageDelegation | und
       return undefined
     }
     return parsed as StorageDelegation
-  } catch (error) {
-    console.warn('Failed to parse storage delegation:', error instanceof Error ? error.message : String(error))
+  } catch {
+    // Do NOT log the error detail: a JSON parse error can echo a fragment of the
+    // decoded payload, which contains the ephemeral private key.
+    console.warn('Failed to parse storage delegation')
     return undefined
   }
 }

@@ -8,6 +8,8 @@ function encode(overrides: Record<string, any> = {}): string {
   const delegation = {
     v: 1,
     world: 'boedo.dcl.eth',
+    sceneId: 'bafkrei-scene',
+    parcel: '5,7',
     ephemeral: { privateKey: '0x1', publicKey: '0x2', address: '0xeph' },
     scope: { payload: 'claim', signature: '0xsig' },
     expiration: Date.now() + 3_600_000,
@@ -27,11 +29,18 @@ describe('parseStorageDelegation', () => {
   it('parses a well-formed delegation', () => {
     const parsed = parseStorageDelegation(encode())
     expect(parsed?.world).toBe('boedo.dcl.eth')
+    expect(parsed?.sceneId).toBe('bafkrei-scene')
+    expect(parsed?.parcel).toBe('5,7')
     expect(parsed?.ephemeral.address).toBe('0xeph')
   })
 
   it('rejects a delegation missing the expiration', () => {
     expect(parseStorageDelegation(encode({ expiration: undefined }))).toBeUndefined()
+  })
+
+  it('rejects a delegation missing the sceneId or parcel', () => {
+    expect(parseStorageDelegation(encode({ sceneId: undefined }))).toBeUndefined()
+    expect(parseStorageDelegation(encode({ parcel: undefined }))).toBeUndefined()
   })
 
   it('rejects non-base64 / non-JSON input', () => {

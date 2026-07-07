@@ -25,6 +25,8 @@ function makeDelegation(overrides: Partial<StorageDelegation> = {}): StorageDele
   return {
     v: 1,
     world: 'boedo.dcl.eth',
+    sceneId: 'bafkrei-scene',
+    parcel: '5,7',
     ephemeral: { privateKey: ephemeral.privateKey, publicKey: ephemeral.publicKey, address: ephemeral.address },
     scope: { payload: 'Decentraland Authoritative Storage Delegation\n...', signature: '0xsig' },
     expiration: Date.now() + 60_000,
@@ -70,12 +72,14 @@ describe('getStorageSigningStrategy', () => {
       expect(strategy).not.toBeNull()
     })
 
-    it('reports an authoritative (non-guest) signer scoped to the delegation world', () => {
+    it('reports an authoritative (non-guest) signer scoped to the delegation world, scene, and parcel', () => {
       expect(strategy!.metadata).toMatchObject({
         signer: 'dcl:authoritative-server',
         isGuest: false,
         realmName: 'boedo.dcl.eth',
-        realm: { serverName: 'boedo.dcl.eth' }
+        realm: { serverName: 'boedo.dcl.eth' },
+        sceneId: 'bafkrei-scene',
+        parcel: '5,7'
       })
     })
 

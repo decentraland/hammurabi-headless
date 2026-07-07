@@ -24,6 +24,11 @@ export type CurrentRealm = {
 export type StorageDelegation = {
   v: number
   world: string
+  // The scene this delegation is bound to: `parcel` pins the storage placeId,
+  // `sceneId` is the explicit scene identity. The worker echoes both into the
+  // signed request metadata so the storage service can match them to the claim.
+  sceneId: string
+  parcel: string
   ephemeral: { privateKey: string; publicKey: string; address: string }
   scope: { payload: string; signature: string }
   expiration: number
