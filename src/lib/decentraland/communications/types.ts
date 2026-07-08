@@ -60,6 +60,18 @@ export interface MinimumCommunicationsTransport {
 
 export type SendHints = { reliable: boolean }
 
+// LiveKit data-packet size limit (https://docs.livekit.io/transport/data/packets/).
+// A reliable data packet has a ~16 KiB SCTP hard limit, of which ~1 KiB is consumed
+// by LiveKit's own routing headers, so the user payload (our fully-encoded rfc4
+// Packet) must stay <= 15 KiB. The transport enforces this on the encoded bytes; the
+// scene-facing controller derives its raw-payload cap from the same constant (minus
+// framing overhead) so the two limits can never drift apart.
+// NOTE: lossy delivery additionally *recommends* <= 1300 bytes to avoid MTU
+// fragmentation, but that's a reliability guideline (a dropped fragment loses the
+// whole packet), not a hard protocol cap, so we don't hard-drop on it — larger lossy
+// payloads such as profile responses still send.
+export const LIVEKIT_MAX_RELIABLE_PACKET_BYTES = 15 * 1024 // 15360
+
 // DISCONNECTION
 export type TransportDisconnectedEvent = {
   // Whether or no the reason of disconnection was that we logged in on

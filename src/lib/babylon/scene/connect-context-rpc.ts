@@ -22,12 +22,28 @@ import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { StaticEntities } from './logic/static-entities'
+import { LIVEKIT_MAX_RELIABLE_PACKET_BYTES } from '../../decentraland/communications/types'
 
 // Per-call caps on scene→LiveKit publishing (CommunicationsController.sendBinary).
 // The request is fully scene-controlled; without caps a scene could flood the room.
 const MAX_SEND_PEERS = 256
 const MAX_SEND_MESSAGES = 512
-const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network message limit
+// This caps the RAW scene payload. Before it reaches the transport it is grown by a
+// 1-byte type marker (encodeMessage) and wrapped in a Scene/Packet protobuf (sceneId
+// string + field tags/length varints), and the transport enforces
+// LIVEKIT_MAX_RELIABLE_PACKET_BYTES on that FULLY-ENCODED result. Reserve headroom for
+// the framing so a payload we accept here can never exceed the transport limit and get
+// silently dropped downstream (the send is fire-and-forget, so the scene gets no error).
+const COMMS_PACKET_FRAMING_OVERHEAD = 1024
+const MAX_COMMS_MESSAGE_BYTES = LIVEKIT_MAX_RELIABLE_PACKET_BYTES - COMMS_PACKET_FRAMING_OVERHEAD
+// Bounds on the scene-controlled recipient list of a single peer-to-peer message.
+// The addresses flow straight into the LiveKit packet's destination_identities, so
+// without these an unbounded address[] (or multi-KB identity strings) would be
+// serialized and shipped to the SFU — amplification the peer/message caps don't cover.
+// Real comms rooms hold ~100 peers; 256 is generous headroom. A wallet-address
+// identity is 42 chars, so 128 rejects only pathological strings.
+const MAX_SEND_ADDRESSES = 256
+const MAX_ADDRESS_LENGTH = 128
 
 // Max redirects a scene SignedFetch will follow. Each hop is re-validated by the
 // SSRF guard so a public host can't 3xx-redirect the request onto a private
@@ -224,20 +240,44 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         // Count every ENTRY examined (including oversized ones we skip) against the
         // cap so a scene can't force unbounded host iteration with oversized spam.
         let processed = 0
-        for (const peerData of req.peerData.slice(0, MAX_SEND_PEERS)) {
+
+        // Publish one scene message to `destination` (empty = broadcast), enforcing
+        // the type + size guard. A non-Uint8Array here (e.g. a byte-keyed plain
+        // object) has undefined length, which would pass the cap check and then
+        // publish an empty payload. Returns false once the total-message cap is hit.
+        const publish = (data: unknown, destination: string[]): boolean => {
+          if (processed >= MAX_SEND_MESSAGES) return false
+          processed++
+          if (!(data instanceof Uint8Array) || data.length > MAX_COMMS_MESSAGE_BYTES) return true
+          void context.transport!.sendParcelSceneMessage(
+            { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
+            destination
+          )
+          return true
+        }
+
+        // Deprecated broadcast field: still emitted by older SDK builds (newer ones
+        // broadcast via peerData with an empty address). Handle it so those scenes'
+        // messages aren't silently dropped.
+        for (const data of req.data) {
+          if (!publish(data, [])) break
+        }
+
+        // Peer-to-peer messages.
+        outer: for (const peerData of req.peerData.slice(0, MAX_SEND_PEERS)) {
+          // Cap the scene-controlled recipient list per message and drop implausibly
+          // long identity strings before they reach LiveKit's destination_identities.
+          // slice() first so we never iterate an unbounded array.
+          const destination = peerData.address
+            .slice(0, MAX_SEND_ADDRESSES)
+            .filter((addr) => typeof addr === 'string' && addr.length <= MAX_ADDRESS_LENGTH)
+          // An empty destination means broadcast. If the scene DID target specific
+          // peers but none survived filtering, drop the message rather than silently
+          // broadcasting it to the whole room.
+          if (peerData.address.length > 0 && destination.length === 0) continue
           for (const data of peerData.data) {
-            if (processed >= MAX_SEND_MESSAGES) break
-            processed++
-            // Guard the type as well as the size: a non-Uint8Array here (e.g. a
-            // byte-keyed plain object) has undefined length, which would pass the
-            // cap check and then publish an empty payload.
-            if (!(data instanceof Uint8Array) || data.length > MAX_COMMS_MESSAGE_BYTES) continue
-            void context.transport.sendParcelSceneMessage(
-              { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
-              peerData.address
-            )
+            if (!publish(data, destination)) break outer
           }
-          if (processed >= MAX_SEND_MESSAGES) break
         }
       }
       return {

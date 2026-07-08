@@ -38,11 +38,21 @@ const authoritativeIdentity: ExplorerIdentity = {
   signer: async () => 'authoritative-sig'
 }
 
+// Transport is faked so we can assert exactly what sendBinary publishes (and to
+// which destinations) without a real LiveKit room. Cleared in afterEach via
+// jest.clearAllMocks(), same as signedFetchMock.
+const sendParcelSceneMessageMock = jest.fn()
+
 const sceneCtx = {
+  entityId: 'test-entity',
   loadableScene: {
     urn: 'urn:decentraland:entity:bafktest',
     entity: { metadata: { scene: { base: '0,0' } } }
-  }
+  },
+  transport: {
+    sendParcelSceneMessage: sendParcelSceneMessageMock
+  },
+  getNetworkMessages: () => [] as Uint8Array[]
 } as unknown as SceneContext
 
 async function createScenePort(): Promise<RpcClientPort> {
@@ -260,6 +270,103 @@ describe('scene RPC capabilities', () => {
 
     it('should report the caller as not web3-connected', () => {
       expect(data.hasConnectedWeb3).toBe(false)
+    })
+  })
+
+  describe('when a scene broadcasts via the deprecated data field', () => {
+    let message: Uint8Array
+
+    beforeEach(async () => {
+      message = new Uint8Array([1, 2, 3])
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({ data: [message], peerData: [] })
+    })
+
+    it('should publish the message instead of silently dropping it', () => {
+      expect(sendParcelSceneMessageMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('should publish it as a broadcast with an empty destination', () => {
+      expect(sendParcelSceneMessageMock.mock.calls[0][1]).toEqual([])
+    })
+  })
+
+  describe('when a scene targets specific peers', () => {
+    beforeEach(async () => {
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({
+        data: [],
+        peerData: [{ address: ['0xpeer1', '0xpeer2'], data: [new Uint8Array([1])] }]
+      })
+    })
+
+    it('should publish the message to exactly those addresses', () => {
+      expect(sendParcelSceneMessageMock.mock.calls[0][1]).toEqual(['0xpeer1', '0xpeer2'])
+    })
+  })
+
+  describe('and the recipient list exceeds the per-message cap', () => {
+    beforeEach(async () => {
+      const addresses = Array.from({ length: 300 }, (_, i) => '0x' + i.toString(16).padStart(40, '0'))
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({ data: [], peerData: [{ address: addresses, data: [new Uint8Array([1])] }] })
+    })
+
+    it('should truncate the destination to the address cap', () => {
+      expect(sendParcelSceneMessageMock.mock.calls[0][1]).toHaveLength(256)
+    })
+  })
+
+  describe('and a recipient identity string is implausibly long', () => {
+    beforeEach(async () => {
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({
+        data: [],
+        peerData: [{ address: ['0xshort', 'z'.repeat(200)], data: [new Uint8Array([1])] }]
+      })
+    })
+
+    it('should drop the oversized identity from the destination', () => {
+      expect(sendParcelSceneMessageMock.mock.calls[0][1]).toEqual(['0xshort'])
+    })
+  })
+
+  describe('and a targeted message has no valid recipients after filtering', () => {
+    beforeEach(async () => {
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({
+        data: [],
+        peerData: [{ address: ['z'.repeat(200)], data: [new Uint8Array([1])] }]
+      })
+    })
+
+    it('should drop the message rather than broadcasting it to the whole room', () => {
+      expect(sendParcelSceneMessageMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and a message payload exceeds the size cap', () => {
+    beforeEach(async () => {
+      // MAX_COMMS_MESSAGE_BYTES = LIVEKIT_MAX_RELIABLE_PACKET_BYTES (15360) - 1024 framing
+      const oversized = new Uint8Array(15360 - 1024 + 1)
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({ data: [], peerData: [{ address: [], data: [oversized] }] })
+    })
+
+    it('should not publish the oversized message', () => {
+      expect(sendParcelSceneMessageMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('and a single call publishes more messages than the total cap', () => {
+    beforeEach(async () => {
+      const messages = Array.from({ length: 513 }, () => new Uint8Array([1]))
+      const comms: any = loadModuleForPort(port, '~system/CommunicationsController')
+      await comms.sendBinary({ data: [], peerData: [{ address: [], data: messages }] })
+    })
+
+    it('should stop publishing at the total-message cap', () => {
+      expect(sendParcelSceneMessageMock).toHaveBeenCalledTimes(512)
     })
   })
 })
