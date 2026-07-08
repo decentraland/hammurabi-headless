@@ -1,6 +1,6 @@
-import { QuickJSHandle, QuickJSContext, newQuickJSWASMModuleFromVariant } from 'quickjs-emscripten-core'
+import { QuickJSHandle, QuickJSContext, Scope, newQuickJSWASMModuleFromVariant } from 'quickjs-emscripten-core'
 import { quickJsVariant } from './variant'
-import { dumpAndDispose, nativeToVmType } from './convert-handles';
+import { dumpAndDispose, nativeToVmType, installMarshalHelpers, disposeMarshalHelpers } from './convert-handles';
 import { RunWithVmOptions } from './types';
 
 export * from './types'
@@ -34,6 +34,16 @@ export type QuickJsVmLimits = {
   memoryLimitBytes?: number
   maxStackBytes?: number
   maxSyncExecutionMs?: number
+}
+
+// executePendingJobs returns a Disposable result whose FAIL branch owns a
+// QuickJS error handle; dropping it leaks one VM handle per throwing microtask
+// job, which eventually makes vm.dispose() throw and get misreported as leaking.
+// Always dispose that handle. Callers must run startSyncTurn() first — draining
+// jobs executes untrusted scene code, so it gets its own deadline turn.
+function drainPendingJobs(vm: QuickJSContext) {
+  const result = vm.runtime.executePendingJobs()
+  if ('error' in result && result.error) result.error.dispose()
 }
 
 export async function withQuickJsVm<T>(
@@ -74,20 +84,12 @@ export async function withQuickJsVm<T>(
   vm.setProp(vm.global, 'global', vm.global)
   const failures: any[] = []
 
-  // Host-side marshalling (dumpAndDispose) calls this to decide whether a handle
-  // is a Uint8Array. Define it non-writable AND non-configurable so an untrusted
-  // scene can't replace it with a function that lies about types and feeds the
-  // host attacker-chosen bytes. (defineProp without a writable flag creates a
-  // non-writable data property; configurable:false blocks delete/redefine.)
-  vm.unwrapResult(
-    vm.evalCode('(t) => { return (t && t instanceof Uint8Array) ? Array.from(t) : null }', 'isUint8Array.js')
-  ).consume((isUint8Array) =>
-    vm.defineProp(vm.global, 'isUint8Array', {
-      value: isUint8Array,
-      configurable: false,
-      enumerable: false
-    })
-  )
+  // Compile the host-private marshalling helpers (binary classifier + byte
+  // wrapper) BEFORE any scene code runs so they capture untampered primordials.
+  // The host holds the only handles to them — they are never exposed on the VM
+  // global object, so an untrusted scene can't see or replace what the host
+  // calls to classify/read its values and feed it attacker-chosen bytes.
+  installMarshalHelpers(vm)
 
   let result: T
   let leaking = false
@@ -135,9 +137,25 @@ export async function withQuickJsVm<T>(
       },
       async onUpdate(dt) {
         startSyncTurn()
-        const result = vm.evalCode(`module.exports.onUpdate(${JSON.stringify(dt)})`, 'onUpdate')
+        // Look up module.exports.onUpdate with property gets and call it directly:
+        // evalCode would lex/parse/compile a fresh script on every tick. The
+        // lookup stays per-tick (not cached) so a scene that reassigns onUpdate
+        // at runtime keeps working exactly as before.
+        const promiseHandle = Scope.withScope((scope) => {
+          const moduleHandle = scope.manage(vm.getProp(vm.global, 'module'))
+          const exportsHandle = scope.manage(vm.getProp(moduleHandle, 'exports'))
+          const fnHandle = scope.manage(vm.getProp(exportsHandle, 'onUpdate'))
+          const dtHandle = scope.manage(vm.newNumber(dt))
+          return vm.unwrapResult(vm.callFunction(fnHandle, exportsHandle, dtHandle))
+        })
 
-        const promiseHandle = vm.unwrapResult(result)
+        // Drain the microtasks the synchronous part of onUpdate queued (e.g. a
+        // turn ending in Promise.resolve()): without this, a turn that never
+        // awaits a host promise only settles when the 16ms interval fires,
+        // adding up to a frame of latency. Job execution is untrusted scene
+        // code, so it gets its own deadline turn.
+        startSyncTurn()
+        drainPendingJobs(vm)
 
         // Convert the promise handle into a native promise and await it (bounded).
         // Dispose the handle in a finally so an async-turn timeout (or a throw
@@ -156,6 +174,11 @@ export async function withQuickJsVm<T>(
         const result = vm.evalCode(`module.exports.onStart ? module.exports.onStart() : Promise.resolve()`, 'onStart')
 
         const promiseHandle = vm.unwrapResult(result)
+
+        // See onUpdate: settle VM-internal promise chains without waiting for
+        // the 16ms interval pump.
+        startSyncTurn()
+        drainPendingJobs(vm)
 
         // See onUpdate: always dispose the promise handle.
         try {
@@ -232,6 +255,7 @@ export async function withQuickJsVm<T>(
     requireCache.clear()
 
     immediates.dispose()
+    disposeMarshalHelpers(vm)
     vm.runtime.removeInterruptHandler()
     try {
       vm.dispose()
@@ -279,7 +303,7 @@ export function setupSetImmediate(vm: QuickJSContext, startSyncTurn: () => void 
 
     // Draining microtasks (resolved scene promises) is also untrusted execution.
     startSyncTurn()
-    vm.runtime.executePendingJobs()
+    drainPendingJobs(vm)
   }, 16)
 
   return {

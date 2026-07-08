@@ -3,9 +3,11 @@ import { BabylonEntity } from '../BabylonEntity'
 import { getColliderLayers } from './colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { InputAction, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
+import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
 import { pickingToRaycastHit, raycastResultFromRay } from './raycasts'
+import { loadedScenesByEntityId } from '../../../decentraland/state'
 
 // returns true if the entity has PointerEvents
 export function entityHasPointerEvents(entity: BabylonEntity) {
@@ -31,7 +33,24 @@ function getParentEntity(leafEntity: Node): BabylonEntity | null {
   return null
 }
 
+// returns true if any loaded scene has at least one PointerEvents component
+function anySceneHasPointerEvents(): boolean {
+  for (const context of loadedScenesByEntityId.values()) {
+    const store = context.components[pointerEventsComponent.componentId]
+    for (const _ of store.iterator()) return true
+  }
+  return false
+}
+
 export function pickPointerEventsMesh(scene: Scene) {
+  // The center-screen pick below is a full-scene CPU raycast (predicate over
+  // every mesh, triangle-level tests) that runs every frame — skip it entirely
+  // when no loaded scene has a PointerEvents component, since hover synthesis is
+  // its only consumer on this headless server. When an entity is currently
+  // hovered, still run one more pass so HOVER_LEAVE fires after the last
+  // PointerEvents component disappears.
+  if (!lastPickedEntity && !anySceneHasPointerEvents()) return
+
   const pickedEntity = pickActivePointerEventsEntity(scene)
 
   hoverNewEntity(pickedEntity, scene)
@@ -85,13 +104,19 @@ function addPointerEventResult(entity: BabylonEntity, result: Omit<PBPointerEven
 }
 
 function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
-  if (lastPickedEntity && lastPickedEntity !== entity) {
+  if (lastPickedEntity === entity) return
+
+  // HOVER_LEAVE targets the previous entity, so it must fire BEFORE the
+  // reassignment; HOVER_ENTER targets the new one, so it fires after. (The
+  // previous version compared lastPickedEntity !== entity AFTER assigning it,
+  // so HOVER_ENTER could never fire.)
+  if (lastPickedEntity) {
     interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.UNRECOGNIZED)
   }
 
   lastPickedEntity = entity
 
-  if (entity && lastPickedEntity !== entity) {
+  if (entity) {
     interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.UNRECOGNIZED)
   }
 

@@ -28,8 +28,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const Transform = createLwwStore(transformComponent)
   const listOfComponentsToSynchronize: ComponentDefinition<any>[] = [PlayerIdentityData, AvatarBase, AvatarEquippedData, Transform]
 
-  // Track deleted entities for DELETE_ENTITY CRDT messages
-  const deletedEntities = new Map<Entity, number>()  // entity -> tick when deleted
+  // Track deleted entities for DELETE_ENTITY CRDT messages: entity -> the
+  // deletion sequence number when it was removed. The sequence is a dedicated
+  // monotonic counter (NOT the per-frame tick): a subscription emits every
+  // tombstone whose sequence exceeds the highest it has already emitted. Using
+  // the frame tick here raced — a disconnect stamped between frames got the tick
+  // the last getUpdates had already marked as emitted, so DELETE_ENTITY never
+  // fired and departed avatars lingered forever.
+  const deletedEntities = new Map<Entity, number>()
+  let deletionSequence = 0
   // Bound the tombstone map: peers churn through versioned entity ids over a long
   // session, and this grows once per departed peer. Oldest entries are evicted.
   const MAX_DELETED_ENTITIES = 4096
@@ -49,10 +56,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   function normalizeAddress(address: string) {
     return address.toLowerCase()
-  }
-
-  function allFinite(...values: any[]): boolean {
-    return values.every((v) => typeof v === 'number' && Number.isFinite(v))
   }
 
   async function fetchProfileFromCatalyst(address: string, _lambdasEndpoint?: string): Promise<any> {
@@ -162,12 +165,27 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   function removePlayerEntity(entity: Entity, address: string) {
     for (const component of listOfComponentsToSynchronize) {
-      component.entityDeleted(entity, true)
+      // purge (not just delete): peer entity ids are generationally versioned so
+      // this id never comes back, these stores receive no remote CRDT updates
+      // (they are only written from transport events), and the removal is
+      // signaled to consumers via the DELETE_ENTITY tombstone below. Keeping
+      // timestamps/tick entries would grow every map by one entry per departed
+      // peer forever — and dumpCrdtDeltas scans those maps every scene tick.
+      // Because purge drops those maps, DELETE_ENTITY is now the ONLY removal
+      // signal, so it must be delivered reliably (see deletionSequence).
+      component.purgeEntity(entity)
     }
 
     // Track this entity for DELETE_ENTITY message, evicting the oldest tombstone
     // once the map is full so it can't grow without bound over a long session.
-    deletedEntities.set(entity, currentTick)
+    // TRADEOFF: this cap is a load-bearing memory bound (CLAUDE.md), and since
+    // purgeEntity dropped the delta-channel removal fallback, DELETE_ENTITY is
+    // the only removal signal. If a scene's VM stalls (its getUpdates stops
+    // running) while > MAX_DELETED_ENTITIES distinct peers disconnect, the oldest
+    // tombstones evict before that scene emits them, leaving a few ghost avatars
+    // until it reloads. Deliberately accepted: the bound matters more than a
+    // cosmetic glitch that needs 4096+ departures during a single hang.
+    deletedEntities.set(entity, ++deletionSequence)
     while (deletedEntities.size > MAX_DELETED_ENTITIES) {
       const oldest = deletedEntities.keys().next().value
       if (oldest === undefined) break
@@ -233,9 +251,14 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     }
   }
 
+  // reused input temp: worldToScene produces the (fresh) vector the store
+  // retains; this only avoids the second, intermediate allocation per packet
+  const tmpWorldPosition = new Vector3()
+
   const putPlayerTransform = (entity: Entity, data: any, rotation: Quaternion) => {
+    tmpWorldPosition.set(data.positionX, data.positionY, data.positionZ)
     Transform.createOrReplace(entity, {
-      position: worldToScene(new Vector3(data.positionX, data.positionY, data.positionZ)),
+      position: worldToScene(tmpWorldPosition),
       scale: Vector3.One(),
       rotation,
       parent: StaticEntities.RootEntity
@@ -246,7 +269,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     const d = event.data
     // Reject non-finite coordinates from untrusted peers before they poison the
     // scene's transform state (NaN/Infinity propagate through Babylon math).
-    if (!allFinite(d.positionX, d.positionY, d.positionZ, d.rotationX, d.rotationY, d.rotationZ, d.rotationW)) return
+    // Inlined checks: a rest-args helper allocated an array per packet.
+    if (
+      !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
+      !Number.isFinite(d.rotationX) || !Number.isFinite(d.rotationY) || !Number.isFinite(d.rotationZ) ||
+      !Number.isFinite(d.rotationW)
+    ) return
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
       putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
@@ -255,7 +283,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   const handleMovement = (event: { address: string, data: any }) => {
     const d = event.data
-    if (!allFinite(d.positionX, d.positionY, d.positionZ, d.rotationY)) return
+    if (
+      !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
+      !Number.isFinite(d.rotationY)
+    ) return
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
@@ -275,8 +306,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   const handleChatMessage = (event: { address: string, data: any }) => {
-    const address = normalizeAddress(event.address)
-    const _cached = profileCache.get(address)
     findPlayerEntityByAddress(event.address, true)
   }
 
@@ -296,10 +325,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // Update function to be called each frame
     update() {
       currentTick++
-      const updates = new ReadWriteByteBuffer()
       for (const component of listOfComponentsToSynchronize) {
-        // Commit updates and clean dirty iterators
-        component.dumpCrdtUpdates(updates)
+        // Advance ticks/timestamps and clear the dirty state; serialization
+        // happens per-subscription in getUpdates (dumpCrdtDeltas). This
+        // previously serialized every dirty component into a throwaway buffer
+        // allocated every frame.
+        component.commitDirtyState()
       }
     },
 
@@ -308,7 +339,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       const state = new Map<ComponentDefinition<any>, number>(
         listOfComponentsToSynchronize.map(component => [component, -1])
       )
-      let lastDeleteTick = -1  // Track last processed delete tick
+      let lastEmittedDeletionSeq = 0  // highest deletion sequence already emitted
 
       return {
         range: [32, 256] as [number, number],
@@ -321,13 +352,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
           deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {
-          // Write DELETE_ENTITY messages for removed players
-          for (const [entityId, tick] of deletedEntities) {
-            if (tick > lastDeleteTick) {
+          // Write DELETE_ENTITY messages for players removed since we last ran.
+          // Keyed on the monotonic deletion sequence, not the frame tick, so a
+          // disconnect that lands between frames is still delivered exactly once.
+          for (const [entityId, seq] of deletedEntities) {
+            if (seq > lastEmittedDeletionSeq) {
               DeleteEntity.write({ entityId }, writer)
             }
           }
-          lastDeleteTick = currentTick
+          lastEmittedDeletionSeq = deletionSequence
 
           // Serialize all component updates from the last tick until now
           for (const [component, tick] of state) {

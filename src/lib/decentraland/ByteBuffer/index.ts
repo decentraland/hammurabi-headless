@@ -36,9 +36,13 @@ export class ReadWriteByteBuffer implements ByteBuffer {
       const newsize = getNextSize(this.#buffer.byteLength, this.woffset + amount)
       const newBuffer = new Uint8Array(newsize)
       newBuffer.set(this.#buffer)
-      const oldOffset = this.#buffer.byteOffset
       this.#buffer = newBuffer
-      this.#view = new DataView(this.#buffer.buffer, oldOffset)
+      // The freshly allocated buffer always starts at offset 0 of its
+      // ArrayBuffer (set() above copied the old content there). Reusing the OLD
+      // buffer's byteOffset here would misalign every read/write after a grow
+      // whenever the original buffer was a view into a larger allocation (e.g. a
+      // protobuf-decoded subarray).
+      this.#view = new DataView(this.#buffer.buffer)
     }
 
     this.woffset += amount
@@ -250,13 +254,18 @@ export class ReadWriteByteBuffer implements ByteBuffer {
 }
 
 /**
- * Take the max between currentSize and intendedSize and then plus 1024. Then,
- *  find the next nearer multiple of 1024.
+ * Grow geometrically (double the current size, or the intended size plus one
+ * chunk if that is larger), rounded up to the next multiple of 1024.
+ *
+ * Growing linearly (+1KB per grow) made writing an S-byte payload in small
+ * pieces copy the whole buffer ~S/1024 times — O(S²) bytes of memcpy. A large
+ * crdtGetState dump (multi-MB) turned into gigabytes of copying. Doubling keeps
+ * total copy work O(S).
  * @param currentSize - number
  * @param intendedSize - number
  * @returns the calculated number
  */
 function getNextSize(currentSize: number, intendedSize: number) {
-  const minNewSize = Math.max(currentSize, intendedSize) + 1024
+  const minNewSize = Math.max(currentSize * 2, intendedSize + 1024)
   return Math.ceil(minNewSize / 1024) * 1024
 }

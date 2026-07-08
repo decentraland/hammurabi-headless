@@ -18,7 +18,7 @@ export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
     const dtMillis = now - start
 
     if (dtMillis < MIN_FRAME_TIME) {
-      await sleep(MIN_FRAME_TIME - dtMillis - 1)
+      await sleep(MIN_FRAME_TIME - dtMillis)
       continue
     }
 
@@ -30,7 +30,9 @@ export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
   }
 }
 
+// Always yield through a real timer: an early-return for small values turns the
+// caller's wait loop into a microtask-speed busy-wait that pins a core until the
+// deadline passes (~1-2ms of spin per tick, constantly).
 export async function sleep(ms: number) {
-  if (ms > 1)
-    return new Promise(resolve => setTimeout(resolve, ms))
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)))
 }

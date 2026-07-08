@@ -1,6 +1,12 @@
 import { CrdtMessageProtocol } from './crdtMessageProtocol'
 import { ByteBuffer } from '../ByteBuffer'
-import { CrdtMessageType, CRDT_MESSAGE_HEADER_LENGTH, DeleteComponentMessage, DeleteComponentMessageBody } from './types'
+import {
+  CrdtMessageType,
+  CrdtMessageHeader,
+  CRDT_MESSAGE_HEADER_LENGTH,
+  DeleteComponentMessage,
+  DeleteComponentMessageBody
+} from './types'
 import { Entity } from '../types'
 
 /**
@@ -25,9 +31,9 @@ export namespace DeleteComponent {
     buf.writeUint32(message.timestamp)
   }
 
-  export function read(buf: ByteBuffer): DeleteComponentMessage | null {
-    const header = CrdtMessageProtocol.readHeader(buf)
-
+  /** See PutComponentOperation.read for the peekedHeader contract. */
+  export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): DeleteComponentMessage | null {
+    const header = CrdtMessageProtocol.consumeOrReadHeader(buf, peekedHeader)
     if (!header) {
       return null
     }
@@ -36,13 +42,12 @@ export namespace DeleteComponent {
       throw new Error('DeleteComponentOperation tried to read another message type.')
     }
 
-    const msg = {
-      ...header,
+    return {
+      length: header.length,
+      type: CrdtMessageType.DELETE_COMPONENT,
       entityId: buf.readUint32() as Entity,
       componentId: buf.readUint32(),
       timestamp: buf.readUint32()
     }
-
-    return msg
   }
 }

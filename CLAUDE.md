@@ -22,6 +22,10 @@ npm start                  # Runs: node dist/cli.js --realm=localhost:8000
 node dist/cli.js --realm=https://peer.decentraland.org --position=80,80
 node dist/cli.js --realm=http://localhost:8000 --authenticated
 npx @dcl/hammurabi-server --position=0,0  # Default to peer.decentraland.org
+
+# Environment variables
+HAMMURABI_FPS=60 node dist/cli.js ...        # renderer tick rate (default 30, max 60)
+HAMMURABI_XHR_DEBUG=1 node dist/cli.js ...   # per-request asset fetch logging
 ```
 
 ## Project Architecture
@@ -85,10 +89,25 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   onUpdate / each setImmediate callback / each `executePendingJobs`), NOT
   cumulatively — a time-based "reset on gap" heuristic false-kills long-lived
   scenes once the sum of their turns crosses the budget. A separate async-turn
-  timeout bounds a never-settling onUpdate promise. The `isUint8Array` marshalling
-  helper is installed non-writable/non-configurable so a scene can't replace it to
-  forge host-side bytes; `require()` results are cached so repeated calls don't
-  leak host handles; VM teardown always disposes even if job-draining times out.
+  timeout bounds a never-settling onUpdate promise. `require()` results are
+  cached so repeated calls don't leak host handles; VM teardown always disposes
+  even if job-draining times out.
+- **Binary marshalling (`quick-js/convert-handles.ts`).** Uint8Arrays cross the
+  VM boundary through the WASM ArrayBuffer APIs (`newArrayBuffer` /
+  `getArrayBuffer`), NOT as JSON text — the JSON detour measured 2-3 orders of
+  magnitude slower and silently corrupted nested payloads (empty `sendBinary`).
+  The VM-side classifier/wrapper helpers are compiled BEFORE any scene code runs
+  and their handles are host-private (never exposed on the VM global), so a
+  scene cannot see or replace what the host calls to read its values. Binary
+  detection is the `%TypedArray%.prototype.buffer` getter — an unspoofable
+  internal-slot check (a `Symbol.toStringTag` brand is scene-controllable), and
+  the copy goes through ArrayBuffer/typed-array views only so no scene code runs
+  while marshalling. Every primordial the helpers touch (that buffer getter plus
+  byteOffset/byteLength, `Object.keys`, `Array.isArray`) is captured at install
+  time so prototype poisoning can't forge host-side bytes, and the placeholder
+  that marks an extracted buffer in the dumped tree uses a per-VM random nonce
+  key the scene can't predict or forge. Per-payload (16MB) and per-value (4096
+  buffers) caps bound host allocations; these are load-bearing.
 - **Scene bundle evaluation (`quick-js/rpc-scene-runtime.ts`).** The scene main
   file is evaluated inside a CommonJS-style function wrapper, NOT as a raw global
   script. Reference runtimes do the same and scenes depend on it: a top-level

@@ -31,7 +31,6 @@ export type AppliedComponents = {
   billboard: PBBillboard
   raycast: {
     value: PBRaycast
-    helper?: BABYLON.RayHelper
     ray: BABYLON.Ray
   }
   meshCollider: {
@@ -66,6 +65,19 @@ export const baseMaterial = memoize((scene: BABYLON.Scene) => {
   material.diffuseTexture = new BABYLON.Texture('images/UV_checker_Map_byValle.jpg')
   return material
 })
+
+// Reused temporaries for the billboard math below. _afterComputeWorldMatrix runs
+// per billboarded entity per frame (billboards are never world-matrix-cached by
+// design, see _isSynchronized) and previously allocated ~8 objects per call.
+// Single-threaded and non-reentrant: the super call never re-enters this branch.
+const tmpBbPosition = new Vector3()
+const tmpBbScale = new Vector3()
+const tmpBbDirection = new Vector3()
+const tmpBbRotation = new Quaternion()
+const tmpBbEuler = new Vector3()
+const tmpBbMatrix = new Matrix()
+const tmpBbScalingMatrix = new Matrix()
+const READONLY_VECTOR3_ZERO = Vector3.Zero()
 
 /**
  * This class wraps a BabylonEntity and extends it with all the component-related
@@ -140,47 +152,45 @@ export class BabylonEntity extends BABYLON.TransformNode {
     if (this.appliedComponents.billboard && camera) {
       const billboardMode = this.appliedComponents.billboard.billboardMode ?? BillboardMode.BM_ALL
 
-      // save translation and scaling components of the world matrix calculated by Babylon
-      const position = Vector3.Zero()
-      const scale = Vector3.One()
-      this._worldMatrix.decompose(scale, undefined, position)
-
-      // compute the global position of the world matrix
-      const entityGlobalPosition = Vector3.TransformCoordinates(Vector3.Zero(), this._worldMatrix)
+      // save translation and scaling components of the world matrix calculated by
+      // Babylon (the translation IS the entity's global position — transforming
+      // the origin by the world matrix yields the same vector)
+      this._worldMatrix.decompose(tmpBbScale, undefined, tmpBbPosition)
 
       // get the direction vector from the camera to the entity position
-      const directionVector = camera.globalPosition.subtract(entityGlobalPosition);
+      camera.globalPosition.subtractToRef(tmpBbPosition, tmpBbDirection)
 
       // calculate the LookAt matrix from the direction vector towards zero
-      const rotMatrix = Matrix.LookAtLH(directionVector, Vector3.Zero(), camera.upVector).invert()
-      const rotation = Quaternion.FromRotationMatrix(rotMatrix)
+      Matrix.LookAtLHToRef(tmpBbDirection, READONLY_VECTOR3_ZERO, camera.upVector, tmpBbMatrix)
+      tmpBbMatrix.invert()
 
       if (isValidBillboardCombination(billboardMode)) {
-        const eulerAngles = rotation.toEulerAngles();
+        Quaternion.FromRotationMatrixToRef(tmpBbMatrix, tmpBbRotation)
+        tmpBbRotation.toEulerAnglesToRef(tmpBbEuler)
 
         if (!(billboardMode & BillboardMode.BM_X)) {
-          eulerAngles.x = 0;
+          tmpBbEuler.x = 0;
         }
 
         if (!(billboardMode & BillboardMode.BM_Y)) {
-          eulerAngles.y = 0;
+          tmpBbEuler.y = 0;
         }
 
         if (!(billboardMode & BillboardMode.BM_Z)) {
-          eulerAngles.z = 0;
+          tmpBbEuler.z = 0;
         }
 
-        Matrix.RotationYawPitchRollToRef(eulerAngles.y, eulerAngles.x, eulerAngles.z, rotMatrix);
+        Matrix.RotationYawPitchRollToRef(tmpBbEuler.y, tmpBbEuler.x, tmpBbEuler.z, tmpBbMatrix);
       }
 
       // restore the scale to a blank scaling matrix
-      const scalingMatrix = Matrix.Scaling(scale.x, scale.y, scale.z);
+      Matrix.ScalingToRef(tmpBbScale.x, tmpBbScale.y, tmpBbScale.z, tmpBbScalingMatrix);
 
       // apply the scale to the rotation matrix, into _worldMatrix
-      scalingMatrix.multiplyToRef(rotMatrix, this._worldMatrix)
+      tmpBbScalingMatrix.multiplyToRef(tmpBbMatrix, this._worldMatrix)
 
       // finally restore the translation into _worldMatrix
-      this._worldMatrix.setTranslation(position);
+      this._worldMatrix.setTranslation(tmpBbPosition);
     }
 
     return super._afterComputeWorldMatrix()

@@ -373,4 +373,12 @@ describe('Conflict resolution rules for GrowOnlyValueSet based components with S
 
     expect(Array.from(component.iterator())).toEqual([[entityId, new Set([3])]])
   })
+
+  it('throws on commitDirtyState instead of silently dropping queued appends', () => {
+    // GOVS has no delta channel (dumpCrdtDeltas is unimplemented), so there is no
+    // safe way to advance bookkeeping without losing the appended values. It must
+    // fail loudly rather than discard data if a future caller ever reaches it.
+    component.addValue(5 as Entity, { text: 'x', timestamp: 1 })
+    expect(() => component.commitDirtyState()).toThrow(/GrowOnlyValueSet/)
+  })
 })

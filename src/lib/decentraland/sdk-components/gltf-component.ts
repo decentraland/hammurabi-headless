@@ -42,8 +42,13 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
     // if the "src" property didn't change
     context.assetManager.getContainerFuture(newValue.src).then((assetContainer) => {
       // check if we need to update the gltf, this may be false due to async nature of the loader
-      // in that case we simply ignore the result
-      const isCurrentValueUpdated = newSrc === entity.appliedComponents.gltfContainer?.value.src
+      // in that case we simply ignore the result.
+      // Also bail if the entity was disposed while the load was in flight (scene
+      // teardown / hot reload): instantiating now would parent orphan meshes into
+      // the shared scene, and AssetManager.dispose() then frees the container's
+      // geometry out from under them.
+      const isCurrentValueUpdated =
+        !entity.isDisposed() && newSrc === entity.appliedComponents.gltfContainer?.value.src
       if (isCurrentValueUpdated) {
         // remove the previous gltf
         removeCurrentGltf(entity)

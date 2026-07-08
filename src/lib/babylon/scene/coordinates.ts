@@ -9,6 +9,12 @@ export function globalCoordinatesToSceneCoordinates(scene: SceneContext, coordin
   return coordinates.subtract(scene.rootNode.position)
 }
 
+// Allocation-free variant for per-frame paths. `ref` may be the same object as
+// `coordinates`.
+export function globalCoordinatesToSceneCoordinatesToRef(scene: SceneContext, coordinates: Vector3, ref: Vector3) {
+  return coordinates.subtractToRef(scene.rootNode.position, ref)
+}
+
 // This function converts a "scene" coordinate to a "global" coordinate system
 export function sceneCoordinatesToBabylonGlobalCoordinates(scene: SceneContext, coordinates: Vector3) {
   return coordinates.add(scene.rootNode.position)

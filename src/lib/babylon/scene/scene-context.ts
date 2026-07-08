@@ -142,6 +142,10 @@ export class SceneContext implements EngineApiInterface {
     [realmInfoComponent.componentId]: createLwwStore(realmInfoComponent)
   } as const
 
+  // cached because lateUpdate iterates the components every frame and
+  // Object.values allocates a fresh array per call
+  private readonly componentList = Object.values(this.components)
+
   // this flag is changed every time an entity changed its parent. the change
   // in the hierarchy is not immediately applied, instead, it should be queued
   // in the unparentedEntities set. Once there, at the end of the "tick", the
@@ -402,7 +406,7 @@ export class SceneContext implements EngineApiInterface {
     this.updateStaticEntities()
 
     // write all the CRDT updates in the outgoingMessagesBuffer
-    for (const component of Object.values(this.components)) {
+    for (const component of this.componentList) {
       component.dumpCrdtUpdates(this.outgoingMessagesBuffer)
     }
 
@@ -411,7 +415,13 @@ export class SceneContext implements EngineApiInterface {
       subscription.getUpdates(this.subscriptionsBuffer)
 
       if (this.subscriptionsBuffer.currentWriteOffset()) {
-        const binary = this.subscriptionsBuffer.toBinary()
+        // COPY, not a view: subscriptionsBuffer is shared across subscriptions and
+        // reset+rewritten in place on the NEXT loop iteration, which would clobber
+        // this subscription's still-referenced bytes (both the outMessages entry
+        // and the incomingMessages buffer below) before they are consumed. Unlike
+        // outgoingMessagesBuffer (a single view consumed on a microtask), this one
+        // is reused synchronously within the same frame.
+        const binary = this.subscriptionsBuffer.toCopiedBinary()
         // send the messages from the subscriptions to the scenes
         outMessages.push(binary)
         // auto process the messages from the subscriptions
@@ -428,6 +438,12 @@ export class SceneContext implements EngineApiInterface {
       this.outgoingMessagesBuffer.incrementReadOffset(-this.outgoingMessagesBuffer.currentReadOffset())
     }
 
+    // TIMING HAZARD: outMessages holds toBinary() VIEWS into subscriptionsBuffer
+    // and outgoingMessagesBuffer, whose write offsets were just reset for reuse.
+    // This is safe ONLY because the futures resolved below are consumed (RPC
+    // protobuf-encodes, i.e. copies, the bytes) on a microtask before the next
+    // frame writes into these buffers. If that scheduling ever changes, switch
+    // to toCopiedBinary() here.
     // finally resolve the future so the function "receiveBatch" is unblocked
     // and the next scripting frame is allowed to happen
     this.nextFrameFutures.forEach((fut) => fut.resolve({ data: outMessages }))
@@ -452,6 +468,13 @@ export class SceneContext implements EngineApiInterface {
     if (this._avatarSystem) {
       this._avatarSystem.dispose()
       this._avatarSystem = undefined
+    }
+
+    // Unsubscribe this context's message-bus handler BEFORE dropping the
+    // transport reference (the transport itself outlives this scene).
+    if (this._transport && this.sceneMessageBusHandler) {
+      this._transport.events.off('sceneMessageBus', this.sceneMessageBusHandler)
+      this.sceneMessageBusHandler = undefined
     }
 
     // Clear transport reference but DON'T disconnect it.
@@ -527,10 +550,15 @@ export class SceneContext implements EngineApiInterface {
   }
 
   private incomingNetworkMessages: Uint8Array[] = []
+  // kept so dispose() can unsubscribe it — without this, every hot reload leaked
+  // a handler that kept filling its dead context's queue (same entityId check
+  // passes for the reloaded scene)
+  private sceneMessageBusHandler?: (event: { address: string; data: { sceneId: string; data: Uint8Array } }) => void
 
   getNetworkMessages(): Uint8Array[] {
-    const messages = [...this.incomingNetworkMessages]
-    this.incomingNetworkMessages.length = 0
+    // hand over the array and start a fresh one instead of copying + truncating
+    const messages = this.incomingNetworkMessages
+    this.incomingNetworkMessages = []
     return messages
   }
 
@@ -543,11 +571,11 @@ export class SceneContext implements EngineApiInterface {
     // Add the avatar system subscription to this scene's subscriptions
     this.subscriptions.push(this._avatarSystem.createSubscription())
 
-    transport.events.on('sceneMessageBus', (event) => {
+    this.sceneMessageBusHandler = (event) => {
       if (event.data.sceneId === this.entityId) {
         if (event.data.data.byteLength) {
           const [_, data] = decodeMessage(event.data.data)
-          const senderBytes = new TextEncoder().encode(event.address)
+          const senderBytes = textEncoder.encode(event.address)
           // The sender length is framed in a single byte; a peer-controlled
           // identity longer than that would wrap and corrupt the framing scene
           // code parses, so drop it.
@@ -565,9 +593,12 @@ export class SceneContext implements EngineApiInterface {
           }
         }
       }
-    })
+    }
+    transport.events.on('sceneMessageBus', this.sceneMessageBusHandler)
   }
 }
+
+const textEncoder = new TextEncoder()
 
 /**
  * MsgType utils to diff between old string messages, and new uint8Array messages.

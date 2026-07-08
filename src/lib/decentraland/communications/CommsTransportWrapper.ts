@@ -239,11 +239,7 @@ export class CommsTransportWrapper {
   }
 
   private async sendMessage(reliable: boolean, topicMessage: proto.Packet, destination: string[]) {
-    if (Object.keys(topicMessage).length === 0) {
-      throw new Error('Invalid empty message')
-    }
     const bytes = proto.Packet.encode(topicMessage as any).finish()
-    if (!this.transport) debugger
     this.transport.send(bytes, { reliable }, destination)
   }
 }

@@ -228,7 +228,10 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           for (const data of peerData.data) {
             if (processed >= MAX_SEND_MESSAGES) break
             processed++
-            if (data.length > MAX_COMMS_MESSAGE_BYTES) continue
+            // Guard the type as well as the size: a non-Uint8Array here (e.g. a
+            // byte-keyed plain object) has undefined length, which would pass the
+            // cap check and then publish an empty payload.
+            if (!(data instanceof Uint8Array) || data.length > MAX_COMMS_MESSAGE_BYTES) continue
             void context.transport.sendParcelSceneMessage(
               { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
               peerData.address

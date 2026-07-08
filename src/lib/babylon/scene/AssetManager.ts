@@ -103,13 +103,28 @@ export class AssetManager {
 
   dispose() {
     for (const [hash, model] of Array.from(this.models.entries())) {
-      model.then((container) => {
-        /// TODO: this line should not be commented, but there is a bug in Babylon.js that
-        /// breaks the shared glTF materials when disposing the assetContainer. We will sacrifice
-        /// GPU memory for now until the bug is fixed.
-        // container.dispose()
-      })
+      // Containers MUST be disposed: their constructor registers observers on the
+      // long-lived scene AND engine (onDispose / onContextRestored) that close
+      // over the container, so an undisposed container — with all its template
+      // meshes, CPU vertex data, materials and textures — is pinned for the life
+      // of the process. Every hot reload / scene switch leaked a full copy of
+      // every model. Safe to dispose here because SceneContext.dispose() removes
+      // all entities (and their instantiated entries) BEFORE disposing this
+      // AssetManager, so no live instance references container resources anymore.
+      model
+        .then((container) => container.dispose())
+        .catch(() => {
+          // the load failed; there is nothing to dispose (the failure was
+          // already logged by the sentinel handler at load time)
+        })
       this.models.delete(hash)
+    }
+    // Drop this scene's file-resolver entry so the map doesn't grow one key per
+    // scene load for the life of the process. Guarded so a hot reload that
+    // already registered a NEW context under the same urn is not clobbered.
+    const registered = sceneContextMap.get(this.loadableScene.urn)
+    if (registered?.deref() === this.loadableScene) {
+      sceneContextMap.delete(this.loadableScene.urn)
     }
   }
 }
@@ -117,7 +132,9 @@ export class AssetManager {
 BABYLON.SceneLoader.OnPluginActivatedObservable.add(function (plugin) {
   if (plugin instanceof GLTFFileLoader) {
     plugin.animationStartMode = GLTFLoaderAnimationStartMode.NONE
-    plugin.compileMaterials = true
+    // no shader compilation on a NullEngine: effects are stubs, so
+    // forceCompilationAsync per material x mesh is pure load-time overhead
+    plugin.compileMaterials = false
     plugin.validate = false
     plugin.createInstances = true
     plugin.animationStartMode = 0
@@ -158,12 +175,23 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
   // by default, the models will be added to the scene at 0,0,0. We will remove that instance
   assetContainer.removeAllFromScene()
 
+  // Set-based dedupe: Array.includes inside the per-mesh/per-submesh loops was
+  // O(n²) on large models (load-time only, but large scenes have thousands of
+  // submeshes)
+  const knownGeometries = new Set(assetContainer.geometries)
+  const knownMaterials = new Set(assetContainer.materials)
+
+  function registerGeometry(geometry: BABYLON.Geometry) {
+    if (!knownGeometries.has(geometry)) {
+      knownGeometries.add(geometry)
+      assetContainer.geometries.push(geometry)
+    }
+  }
+
   // keep track of every generated mes and submesh
   assetContainer.meshes.forEach((mesh) => {
     if (mesh instanceof BABYLON.Mesh) {
-      if (mesh.geometry && !assetContainer.geometries.includes(mesh.geometry)) {
-        assetContainer.geometries.push(mesh.geometry)
-      }
+      if (mesh.geometry) registerGeometry(mesh.geometry)
     }
 
     if (mesh.subMeshes) {
@@ -173,9 +201,7 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
 
         const mesh = subMesh.getMesh()
         if (mesh instanceof BABYLON.Mesh) {
-          if (mesh.geometry && !assetContainer.geometries.includes(mesh.geometry)) {
-            assetContainer.geometries.push(mesh.geometry)
-          }
+          if (mesh.geometry) registerGeometry(mesh.geometry)
         }
       })
     }
@@ -183,10 +209,9 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
     // Find all the materials from all the meshes and add to $.materials
     mesh.cullingStrategy = BABYLON.AbstractMesh.CULLINGSTRATEGY_BOUNDINGSPHERE_ONLY
 
-    if (mesh.material) {
-      if (!assetContainer.materials.includes(mesh.material)) {
-        assetContainer.materials.push(mesh.material)
-      }
+    if (mesh.material && !knownMaterials.has(mesh.material)) {
+      knownMaterials.add(mesh.material)
+      assetContainer.materials.push(mesh.material)
     }
 
     if (mesh.name.endsWith('_collider')) {
@@ -198,13 +223,15 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
 
   // Find the textures in the materials that share the same domain as the context
   // then add the textures to the $.textures
+  const knownTextures = new Set(assetContainer.textures)
   assetContainer.materials.forEach((material: BABYLON.Material | BABYLON.PBRMaterial) => {
     // register all textures for the scene
     for (let i in material) {
       const t = (material as any)[i]
 
       if (i.endsWith('Texture') && t instanceof BABYLON.Texture) {
-        if (!assetContainer.textures.includes(t)) {
+        if (!knownTextures.has(t)) {
+          knownTextures.add(t)
           assetContainer.textures.push(t)
         }
       }
@@ -232,7 +259,13 @@ function processAssetContainer(assetContainer: BABYLON.AssetContainer) {
 const tmpVector = new BABYLON.Vector3()
 
 export function instantiateAssetContainer(assetContainer: BABYLON.AssetContainer, parentNode: BABYLON.TransformNode, entity: BabylonEntity): BABYLON.InstantiatedEntries {
-  const instances = assetContainer.instantiateModelsToScene(name => name, true)
+  // cloneMaterials MUST stay false: with true, every instantiation clones every
+  // material into scene.materials, and InstantiatedEntries.dispose() does NOT
+  // dispose materials — a scene spawning/despawning GltfContainers grew host
+  // memory and the scene.materials array without bound. Headless there is no
+  // per-instance visual state, so instances share the container's (frozen)
+  // source materials, which are disposed with the container.
+  const instances = assetContainer.instantiateModelsToScene(name => name, false)
 
   for (let node of instances.rootNodes) {
     // reparent the root node inside the entity
@@ -246,7 +279,10 @@ export function instantiateAssetContainer(assetContainer: BABYLON.AssetContainer
         enumerable: true,
         configurable: true,
         get() {
-          return !entity.context.deref()?.rootNode.isEnabled || (mesh._masterMesh !== null && mesh._masterMesh !== undefined)
+          // isEnabled is a METHOD — referencing it as a property is always
+          // truthy, which made this override (and the isInFrustum early-out
+          // below) never cull anything when the scene root was disabled.
+          return !entity.context.deref()?.rootNode.isEnabled() || (mesh._masterMesh !== null && mesh._masterMesh !== undefined)
         },
       })
 
@@ -262,10 +298,12 @@ export function instantiateAssetContainer(assetContainer: BABYLON.AssetContainer
        * or are too small based on the distance to the camera.
        */
       mesh.isInFrustum = function (this: BABYLON.AbstractMesh, frustumPlanes: BABYLON.Plane[]): boolean {
-        if (!entity.context.deref()?.rootNode.isEnabled) return false
+        if (!entity.context.deref()?.rootNode.isEnabled()) return false
 
         if (this.absolutePosition) {
-          const distanceToObject = tmpVector.copyFrom(this.absolutePosition).subtract(this.getScene().activeCamera!.position).length()
+          // subtractInPlace: .subtract() allocated a fresh Vector3 per mesh per
+          // frame, defeating the tmpVector reuse
+          const distanceToObject = tmpVector.copyFrom(this.absolutePosition).subtractInPlace(this.getScene().activeCamera!.position).length()
 
           // cull out elements farther than 300meters
           if (distanceToObject > 300)

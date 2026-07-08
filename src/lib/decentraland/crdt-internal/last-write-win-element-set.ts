@@ -1,4 +1,3 @@
-import { Atom } from "../../misc/atom"
 import { ByteBuffer, ReadWriteByteBuffer } from "../ByteBuffer"
 import { PutComponentOperation, DeleteComponent, PutComponentMessageBody, DeleteComponentMessageBody, CrdtMessageType, CrdtMessageBody } from "../crdt-wire-protocol"
 import { Entity } from "../types"
@@ -10,6 +9,33 @@ export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, numbe
   const newTimestamp = (timestamps.get(entity) || 0) + 1
   timestamps.set(entity, newTimestamp)
   return newTimestamp
+}
+
+// Scratch buffer shared by every per-entity serialization in this module.
+// Allocating a fresh ReadWriteByteBuffer (10KB) per dirty entity per frame was
+// the dominant source of GC churn on the CRDT flush path. Safe to share because
+// this code is single-threaded and every serialize below is immediately
+// consumed (copied into the out buffer or byte-compared) before the next reuse;
+// component serializers never re-enter this module.
+const serializationScratch = new ReadWriteByteBuffer()
+
+/**
+ * Serializes `value` into the shared scratch buffer and returns a VIEW over the
+ * bytes. The view is only valid until the NEXT call to this function (which
+ * resets and overwrites the same buffer): callers must copy or fully consume the
+ * bytes synchronously before serializing anything else. Every current caller
+ * does — PutComponentOperation.write copies into the out buffer, dataCompare
+ * reads immediately — do NOT stash the return value.
+ *
+ * INVARIANT: this relies on single-threaded, synchronous consumption. Never
+ * `await` between calling this and consuming its result — an interleaved
+ * serializeToScratch (from another resumed task) would reset the shared buffer
+ * and silently corrupt the bytes this view points at.
+ */
+function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
+  serializationScratch.resetBuffer()
+  serde.serialize(value, serializationScratch)
+  return serializationScratch.toBinary()
 }
 
 export function createUpdateLwwFromCrdt<T>(
@@ -51,9 +77,7 @@ export function createUpdateLwwFromCrdt<T>(
     let currentDataGreater = 0
 
     if (data.has(entityId)) {
-      const writeBuffer = new ReadWriteByteBuffer()
-      schema.serialize(data.get(entityId)!, writeBuffer)
-      currentDataGreater = dataCompare(writeBuffer.toBinary(), (message as any).data || null)
+      currentDataGreater = dataCompare(serializeToScratch(schema, data.get(entityId)!), (message as any).data || null)
     } else {
       currentDataGreater = dataCompare(null, (message as any).data)
     }
@@ -101,11 +125,8 @@ export function createUpdateLwwFromCrdt<T>(
         const timestamp = timestamps.get(entityId)!
 
         if (data.has(entityId)) {
-          const writeBuffer = new ReadWriteByteBuffer()
-          schema.serialize(data.get(entityId)!, writeBuffer)
-
           // post conflict resolution update
-          PutComponentOperation.write({ entityId, componentId, timestamp, data: writeBuffer.toBinary(), }, conflictResolutionByteBuffer)
+          PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(schema, data.get(entityId)!), }, conflictResolutionByteBuffer)
 
           return false // change not accepted
         } else {
@@ -128,19 +149,19 @@ export function createGetCrdtMessagesForLww<T>(
   dirtyIterator: Set<Entity>,
   serde: SerDe<T>,
   data: Map<Entity, T>,
-  currentTick: Atom<number>
+  // plain mutable counter shared with commitDirtyState: an Atom (observable)
+  // here cost a getOrNull + swap + observer notification per component per
+  // frame just to bump an integer
+  tickState: { tick: number }
 ) {
   return function (outBuffer: ByteBuffer) {
-    const tick = 1 + (currentTick.getOrNull() ?? 0)
-    currentTick.swap(tick)
+    const tick = ++tickState.tick
 
     for (const entityId of dirtyIterator) {
       const timestamp = incrementTimestamp(entityId, timestamps)
       updatedAtTick.set(entityId, tick)
       if (data.has(entityId)) {
-        const writeBuffer = new ReadWriteByteBuffer()
-        serde.serialize(data.get(entityId)!, writeBuffer)
-        PutComponentOperation.write({ entityId, componentId, timestamp, data: writeBuffer.toBinary(), }, outBuffer)
+        PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(serde, data.get(entityId)!), }, outBuffer)
       } else {
         DeleteComponent.write({ entityId, componentId, timestamp }, outBuffer)
       }
@@ -166,9 +187,7 @@ export function createGetCrdtMessagesForLwwWithTick<T>(
       if (biggestTick < tick) biggestTick = tick
       const timestamp = timestamps.get(entityId) ?? 0
       if (data.has(entityId)) {
-        const writeBuffer = new ReadWriteByteBuffer()
-        serde.serialize(data.get(entityId)!, writeBuffer)
-        PutComponentOperation.write({ entityId, componentId, timestamp, data: writeBuffer.toBinary(), }, outBuffer)
+        PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(serde, data.get(entityId)!), }, outBuffer)
       } else {
         DeleteComponent.write({ entityId, componentId, timestamp }, outBuffer)
       }
@@ -183,7 +202,7 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
   const dirtyIterator = new Set<Entity>()
   const timestamps = new Map<Entity, number>()
   const updatedAtTick = new Map<Entity, number>()
-  const currentTick = Atom<number>(0)
+  const tickState = { tick: 0 }
 
   return {
     get componentId() {
@@ -209,11 +228,17 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
         dirtyIterator.add(entity)
       }
     },
+    purgeEntity(entity: Entity): void {
+      data.delete(entity)
+      dirtyIterator.delete(entity)
+      timestamps.delete(entity)
+      updatedAtTick.delete(entity)
+    },
     getOrNull(entity: Entity): Readonly<T> | null {
       return data.get(entity) ?? null
     },
     get(entity: Entity): Readonly<T> | undefined {
-      return data.has(entity) ? data.get(entity) : undefined
+      return data.get(entity)
     },
     create(entity: Entity, value: T): T {
       const component = data.get(entity)
@@ -252,8 +277,17 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
     dirtyIterator(): Iterable<Entity> {
       return Array.from(dirtyIterator)
     },
+    commitDirtyState(): void {
+      // same bookkeeping as dumpCrdtUpdates without serializing any value
+      const tick = ++tickState.tick
+      for (const entityId of dirtyIterator) {
+        incrementTimestamp(entityId, timestamps)
+        updatedAtTick.set(entityId, tick)
+      }
+      dirtyIterator.clear()
+    },
     dumpCrdtDeltas: createGetCrdtMessagesForLwwWithTick(componentDeclaration.componentId, updatedAtTick, timestamps, componentDeclaration, data),
-    dumpCrdtUpdates: createGetCrdtMessagesForLww(componentDeclaration.componentId, updatedAtTick, timestamps, dirtyIterator, componentDeclaration, data, currentTick),
+    dumpCrdtUpdates: createGetCrdtMessagesForLww(componentDeclaration.componentId, updatedAtTick, timestamps, dirtyIterator, componentDeclaration, data, tickState),
     updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data),
   }
 }

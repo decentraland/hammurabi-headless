@@ -23,18 +23,13 @@ export const raycastComponent = declareComponentUsingProtobufJs(PBRaycast, 1067,
       ray
     }
 
-    if (raycast.continuous) {
-      const rayHelper = entity.appliedComponents.raycast!.helper = new BABYLON.RayHelper(ray);
-      rayHelper.show(entity.getScene());
-    }
+    // NOTE: no debug RayHelper for continuous rays — RayHelper.show() creates a
+    // LinesMesh and registers a per-frame vertex-buffer rewrite; on a headless
+    // server it is a pure per-frame cost with no observable effect.
 
     if (context)
       context.pendingRaycastOperations.add(entity.entityId)
   } else if (shouldDeleteRay && prevValue) {
-    if (prevValue.helper) {
-      prevValue.helper.dispose()
-    }
-
     if (context)
       context.pendingRaycastOperations.delete(entity.entityId)
 

@@ -7,6 +7,11 @@ function frozenError() {
   throw new Error('The set is frozen')
 }
 
+// Scratch for addValue serialization: the serialized bytes are retained in
+// queuedCommands, so we take a right-sized COPY out of the scratch instead of
+// retaining a fresh 10KB buffer (or a view pinning one) per appended value.
+const serializationScratch = new ReadWriteByteBuffer()
+
 function freezeSet<T>(set: Set<T>): ReadonlySet<T> {
   ;(set as any).add = frozenError
   ;(set as any).clear = frozenError
@@ -99,6 +104,10 @@ export function createValueSetComponentStore<T, ComponentNumber extends number>(
     entityDeleted(entity: Entity): void {
       data.delete(entity)
     },
+    purgeEntity(entity: Entity): void {
+      data.delete(entity)
+      dirtyIterator.delete(entity)
+    },
     get(entity: Entity): ReadonlySet<T> {
       const values = data.get(entity)
       if (values) {
@@ -110,11 +119,11 @@ export function createValueSetComponentStore<T, ComponentNumber extends number>(
     addValue(entity: Entity, rawValue: Readonly<T>) {
       const { set, value } = append(entity, rawValue)
       dirtyIterator.add(entity)
-      const buf = new ReadWriteByteBuffer()
-      declaration.serialize(value, buf)
+      serializationScratch.resetBuffer()
+      declaration.serialize(value, serializationScratch)
       queuedCommands.push({
         componentId: declaration.componentId,
-        data: buf.toBinary(),
+        data: serializationScratch.toCopiedBinary(),
         entityId: entity,
         timestamp: 0,
         type: CrdtMessageType.APPEND_VALUE
@@ -139,6 +148,13 @@ export function createValueSetComponentStore<T, ComponentNumber extends number>(
     dumpCrdtDeltas(outBuffer, fromTimestamp) {
       // not implemented for GOVS component
       return 0
+    },
+    commitDirtyState() {
+      // GOVS deltas are not tick-tracked (dumpCrdtDeltas is not implemented), so
+      // there is no way to commit dirty state without losing the queued appends.
+      // No caller reaches this today (only LWW stores are delta-synchronized);
+      // throw loudly rather than silently drop data if that ever changes.
+      throw new Error('commitDirtyState is not supported for GrowOnlyValueSet components (no delta channel)')
     },
     updateFromCrdt(body, _conflictResolutionByteBuffer: ByteBuffer) {
       if (body.type === CrdtMessageType.APPEND_VALUE) {
