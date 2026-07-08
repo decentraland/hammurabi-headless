@@ -19,8 +19,9 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
-import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment } from './decentraland/state'
+import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
+import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
 import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
 
 // we only spend ONE millisecond per frame procesing messages from scenes,
@@ -46,6 +47,11 @@ export interface EngineOptions {
   // supervisor can restart it with a fresh connection. Interactive/dev usage
   // sets this to false to keep the manual "press R to restart" flow.
   restartOnCommsLoss?: boolean
+  // Base64-encoded, world-scoped storage delegation minted by a trusted parent
+  // (see StorageDelegation). When present, the worker signs `storage.decentraland.*`
+  // requests with the enclosed ephemeral so the authoritative world storage
+  // authorizes them — WITHOUT this worker ever holding the authoritative key.
+  storageDelegation?: string
 }
 
 let initialized = false
@@ -92,6 +98,15 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   // never sign requests as — or leak the address of — the authoritative server
   // identity above.
   sceneIdentity.swap(await createGuestIdentity())
+
+  // Optional world-scoped storage delegation. Kept separate from both identities
+  // above and used ONLY for storage.decentraland.* requests (see connect-context-rpc).
+  if (options.storageDelegation) {
+    const delegation = parseStorageDelegation(options.storageDelegation)
+    if (delegation) {
+      storageDelegation.swap(delegation)
+    }
+  }
 
   // Environment defaults to 'org'
   const environment: DclEnvironment = options.environment ?? 'org'

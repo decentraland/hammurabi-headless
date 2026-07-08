@@ -14,6 +14,26 @@ export type CurrentRealm = {
   aboutResponse: AboutResponse
 }
 
+// A short-lived, WORLD/SCENE-SCOPED storage credential minted by a trusted parent
+// orchestrator (never derived in this untrusted worker). The worker signs
+// `storage.decentraland.*` requests with `ephemeral` and forwards the root-signed
+// `scope` claim; the world-storage-service authorizes it only for that scene, so a
+// worker compromise leaks at most this one scene's ephemeral until `expiration`.
+// The worker renews it on demand over IPC before it lapses.
+//
+// `world`/`sceneId`/`parcel`/`expiration` are the DERIVED, in-memory view parsed
+// out of the signed `scope.payload` (the single source of truth) — they are not a
+// separate copy from the wire, so they cannot diverge from what was signed.
+export type StorageDelegation = {
+  v: number
+  world: string
+  sceneId: string
+  parcel: string
+  ephemeral: { privateKey: string; publicKey: string; address: string }
+  scope: { payload: string; signature: string }
+  expiration: number
+}
+
 // The server's own identity. When the server runs with a private key (an
 // authoritative multiplayer server) this is a PRIVILEGED identity used only for
 // host operations (e.g. obtaining a comms token). It must never be exposed to
@@ -27,6 +47,10 @@ export const userIdentity = Atom<ExplorerIdentity>()
 export const sceneIdentity = Atom<ExplorerIdentity>()
 
 export const currentRealm = Atom<CurrentRealm>()
+// Optional: set only for authoritative world workers that received a storage
+// delegation. Read with getOrNull() — it is legitimately absent for Genesis City
+// scenes and for workers spawned without one.
+export const storageDelegation = Atom<StorageDelegation>()
 export const selectedInputVoiceDevice = Atom<string>()
 export const voiceChatAvailable = Atom<boolean>()
 export const mutedMicrophone = Atom<boolean>(true)

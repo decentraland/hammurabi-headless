@@ -15,8 +15,9 @@ import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentr
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
 import { Scene } from '@dcl/schemas'
 import { Authenticator } from '@dcl/crypto'
-import { sceneIdentity, currentRealm } from '../../decentraland/state'
+import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '../../decentraland/state'
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
+import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
@@ -33,6 +34,81 @@ const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network messag
 // address (metadata endpoint, loopback admin) — the single-shot guard alone was
 // bypassable because the underlying fetch follows redirects transparently.
 const MAX_SIGNED_FETCH_REDIRECTS = 5
+
+// The world-storage-service. Requests to these hosts are signed with the
+// world-scoped storage delegation (when present) instead of the guest identity.
+// Exact host match only, so a lookalike (storage.decentraland.zone.evil.com) is
+// never treated as first-party.
+const STORAGE_HOSTS = new Set(['storage.decentraland.org', 'storage.decentraland.zone'])
+
+/**
+ * Decide, per redirect hop, how to sign a scene SignedFetch. Returns a privileged
+ * storage-signing strategy ONLY when the hop targets the world-storage-service AND
+ * a valid, unexpired world-scoped delegation exists; otherwise `null` (caller uses
+ * the guest identity). Scoping the delegation to storage hosts — re-checked every
+ * hop — keeps a scene from ever obtaining an authoritative-signed request for an
+ * arbitrary URL (preserves the SSRF/impersonation guarantees).
+ */
+export function getStorageSigningStrategy(
+  url: string,
+  delegation: StorageDelegation | null,
+  realm: CurrentRealm,
+  context: SceneContext
+): { metadata: Record<string, any>; options: { chainProvider: (payload: string) => any; extraHeaders: Record<string, string> } } | null {
+  if (!delegation) return null
+
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  // HTTPS only. The scene controls this URL and `assertPublicSceneUrl` permits
+  // http:, so without this gate a scene could force `http://storage.decentraland.*`
+  // and the ephemeral auth-chain + root-signed scope claim would go out in
+  // cleartext (before any server-side http→https redirect) for an on-path attacker
+  // to capture and replay for the credential's TTL.
+  if (parsed.protocol !== 'https:') return null
+  if (!STORAGE_HOSTS.has(parsed.hostname.toLowerCase())) return null
+  if (Date.now() >= delegation.expiration) return null
+
+  const account = {
+    privateKey: delegation.ephemeral.privateKey,
+    publicKey: delegation.ephemeral.publicKey,
+    address: delegation.ephemeral.address
+  }
+
+  const metadata = {
+    origin: 'hammurabi-server//',
+    signer: 'dcl:authoritative-server',
+    isGuest: false,
+    // Report the delegation's world/scene/parcel (not the worker's own context) so
+    // the storage service derives exactly the placeId the scope claim is bound to
+    // and can match scope.world/sceneId/parcel to the request. The parcel pins the
+    // placeId (placeId = f(world, parcel)); sceneId is the explicit scene identity.
+    realm: { serverName: delegation.world, hostname: realm.baseUrl },
+    realmName: delegation.world,
+    sceneId: delegation.sceneId,
+    parcel: delegation.parcel
+  }
+
+  const scopeHeader =
+    typeof Buffer !== 'undefined'
+      ? Buffer.from(JSON.stringify(delegation.scope), 'utf8').toString('base64')
+      : btoa(JSON.stringify(delegation.scope))
+
+  return {
+    metadata,
+    options: {
+      // Standalone ephemeral (owner = ephemeral address). It does NOT resolve to
+      // the authoritative address, so it can't hit the broad allow-list path in
+      // the storage service — only the world-scoped claim below authorizes it.
+      chainProvider: (payload: string) =>
+        Authenticator.createSimpleAuthChain(payload, account.address, Authenticator.createSignature(account, payload)),
+      extraHeaders: { 'x-authoritative-scope': scopeHeader }
+    }
+  }
+}
 
 export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
@@ -265,6 +341,20 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           // The identity/auth headers are re-signed per hop inside signedFetch.
           const sameOrigin = new URL(currentUrl).origin === originalOrigin
 
+          // Re-evaluated every hop: only the world-storage host gets the scoped
+          // storage delegation; anything else (including a redirect target) is
+          // signed with the guest identity. Fetch a fresh delegation (renewing
+          // over IPC if near expiry) only for storage hops, so non-storage
+          // requests never wait on a renewal.
+          let hopHost: string | undefined
+          try {
+            hopHost = new URL(currentUrl).hostname.toLowerCase()
+          } catch {
+            hopHost = undefined
+          }
+          const delegation = hopHost && STORAGE_HOSTS.has(hopHost) ? await getFreshStorageDelegation() : null
+          const storageStrategy = getStorageSigningStrategy(currentUrl, delegation, realm, context)
+
           result = await signedFetch(
             currentUrl,
             identity.authChain,
@@ -275,7 +365,8 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
               responseBodyType: 'text',
               redirect: 'manual'
             },
-            metadata
+            storageStrategy ? storageStrategy.metadata : metadata,
+            storageStrategy?.options
           )
 
           const isRedirect = result.status >= 300 && result.status < 400
