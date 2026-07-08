@@ -184,6 +184,47 @@ describe('scene runtime end-to-end (QuickJS + RPC, fully in-memory)', () => {
     expect(logs).toEqual(['flagIsBoolean', 'boolean', 'debugEnabled', true])
   })
 
+  it('round-trips comms message-bus payloads: sendBinary bytes reach the transport intact', async () => {
+    // Regression: nested Uint8Arrays (peerData[].data[]) cross the QuickJS boundary
+    // as plain {"0":9,...} objects; without coercion protobuf encodes them as EMPTY
+    // bytes and every scene message-bus payload silently arrives at the peers as
+    // zero bytes (seen live: server connects, peers join, scene messages do nothing).
+    const published: { sceneId: string; data: number[]; destination: string[] }[] = []
+    const inbound = new Uint8Array([5, 42, 42])
+
+    const source = `
+      const comms = require('~system/CommunicationsController')
+      module.exports.onStart = async function () {
+        const res = await comms.sendBinary({
+          data: [new Uint8Array([1, 2, 3])],
+          peerData: [{ address: ['0xpeer'], data: [new Uint8Array([9, 8, 7])] }]
+        })
+        console.log('inboundIsU8', res.data[0] instanceof Uint8Array)
+        console.log('inboundBytes', Array.from(res.data[0]).join(','))
+      }
+      module.exports.onUpdate = async function () {}
+    `
+
+    const { logs, errors } = await runScene(source, {
+      entityId: 'scene-entity',
+      getNetworkMessages: () => [inbound],
+      transport: {
+        sendParcelSceneMessage: async (
+          message: { sceneId: string; data: Uint8Array },
+          destination: string[]
+        ) => {
+          published.push({ sceneId: message.sceneId, data: Array.from(message.data), destination })
+        }
+      }
+    })
+
+    expect(errors).toEqual([])
+    // MsgType.Uint8Array (2) prefix + the scene's payload — NOT empty.
+    expect(published).toEqual([{ sceneId: 'scene-entity', data: [2, 9, 8, 7], destination: ['0xpeer'] }])
+    // Host → scene direction: inbound network messages arrive as real Uint8Arrays.
+    expect(logs).toEqual(['inboundIsU8', true, 'inboundBytes', '5,42,42'])
+  })
+
   it('keeps the sandbox closed for untrusted scene code driven through the runtime', async () => {
     const source = `
       module.exports.onStart = async function () {

@@ -7,6 +7,7 @@ import { TestingServiceDefinition } from '@dcl/protocol/out-js/decentraland/kern
 import { RpcClientPort } from '@dcl/rpc'
 import * as codegen from '@dcl/rpc/dist/codegen'
 import { coerceMaybeU8Array } from '../quick-js/convert-handles'
+import { MaybeUint8Array } from '../quick-js/types'
 import { RuntimeServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen'
 import { UserIdentityServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen'
 import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
@@ -33,8 +34,25 @@ export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
       
     case '~system/Runtime':
       return codegen.loadService(port, RuntimeServiceDefinition)
-    case '~system/CommunicationsController':
-      return codegen.loadService(port, CommunicationsControllerServiceDefinition)
+    case '~system/CommunicationsController': {
+      const commsService = codegen.loadService(port, CommunicationsControllerServiceDefinition)
+      // Same QuickJS caveat as crdtSendToRenderer: Uint8Arrays nested inside the
+      // request cross the VM boundary as plain objects, and protobuf encodes a
+      // plain object as EMPTY bytes — every message-bus payload would silently
+      // arrive at the peers as zero bytes.
+      return {
+        ...commsService,
+        async sendBinary(req: { data?: MaybeUint8Array[]; peerData?: { data?: MaybeUint8Array[]; address?: string[] }[] }) {
+          return commsService.sendBinary({
+            data: (req.data ?? []).map(coerceMaybeU8Array),
+            peerData: (req.peerData ?? []).map((peer) => ({
+              address: peer?.address ?? [],
+              data: (peer?.data ?? []).map(coerceMaybeU8Array)
+            }))
+          })
+        }
+      }
+    }
     case '~system/UserIdentity':
       return codegen.loadService(port, UserIdentityServiceDefinition)
     case '~system/UserActionModule':
