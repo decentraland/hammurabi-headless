@@ -14,19 +14,19 @@ export type CurrentRealm = {
   aboutResponse: AboutResponse
 }
 
-// A short-lived, WORLD-SCOPED storage credential minted by a trusted parent
+// A short-lived, WORLD/SCENE-SCOPED storage credential minted by a trusted parent
 // orchestrator (never derived in this untrusted worker). The worker signs
 // `storage.decentraland.*` requests with `ephemeral` and forwards the root-signed
-// `scope` claim; the world-storage-service authorizes it only for `world`, so a
-// worker compromise leaks at most this one world's ephemeral until `expiration`.
-// The worker renews it on demand over IPC before it lapses, so it keeps a valid
-// one for its whole life.
+// `scope` claim; the world-storage-service authorizes it only for that scene, so a
+// worker compromise leaks at most this one scene's ephemeral until `expiration`.
+// The worker renews it on demand over IPC before it lapses.
+//
+// `world`/`sceneId`/`parcel`/`expiration` are the DERIVED, in-memory view parsed
+// out of the signed `scope.payload` (the single source of truth) — they are not a
+// separate copy from the wire, so they cannot diverge from what was signed.
 export type StorageDelegation = {
   v: number
   world: string
-  // The scene this delegation is bound to: `parcel` pins the storage placeId,
-  // `sceneId` is the explicit scene identity. The worker echoes both into the
-  // signed request metadata so the storage service can match them to the claim.
   sceneId: string
   parcel: string
   ephemeral: { privateKey: string; publicKey: string; address: string }

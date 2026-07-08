@@ -12,34 +12,64 @@ const REFRESH_BUFFER_MS = 5 * 60 * 1000
 const RENEWAL_TIMEOUT_MS = 5_000
 
 /**
+ * Extract the scene-scope fields from the signed claim `payload` — the single
+ * source of truth. This is a LENIENT extraction of a parent-produced (trusted)
+ * message, not a security check: the authoritative verification of these fields
+ * happens in the world-storage-service. Returns undefined if any field is absent
+ * or the expiry isn't a finite date.
+ */
+function extractClaimFields(
+  payload: string
+): { world: string; sceneId: string; parcel: string; expiration: number } | undefined {
+  const lines = payload.split('\n')
+  const valueFor = (prefix: string): string | undefined => {
+    const line = lines.find((l) => l.startsWith(prefix))
+    return line ? line.slice(prefix.length).trim() : undefined
+  }
+  const world = valueFor('World:')?.toLowerCase()
+  const sceneId = valueFor('SceneId:')
+  const parcel = valueFor('Parcel:')
+  const expirationIso = valueFor('Expiration:')
+  if (!world || !sceneId || !parcel || !expirationIso) return undefined
+  // Finite, not just parseable: an invalid date → NaN would defeat the expiry
+  // guard (Date.now() >= NaN is false → signs forever) and force a renewal on
+  // every request (Date.now() < NaN is false).
+  const expiration = Date.parse(expirationIso)
+  if (!Number.isFinite(expiration)) return undefined
+  return { world, sceneId, parcel, expiration }
+}
+
+/**
  * Decode and validate a base64 storage delegation. Returns undefined (never
  * throws) on malformed input so a bad delegation can't break scene startup or a
  * renewal — the worker just falls back to the guest identity for storage.
+ *
+ * The wire envelope is `{ v, ephemeral, scope }`; the scene-scope fields are
+ * DERIVED from the signed `scope.payload` (single source of truth), never from a
+ * separate unsigned copy.
  */
 export function parseStorageDelegation(encoded: string): StorageDelegation | undefined {
   try {
     const json = typeof Buffer !== 'undefined' ? Buffer.from(encoded, 'base64').toString('utf8') : atob(encoded)
     const parsed = JSON.parse(json)
-    const valid =
+    const validEnvelope =
       parsed &&
       parsed.v === 1 &&
-      typeof parsed.world === 'string' &&
-      typeof parsed.sceneId === 'string' &&
-      typeof parsed.parcel === 'string' &&
       typeof parsed.ephemeral?.privateKey === 'string' &&
       typeof parsed.ephemeral?.publicKey === 'string' &&
       typeof parsed.ephemeral?.address === 'string' &&
       typeof parsed.scope?.payload === 'string' &&
-      typeof parsed.scope?.signature === 'string' &&
-      // Finite, not just `typeof number`: NaN/Infinity would defeat the expiry
-      // guard (Date.now() >= NaN is false → signs forever) and trigger a renewal
-      // on every request (Date.now() < NaN is false).
-      Number.isFinite(parsed.expiration)
-    if (!valid) {
+      typeof parsed.scope?.signature === 'string'
+    if (!validEnvelope) {
       console.warn('Ignoring malformed storage delegation')
       return undefined
     }
-    return parsed as StorageDelegation
+    const fields = extractClaimFields(parsed.scope.payload)
+    if (!fields) {
+      console.warn('Ignoring storage delegation with an unparseable claim payload')
+      return undefined
+    }
+    return { v: parsed.v, ephemeral: parsed.ephemeral, scope: parsed.scope, ...fields }
   } catch {
     // Do NOT log the error detail: a JSON parse error can echo a fragment of the
     // decoded payload, which contains the ephemeral private key.

@@ -4,17 +4,45 @@ import {
   getFreshStorageDelegation
 } from '../../../../src/lib/decentraland/identity/storage-delegation'
 
-function encode(overrides: Record<string, any> = {}): string {
-  const delegation = {
-    v: 1,
-    world: 'boedo.dcl.eth',
-    sceneId: 'bafkrei-scene',
-    parcel: '5,7',
-    ephemeral: { privateKey: '0x1', publicKey: '0x2', address: '0xeph' },
-    scope: { payload: 'claim', signature: '0xsig' },
-    expiration: Date.now() + 3_600_000,
-    ...overrides
-  }
+const PREFIX = 'Decentraland Authoritative Storage Delegation'
+
+// Build a base64 wire envelope `{ v, ephemeral, scope }`. The scene-scope fields
+// (world/sceneId/parcel/expiration) live INSIDE the signed scope.payload — that is
+// the single source of truth the worker parses. Overrides:
+//   - world/sceneId/parcel/expiration → tweak the payload (undefined omits the line)
+//   - ephemeral / scope / v            → tweak the envelope directly
+function encode(over: Record<string, any> = {}): string {
+  const ephemeral = 'ephemeral' in over ? over.ephemeral : { privateKey: '0x1', publicKey: '0x2', address: '0xeph' }
+  const world = 'world' in over ? over.world : 'boedo.dcl.eth'
+  const sceneId = 'sceneId' in over ? over.sceneId : 'bafkrei-scene'
+  const parcel = 'parcel' in over ? over.parcel : '5,7'
+  const expiration = 'expiration' in over ? over.expiration : Date.now() + 3_600_000
+
+  // number → ISO; anything else (bad string, NaN) → verbatim so we can test rejection.
+  const expirationValue =
+    expiration === undefined
+      ? undefined
+      : typeof expiration === 'number' && Number.isFinite(expiration)
+        ? new Date(expiration).toISOString()
+        : String(expiration)
+
+  const line = (label: string, value: unknown): string | null => (value === undefined ? null : `${label}: ${value}`)
+  const payload =
+    'payload' in over
+      ? over.payload
+      : [
+          PREFIX,
+          line('Ephemeral', ephemeral?.address),
+          line('World', world),
+          line('SceneId', sceneId),
+          line('Parcel', parcel),
+          line('Expiration', expirationValue)
+        ]
+          .filter(Boolean)
+          .join('\n')
+
+  const scope = 'scope' in over ? over.scope : { payload, signature: '0xsig' }
+  const delegation = { v: 'v' in over ? over.v : 1, ephemeral, scope }
   return Buffer.from(JSON.stringify(delegation), 'utf8').toString('base64')
 }
 
@@ -43,16 +71,21 @@ describe('parseStorageDelegation', () => {
     expect(parseStorageDelegation(encode({ parcel: undefined }))).toBeUndefined()
   })
 
-  it('rejects a non-finite expiration (NaN/Infinity would defeat the expiry guard)', () => {
+  it('rejects an unparseable Expiration line (would defeat the expiry guard)', () => {
+    // The expiry is derived from the signed payload's ISO Expiration line; a value
+    // that Date.parse can't read → NaN must be rejected.
     expect(parseStorageDelegation(encode({ expiration: Number.NaN }))).toBeUndefined()
-    // JSON has no Infinity literal; it serializes to null → typeof !== number anyway,
-    // but assert the finite check via a string that our validator must reject.
     expect(parseStorageDelegation(encode({ expiration: 'soon' as any }))).toBeUndefined()
   })
 
-  it('rejects non-string ephemeral/scope fields', () => {
+  it('rejects non-string ephemeral/scope envelope fields', () => {
     expect(parseStorageDelegation(encode({ ephemeral: { privateKey: 1, publicKey: '0x2', address: '0xeph' } }))).toBeUndefined()
     expect(parseStorageDelegation(encode({ scope: { payload: 'claim', signature: 42 } }))).toBeUndefined()
+  })
+
+  it('rejects a claim payload missing the scene-scope fields', () => {
+    // Well-formed envelope, but the signed payload has no World/SceneId/Parcel lines.
+    expect(parseStorageDelegation(encode({ payload: 'just some text' }))).toBeUndefined()
   })
 
   it('rejects non-base64 / non-JSON input', () => {
