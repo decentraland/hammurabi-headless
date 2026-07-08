@@ -107,6 +107,13 @@ export function updateStaticEntities(context: SceneContext) {
     // Only dirty (re-serialize + re-send) the transform when it actually moved.
     // The stored vectors are copies (copyFrom), never references to live Babylon
     // objects — aliasing a live object would make this comparison see no change.
+    //
+    // "Compare before getMutable/dirty" is a recurring pattern in the per-frame
+    // static-entity updates (RealmInfo above, the CameraEntity transform below, and
+    // camera-follows-player's PlayerEntity write) — getMutable() unconditionally
+    // re-serializes + re-sends the whole component every tick, so each site guards
+    // it with an equality check. Keep them consistent; the copies-not-references
+    // caveat applies to all of them.
     const playerTransform = Transform.get(StaticEntities.PlayerEntity)!
     if (!playerTransform.position.equals(tmpPosition) || !playerTransform.rotation.equals(rotation)) {
       const mutable = Transform.getMutable(StaticEntities.PlayerEntity)
@@ -124,6 +131,8 @@ export function updateStaticEntities(context: SceneContext) {
       // convert the camera position to scene-space coordinates
       globalCoordinatesToSceneCoordinatesToRef(context, tmpPosition, tmpPosition)
 
+      // Compare before getMutable/dirty (same pattern as the PlayerEntity write
+      // above): only re-serialize + re-send when the camera transform changed.
       const cameraTransform = Transform.get(StaticEntities.CameraEntity)!
       if (
         !cameraTransform.position.equals(tmpPosition) ||

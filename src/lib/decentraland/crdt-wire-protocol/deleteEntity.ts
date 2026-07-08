@@ -26,15 +26,9 @@ export namespace DeleteEntity {
 
   /** See PutComponentOperation.read for the peekedHeader contract. */
   export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): DeleteEntityMessage | null {
-    let header = peekedHeader
-    if (header) {
-      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
-    } else {
-      const readHeader = CrdtMessageProtocol.readHeader(buf)
-      if (!readHeader) {
-        return null
-      }
-      header = readHeader
+    const header = CrdtMessageProtocol.consumeOrReadHeader(buf, peekedHeader)
+    if (!header) {
+      return null
     }
 
     if (header.type !== CrdtMessageType.DELETE_ENTITY) {

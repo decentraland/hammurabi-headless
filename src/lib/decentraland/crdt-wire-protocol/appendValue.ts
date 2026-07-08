@@ -38,16 +38,10 @@ export namespace AppendValueOperation {
 
   /** See PutComponentOperation.read for the peekedHeader contract. */
   export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): AppendValueMessage | null {
-    let header = peekedHeader
-    if (header) {
-      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
-    } else {
-      const readHeader = CrdtMessageProtocol.readHeader(buf)
-      /* istanbul ignore if */
-      if (!readHeader) {
-        return null
-      }
-      header = readHeader
+    const header = CrdtMessageProtocol.consumeOrReadHeader(buf, peekedHeader)
+    /* istanbul ignore if */
+    if (!header) {
+      return null
     }
 
     /* istanbul ignore if */

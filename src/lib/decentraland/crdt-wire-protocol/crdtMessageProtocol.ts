@@ -46,6 +46,21 @@ export namespace CrdtMessageProtocol {
   }
 
   /**
+   * Resolve the header for a message `read`. If the caller already peeked (and thus
+   * validated) the header, consume its bytes and reuse it — so the hot read loop
+   * validates each message exactly once. Otherwise read + validate the header here.
+   * Shared by every per-type reader (put/delete-component/delete-entity/append).
+   * @returns the header, or null when there is no complete/valid message to read.
+   */
+  export function consumeOrReadHeader(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): CrdtMessageHeader | null {
+    if (peekedHeader) {
+      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
+      return peekedHeader
+    }
+    return readHeader(buf)
+  }
+
+  /**
    * Get the current header, without consuming the bytes involved.
    * @param buf - ByteBuffer
    * @returns header or null if there is no validated message

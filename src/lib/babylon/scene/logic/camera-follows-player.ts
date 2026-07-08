@@ -21,7 +21,8 @@ export function createCameraFollowsPlayerSystem(camera: ArcRotateCamera, playerE
 
     // Only write (dirty + re-serialize + re-send) when the player actually
     // moved. The stored transform owns copies of the capsule state, never
-    // references to the live Babylon objects.
+    // references to the live Babylon objects. (Same "compare before dirty" pattern
+    // as the static-entities transform updates — keep them in sync.)
     const current = store.get(StaticEntities.PlayerEntity)
     if (
       current &&

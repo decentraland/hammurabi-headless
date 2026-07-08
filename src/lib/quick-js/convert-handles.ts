@@ -265,15 +265,30 @@ export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
   }
   if (Array.isArray(value)) {
     const array = vm.newArray()
-    for (let i = 0; i < value.length; i++) {
-      nativeToVmType(vm, value[i]).consume(($) => vm.setProp(array, i, $))
+    // Dispose the container if converting/assigning an element throws — otherwise
+    // the array handle leaks. (Not scene-exploitable — values here are host
+    // controlled — but a recursive throw shouldn't leak a VM handle.) On success we
+    // return `array` without disposing.
+    try {
+      for (let i = 0; i < value.length; i++) {
+        nativeToVmType(vm, value[i]).consume(($) => vm.setProp(array, i, $))
+      }
+    } catch (e) {
+      array.dispose()
+      throw e
     }
     return array
   }
   if (typeof value === 'object') {
     const obj = vm.newObject()
-    for (const key of Object.getOwnPropertyNames(value)) {
-      nativeToVmType(vm, value[key]).consume(($) => vm.setProp(obj, key, $))
+    // Same handle-leak guard as the array path above.
+    try {
+      for (const key of Object.getOwnPropertyNames(value)) {
+        nativeToVmType(vm, value[key]).consume(($) => vm.setProp(obj, key, $))
+      }
+    } catch (e) {
+      obj.dispose()
+      throw e
     }
     return obj
   }

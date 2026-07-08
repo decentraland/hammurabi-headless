@@ -26,6 +26,11 @@ const serializationScratch = new ReadWriteByteBuffer()
  * bytes synchronously before serializing anything else. Every current caller
  * does — PutComponentOperation.write copies into the out buffer, dataCompare
  * reads immediately — do NOT stash the return value.
+ *
+ * INVARIANT: this relies on single-threaded, synchronous consumption. Never
+ * `await` between calling this and consuming its result — an interleaved
+ * serializeToScratch (from another resumed task) would reset the shared buffer
+ * and silently corrupt the bytes this view points at.
  */
 function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
   serializationScratch.resetBuffer()

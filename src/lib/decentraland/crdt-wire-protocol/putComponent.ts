@@ -41,15 +41,9 @@ export namespace PutComponentOperation {
    * the caller, so the hot read loop validates each message exactly once.
    */
   export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): PutComponentMessage | null {
-    let header = peekedHeader
-    if (header) {
-      buf.incrementReadOffset(CRDT_MESSAGE_HEADER_LENGTH)
-    } else {
-      const readHeader = CrdtMessageProtocol.readHeader(buf)
-      if (!readHeader) {
-        return null
-      }
-      header = readHeader
+    const header = CrdtMessageProtocol.consumeOrReadHeader(buf, peekedHeader)
+    if (!header) {
+      return null
     }
 
     if (header.type !== CrdtMessageType.PUT_COMPONENT) {

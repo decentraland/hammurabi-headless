@@ -3,6 +3,9 @@ import { ApplyComponentOperation, ComponentDeclaration } from "../crdt-internal/
 
 // One writer reused for every component serialization (single-threaded). It is
 // recreated if an encode throws (see serialize) — do NOT make this `const`.
+// INVARIANT: serialize() must run to completion synchronously; never `await`
+// between sharedWriter.reset() and .finish() — an interleaved serialize() from a
+// resumed task would clobber the shared writer mid-encode and corrupt the bytes.
 let sharedWriter = new Writer()
 
 /**
