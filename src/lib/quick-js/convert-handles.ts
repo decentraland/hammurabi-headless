@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto"
-import { QuickJSContext, QuickJSHandle, Scope } from "quickjs-emscripten-core"
+import { QuickJSContext, QuickJSDeferredPromise, QuickJSHandle, Scope } from "quickjs-emscripten-core"
 import { MaybeUint8Array } from "./types"
 
 // Upper bound on a single scene-supplied binary payload marshalled out of the VM,
@@ -125,6 +125,43 @@ export function disposeMarshalHelpers(vm: QuickJSContext) {
   helpers.wrapBytes.dispose()
 }
 
+type PromiseTracking = {
+  deferreds: Set<QuickJSDeferredPromise>
+  startSyncTurn: () => void
+}
+
+// Host promises marshalled into the VM (nativeToVmType promise branch) hold
+// resolve/reject function handles until they settle. Any still in flight when
+// the VM is torn down (hot reload with an RPC call pending is the common case)
+// would keep QuickJS GC objects alive and make JS_FreeRuntime abort with
+// `list_empty(&rt->gc_obj_list)` — fatal in the release WASM build. Track them
+// per-VM so teardown can dispose the stragglers.
+const promiseTracking = new WeakMap<QuickJSContext, PromiseTracking>()
+
+/**
+ * Enables in-flight promise tracking for a VM. `startSyncTurn` is invoked before
+ * draining pending jobs on settle (job execution is untrusted scene code, so it
+ * gets its own deadline turn).
+ */
+export function installPromiseTracking(vm: QuickJSContext, startSyncTurn: () => void) {
+  promiseTracking.set(vm, { deferreds: new Set(), startSyncTurn })
+}
+
+/** Disposes deferred promises still in flight. Must run before `vm.dispose()`. */
+export function disposePendingDeferreds(vm: QuickJSContext) {
+  const tracking = promiseTracking.get(vm)
+  if (!tracking) return
+  promiseTracking.delete(vm)
+  for (const deferred of tracking.deferreds) {
+    try {
+      deferred.dispose()
+    } catch {
+      // handle may already have been reclaimed; ignore
+    }
+  }
+  tracking.deferreds.clear()
+}
+
 /**
  * dumpAndDispose converts a QuickJSHandle into a native JS type outside the sandbox.
  *
@@ -166,7 +203,9 @@ export function dumpAndDispose(vm: QuickJSContext, val: QuickJSHandle) {
     }
     return vm.dump(val)
   } finally {
-    val.dispose()
+    // vm.dump() disposes the handle itself when the value is a promise
+    // (pending/fulfilled/rejected) — disposing again would throw UseAfterFree.
+    if (val.alive) val.dispose()
   }
 }
 
@@ -245,14 +284,32 @@ export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
     return vm.unwrapResult(vm.evalCode(code))
   }
   if (value && typeof value === 'object' && typeof value.then === 'function' && typeof value.catch === 'function') {
+    const tracking = promiseTracking.get(vm)
     const promise = vm.newPromise()
+    tracking?.deferreds.add(promise)
+    // The alive guards make a settle that races VM teardown a no-op instead of a
+    // call into a disposed context.
     value
-      .then((result: any) => nativeToVmType(vm, result).consume(($) => promise.resolve($)))
-      .catch((error: any) => nativeToVmType(vm, error).consume(($) => promise.reject($)))
+      .then((result: any) => {
+        if (!vm.alive || !promise.alive) return
+        nativeToVmType(vm, result).consume(($) => promise.resolve($))
+      })
+      .catch((error: any) => {
+        if (!vm.alive || !promise.alive) return
+        nativeToVmType(vm, error).consume(($) => promise.reject($))
+      })
     // IMPORTANT: Once you resolve an async action inside QuickJS,
     // call runtime.executePendingJobs() to run any code that was
-    // waiting on the promise or callback.
-    void promise.settled.then(vm.runtime.executePendingJobs)
+    // waiting on the promise or callback. Its FAIL branch owns an error handle
+    // that must be disposed (a throwing scene microtask would otherwise leak
+    // one handle per throw and abort JS_FreeRuntime at teardown).
+    void promise.settled.then(() => {
+      tracking?.deferreds.delete(promise)
+      if (!vm.alive) return
+      tracking?.startSyncTurn()
+      const jobs = vm.runtime.executePendingJobs()
+      if ('error' in jobs && jobs.error) jobs.error.dispose()
+    })
     return promise.handle
   }
   if (typeof value === 'function') {

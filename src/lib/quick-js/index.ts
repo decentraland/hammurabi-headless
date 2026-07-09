@@ -1,6 +1,6 @@
 import { QuickJSHandle, QuickJSContext, Scope, newQuickJSWASMModuleFromVariant } from 'quickjs-emscripten-core'
 import { quickJsVariant } from './variant'
-import { dumpAndDispose, nativeToVmType, installMarshalHelpers, disposeMarshalHelpers } from './convert-handles';
+import { dumpAndDispose, nativeToVmType, installMarshalHelpers, disposeMarshalHelpers, installPromiseTracking, disposePendingDeferreds } from './convert-handles';
 import { RunWithVmOptions } from './types';
 
 export * from './types'
@@ -91,6 +91,12 @@ export async function withQuickJsVm<T>(
   // calls to classify/read its values and feed it attacker-chosen bytes.
   installMarshalHelpers(vm)
 
+  // Track host promises marshalled into the VM so any still in flight at
+  // teardown (hot reload with an RPC call pending) can be disposed — a pending
+  // deferred holds resolve/reject handles, and a leaked handle aborts
+  // JS_FreeRuntime (`list_empty(&rt->gc_obj_list)`).
+  installPromiseTracking(vm, startSyncTurn)
+
   let result: T
   let leaking = false
 
@@ -104,14 +110,25 @@ export async function withQuickJsVm<T>(
   // a never-resolving scene promise can't wedge the host loop forever.
   async function resolveTurnPromise(promiseHandle: QuickJSHandle) {
     let timer: ReturnType<typeof setTimeout> | undefined
+    let abandoned = false
+    const settled = vm.resolvePromise(promiseHandle)
+    // If the timeout wins the race, the VM promise can still settle later and
+    // its result owns a freshly-dup'd handle; dispose it or it leaks and
+    // JS_FreeRuntime aborts at teardown.
+    void settled.then(
+      (result) => {
+        if (abandoned && vm.alive) result.dispose()
+      },
+      () => {}
+    )
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`scene async turn exceeded ${MAX_ASYNC_TURN_MS}ms`)),
-        MAX_ASYNC_TURN_MS
-      )
+      timer = setTimeout(() => {
+        abandoned = true
+        reject(new Error(`scene async turn exceeded ${MAX_ASYNC_TURN_MS}ms`))
+      }, MAX_ASYNC_TURN_MS)
     })
     try {
-      return await Promise.race([vm.resolvePromise(promiseHandle), timeout])
+      return await Promise.race([settled, timeout])
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -256,13 +273,24 @@ export async function withQuickJsVm<T>(
 
     immediates.dispose()
     disposeMarshalHelpers(vm)
+    disposePendingDeferreds(vm)
     vm.runtime.removeInterruptHandler()
     try {
       vm.dispose()
     } catch (err: any) {
-      if (err.toString().includes('list_empty(&rt->gc_obj_list)') && !failures.length) {
+      const message = String(err)
+      if (message.includes('list_empty(&rt->gc_obj_list)')) {
         leaking = true
-      } else throw err
+        // An Emscripten-level abort poisons the cached WASM module for the whole
+        // process — every later newContext() would fail with "Aborted". Drop the
+        // cache so the next VM instantiates a fresh module.
+        if (message.includes('Aborted')) quickJsModulePromise = undefined
+      } else if (!failures.length) {
+        throw err
+      } else {
+        // Don't let a teardown error mask the scene's own failure (thrown below).
+        console.error('QuickJS teardown error (suppressed in favor of scene failure):', err)
+      }
     }
     if (failures.length) {
       throw failures[0]
@@ -312,6 +340,15 @@ export function setupSetImmediate(vm: QuickJSContext, startSyncTurn: () => void 
     },
     dispose() {
       clearInterval(int)
+      // Callbacks still queued here (the drain loop timed out) are live handles;
+      // any that survives vm.dispose() trips the JS_FreeRuntime leak assert.
+      for (const elem of immediates.splice(0)) {
+        try {
+          elem.dispose()
+        } catch {
+          // handle may already have been reclaimed; ignore
+        }
+      }
     }
   }
 }
