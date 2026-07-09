@@ -4,29 +4,34 @@ const MIN_FRAME_TIME = 24
 
 // this is the default update loop used by the scenes. it can be overriden by tests
 export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
-  await opts.onStart()
+  try {
+    await opts.onStart()
 
-  // by ADR-133, the first update is always 0.0 elapsed time
-  await opts.onUpdate(0.0)
+    // by ADR-133, the first update is always 0.0 elapsed time
+    await opts.onUpdate(0.0)
 
-  let start = performance.now()
+    let start = performance.now()
 
-  // TODO: this is a very naive implementation of the update loop. we should define
-  //       a stable way to enable a graceful shutdown of the scene runtime.
-  while (opts.isRunning()) {
-    const now = performance.now()
-    const dtMillis = now - start
+    while (opts.isRunning()) {
+      const now = performance.now()
+      const dtMillis = now - start
 
-    if (dtMillis < MIN_FRAME_TIME) {
-      await sleep(MIN_FRAME_TIME - dtMillis)
-      continue
+      if (dtMillis < MIN_FRAME_TIME) {
+        await sleep(MIN_FRAME_TIME - dtMillis)
+        continue
+      }
+
+      start = now
+
+      const dtSecs = dtMillis / 1000
+
+      await opts.onUpdate(dtSecs)
     }
-
-    start = now
-
-    const dtSecs = dtMillis / 1000
-
-    await opts.onUpdate(dtSecs)
+  } catch (err) {
+    // A turn abandoned because the scene was unloaded mid-flight (hot reload
+    // closes the port while an onUpdate awaits an RPC that will never answer)
+    // is a shutdown, not a scene failure. Only surface errors from a live scene.
+    if (opts.isRunning()) throw err
   }
 }
 

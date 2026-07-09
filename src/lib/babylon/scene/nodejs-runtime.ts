@@ -56,6 +56,12 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
     // Connect server to memory transport with scene context
     rpcServer.attachTransport(memoryTransport.server, ctx)
 
+    // Close the transport when the scene context is disposed (hot reload):
+    // port.state flips to 'closed', which ends the update loop. Without this the
+    // old VM hangs awaiting an RPC that will never be answered, until the
+    // async-turn timeout kills it 60 seconds later with a spurious error.
+    void ctx.stopped.then(() => memoryTransport.client.close())
+
     // Initialize RPC client and create port
     const client = await rpcClient
     const clientPort = await client.createPort(`scene-${scene.scene?.base || 'unknown'}`)
@@ -80,8 +86,10 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
       updateLoop: defaultUpdateLoop
     })
 
-    console.log(`[NODEJS] QuickJS runtime started successfully for scene: ${scene.display?.title}`)
+    // startQuickJsSceneRuntime resolves when the update loop ends, so this logs
+    // the runtime's clean shutdown, not its startup.
+    console.log(`[NODEJS] QuickJS runtime stopped for scene: ${scene.display?.title}`)
   } catch (error) {
-    console.error(`[NODEJS] Failed to start QuickJS runtime for scene ${scene.display?.title}:`, error)
+    console.error(`[NODEJS] QuickJS runtime for scene ${scene.display?.title} terminated with error:`, error)
   }
 }
