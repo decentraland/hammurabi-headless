@@ -14,14 +14,17 @@ export function dclWorldUrl(dclName: string) {
   return `${getWorldsContentServerUrl()}/world/${encodeURIComponent(dclName.toLowerCase())}`
 }
 
+// This file came from a browser client where "://host" meant "the page's
+// current protocol" and "/path" resolved against the page origin. Headless
+// there is no page: default protocol-less forms to https, and resolve
+// path-only static routes against the canonical play host.
 function normalizeUrl(url: string) {
-  return url.replace(/^:\/\//, 'http:' + '//')
+  return url.replace(/^:\/\//, 'https:' + '//')
 }
 
-// adds the currently used protocol to the given URL
 function urlWithProtocol(urlOrHostname: string) {
   if (urlOrHostname.startsWith('/')) {
-    return new URL(urlOrHostname).toString()
+    return new URL(urlOrHostname, 'https://play.decentraland.org').toString()
   }
 
   if (!urlOrHostname.startsWith('http://') && !urlOrHostname.startsWith('https://') && !urlOrHostname.startsWith('://'))
