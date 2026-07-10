@@ -1,4 +1,5 @@
 import { Vector3 } from '@babylonjs/core'
+import mitt from 'mitt'
 import { ReadWriteByteBuffer } from '../../../../src/lib/decentraland/ByteBuffer'
 import { readAllMessages } from '../../../../src/lib/decentraland/crdt-wire-protocol'
 import { CrdtMessageType } from '../../../../src/lib/decentraland/crdt-wire-protocol/types'
@@ -12,20 +13,9 @@ import { transformComponent } from '../../../../src/lib/decentraland/sdk-compone
 // there. Assertions are semantic (decoded messages), not byte-exact, because
 // entity allocation moved to the shared playerEntityManager.
 
-function makeEmitter() {
-  const handlers: Record<string, Function[]> = {}
-  return {
-    on(t: string, h: Function) {
-      ;(handlers[t] ||= []).push(h)
-    },
-    off(t: string, h: Function) {
-      handlers[t] = (handlers[t] || []).filter((x) => x !== h)
-    },
-    emit(t: string, e: any) {
-      ;(handlers[t] || []).forEach((h) => h(e))
-    }
-  }
-}
+// The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
+// so the stub uses the same library instead of a hand-rolled copy of it.
+const makeEmitter = () => mitt<Record<string, any>>()
 
 function positionData(x: number, y: number, z: number) {
   return { positionX: x, positionY: y, positionZ: z, rotationX: 0, rotationY: 0, rotationZ: 0, rotationW: 1 }

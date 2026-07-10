@@ -73,6 +73,7 @@
     "fp-future": "^1.0.1",
     "livekit-client": "^2.15.3",
     "livekit-server-sdk": "^2.13.2",
+    "mitt": "^3.0.1",
     "protobufjs": "^7.6.5",
     "quickjs-emscripten-core": "^0.32.0",
     "ws": "^8.21.0"

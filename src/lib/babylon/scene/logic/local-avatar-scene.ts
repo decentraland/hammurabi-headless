@@ -27,7 +27,7 @@ export async function createLocalAvatarSceneSystem(scene: Scene, currentAvatar: 
   )
 
   await localAvatarScene.initAsyncJobs()
-  const playerEntity = localAvatarScene.getOrCreateEntity(StaticEntities.PlayerEntity)
+  const playerEntity = localAvatarScene.getOrCreateStaticEntity(StaticEntities.PlayerEntity)
 
   function setAvatarShape(value: PBAvatarShape) {
     localAvatarScene.components[avatarShapeComponent.componentId].createOrReplace(StaticEntities.PlayerEntity, value)

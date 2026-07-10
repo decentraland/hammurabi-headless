@@ -29,7 +29,7 @@ import {
 import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-component'
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
-import { StaticEntities, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
 import { engineInfoComponent } from '../../decentraland/sdk-components/engine-info'
@@ -296,11 +296,12 @@ export class SceneContext implements EngineApiInterface {
   }
 
   /**
-   * UNCAPPED creation — for HOST-initiated entities only (root entity, player
-   * entity). Anything materializing entities from scene/CRDT input must use
-   * tryGetOrCreateEntity instead, or it bypasses MAX_LIVE_ENTITIES.
+   * UNCAPPED creation — private so no future CRDT-input path can reach it and
+   * silently bypass MAX_LIVE_ENTITIES; scene/CRDT-driven code must go through
+   * tryGetOrCreateEntity, host-initiated static entities through
+   * getOrCreateStaticEntity.
    */
-  getOrCreateEntity(entityId: Entity): BabylonEntity {
+  private getOrCreateEntity(entityId: Entity): BabylonEntity {
     let entity = this.entities.get(entityId)
     if (!entity) {
       entity = new BabylonEntity(entityId, this.#ref)
@@ -309,6 +310,18 @@ export class SceneContext implements EngineApiInterface {
       this.entities.set(entityId, entity)
     }
     return entity
+  }
+
+  /**
+   * Host-initiated entities in the reserved static range only (root, player,
+   * camera). The range guard keeps this narrow accessor from becoming a
+   * general uncapped-creation backdoor.
+   */
+  getOrCreateStaticEntity(entityId: Entity): BabylonEntity {
+    if (entityId >= MAX_RESERVED_ENTITY) {
+      throw new Error(`getOrCreateStaticEntity is reserved for static entities (< ${MAX_RESERVED_ENTITY}), got ${entityId}`)
+    }
+    return this.getOrCreateEntity(entityId)
   }
 
   /**

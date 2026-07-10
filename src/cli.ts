@@ -45,13 +45,16 @@ Examples:
 
   // Everything after the first '=' is the value: split('=')[1] would silently
   // truncate values that themselves contain '=' (e.g. realm URLs with query
-  // params like ?access=abc).
-  const argValue = arg.slice(arg.indexOf('=') + 1)
+  // params like ?access=abc). undefined (not the whole flag string) for
+  // '='-less args, so a future branch that forgets the '=' in its prefix
+  // fails loudly instead of receiving a plausible-looking wrong value.
+  const equalsIndex = arg.indexOf('=')
+  const argValue = equalsIndex === -1 ? undefined : arg.slice(equalsIndex + 1)
 
   if (arg.startsWith('--realm=')) {
-    realmUrl = argValue
+    realmUrl = argValue!
   } else if (arg.startsWith('--position=')) {
-    position = argValue
+    position = argValue!
     // Validate strictly: the raw string is used verbatim as the content-server
     // pointer, so a lenient parseInt check would let e.g. "80.5,80" through
     // only to fail later with a misleading "No scene found".
@@ -60,9 +63,9 @@ Examples:
       process.exit(1)
     }
   } else if (arg.startsWith('--scene-id=')) {
-    sceneId = argValue
+    sceneId = argValue!
   } else if (arg.startsWith('--private-key=')) {
-    privateKey = argValue
+    privateKey = argValue!
   } else if (arg.startsWith('--env=')) {
     if (argValue === 'zone' || argValue === 'org') {
       environment = argValue

@@ -13,20 +13,13 @@ const {
 const { playerEntityManager } = require('../../../../src/lib/decentraland/communications/player-entity-manager')
 const robustFetchMock = robustFetch as jest.Mock
 
-function makeEmitter() {
-  const handlers: Record<string, Function[]> = {}
-  return {
-    on(type: string, h: Function) {
-      ;(handlers[type] ||= []).push(h)
-    },
-    off(type: string, h: Function) {
-      handlers[type] = (handlers[type] || []).filter((x) => x !== h)
-    },
-    emit(type: string, e: any) {
-      ;(handlers[type] || []).forEach((h) => h(e))
-    }
-  }
-}
+// The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
+// so the stub uses the same library. mitt itself is not mocked, so requiring it
+// after the jest.mock call above is safe. Interop-tolerant: mitt's CJS entry
+// exports the function directly, its ESM entry as `default`.
+const mittModule = require('mitt')
+const mitt = mittModule.default ?? mittModule
+const makeEmitter = () => mitt()
 
 describe('avatar profile-fetch amplification guard', () => {
   let system: any
@@ -43,7 +36,7 @@ describe('avatar profile-fetch amplification guard', () => {
       json: async () => [{ avatars: [{ version: 2, name: 'x' }] }]
     })
     transport = { events: makeEmitter() }
-    system = createAvatarCommunicationSystem(transport)
+    system = createAvatarCommunicationSystem(transport, (position: any) => position)
   })
 
   afterEach(() => {

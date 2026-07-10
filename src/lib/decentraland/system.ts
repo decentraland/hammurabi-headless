@@ -1,4 +1,5 @@
 import { Scene } from "@babylonjs/core"
+import { createRateLimitedErrorLogger } from "../misc/logger"
 
 export type DecentralandSystem = {
   update?(): void
@@ -7,27 +8,27 @@ export type DecentralandSystem = {
 
 // Each system runs isolated: Babylon's Observable.notifyObservers has no
 // try/catch, so a throw from one system would otherwise skip every later
-// system this frame and propagate into the render loop. The log rate limit is
-// PER SYSTEM so a system failing every frame doesn't flood the console at tick
-// rate — and doesn't mask another system's unrelated (rarer) error either.
-function runIsolated(system: DecentralandSystem, method: 'update' | 'lateUpdate', errorLogState: { at: number }) {
+// system this frame and propagate into the render loop.
+function runIsolated(
+  system: DecentralandSystem,
+  method: 'update' | 'lateUpdate',
+  logError: ReturnType<typeof createRateLimitedErrorLogger>
+) {
   try {
     system[method]?.()
   } catch (error: any) {
-    const now = Date.now()
-    if (now - errorLogState.at > 1000) {
-      errorLogState.at = now
-      console.error(`Error in system ${method} (skipped this frame):`, error?.stack || error)
-    }
+    logError(`Error in system ${method} (skipped this frame):`, error)
   }
 }
 
 export function addSystems(scene: Scene, ...systems: DecentralandSystem[]) {
-  const errorLogStates = systems.map(() => ({ at: 0 }))
+  // One rate-limited logger PER SYSTEM so a system failing every frame can't
+  // suppress another system's unrelated error.
+  const errorLoggers = systems.map(() => createRateLimitedErrorLogger())
   scene.onBeforeAnimationsObservable.add(() => {
-    systems.forEach(($, i) => runIsolated($, 'update', errorLogStates[i]))
+    systems.forEach(($, i) => runIsolated($, 'update', errorLoggers[i]))
   })
   scene.onAfterDrawPhaseObservable.add(() => {
-    systems.forEach(($, i) => runIsolated($, 'lateUpdate', errorLogStates[i]))
+    systems.forEach(($, i) => runIsolated($, 'lateUpdate', errorLoggers[i]))
   })
 }

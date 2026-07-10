@@ -44,6 +44,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   // One tracker per live subscription: its highest emitted deletion sequence.
   const subscriptionTrackers = new Set<{ emittedSeq: number }>()
+  let lastPrunedMinSeq = 0
 
   // Drop tombstones every live subscription has already emitted. A tombstone
   // only exists to deliver DELETE_ENTITY to subscriptions that saw the entity;
@@ -56,6 +57,12 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     for (const tracker of subscriptionTrackers) {
       if (tracker.emittedSeq < minEmitted) minEmitted = tracker.emittedSeq
     }
+    // Skip the tombstone scan when the low-water mark hasn't advanced since
+    // the last prune (e.g. a stalled subscription): every entry with
+    // seq <= lastPrunedMinSeq was already deleted then, so the scan would
+    // re-iterate up to MAX_DELETED_ENTITIES entries per frame deleting nothing.
+    if (minEmitted <= lastPrunedMinSeq) return
+    lastPrunedMinSeq = minEmitted
     for (const [entity, seq] of deletedEntities) {
       if (seq <= minEmitted) deletedEntities.delete(entity)
     }

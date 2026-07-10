@@ -1,3 +1,4 @@
+import mitt from 'mitt'
 import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import { ReadWriteByteBuffer } from '../../../../src/lib/decentraland/ByteBuffer'
 import { readAllMessages } from '../../../../src/lib/decentraland/crdt-wire-protocol'
@@ -8,21 +9,9 @@ import {
 } from '../../../../src/lib/decentraland/communications/player-entity-manager'
 import { CommsTransportWrapper } from '../../../../src/lib/decentraland/communications/CommsTransportWrapper'
 
-// Minimal event emitter for the transport (on/off/emit is all these consumers use).
-function makeEmitter() {
-  const handlers: Record<string, Function[]> = {}
-  return {
-    on(t: string, h: Function) {
-      ;(handlers[t] ||= []).push(h)
-    },
-    off(t: string, h: Function) {
-      handlers[t] = (handlers[t] || []).filter((x) => x !== h)
-    },
-    emit(t: string, e: any) {
-      ;(handlers[t] || []).forEach((h) => h(e))
-    }
-  }
-}
+// The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
+// so the stub uses the same library instead of a hand-rolled copy of it.
+const makeEmitter = () => mitt<Record<string, any>>()
 
 // End-to-end coverage of the UNTRUSTED-PEER comms path (host side, outside the VM):
 // remote packets -> CommsTransportWrapper decode/bounds -> avatar system -> CRDT.
