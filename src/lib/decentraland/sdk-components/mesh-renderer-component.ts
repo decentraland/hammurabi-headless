@@ -55,6 +55,10 @@ export const meshRendererComponent = declareComponentUsingProtobufJs(PBMeshRende
   if (entity.appliedComponents.meshRenderer?.mesh) {
     entity.appliedComponents.meshRenderer.mesh.parent = null
     entity.appliedComponents.meshRenderer.mesh.dispose()
+    // Clear eagerly: on DELETE_COMPONENT nothing below reassigns this, and a
+    // stale entry would hand the disposed mesh to setMeshRendererMaterial on a
+    // later Material PUT.
+    entity.appliedComponents.meshRenderer = undefined
   }
 
   const info = component.get(entity.entityId)

@@ -72,11 +72,13 @@ export async function initHotReload(baseUrl: string, entityId: string, reloadSce
 
     logger.log('Shutting down preview features')
     
-    if (wsConnection && wsConnection.OPEN) {
+    // readyState comparison: `wsConnection.OPEN` is the class CONSTANT (always
+    // truthy), not the connection state.
+    if (wsConnection && wsConnection.readyState === wsConnection.OPEN) {
       logger.log(`Stopping watcher for scene: ${entityId}`)
       wsConnection.close()
-      wsConnection = null
     }
+    wsConnection = null
   }
 
   return {

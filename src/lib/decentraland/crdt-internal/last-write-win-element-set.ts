@@ -38,12 +38,23 @@ function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
   return serializationScratch.toBinary()
 }
 
+// Bound for the echo-dedupe map below; clearing it on overflow only costs a
+// rare redundant corrective message, never correctness.
+const MAX_ECHO_DEDUPE_ENTRIES = 8192
+
 export function createUpdateLwwFromCrdt<T>(
   componentId: number,
   timestamps: Map<Entity, number>,
   schema: SerDe<T>,
   data: Map<Entity, T>
 ) {
+  // Echo amplification guard: a stale ~24-byte PUT makes us serialize our FULL
+  // stored value (up to MAX_CRDT_PAYLOAD_BYTES) into the outgoing buffer as a
+  // corrective message. A scene streaming tiny stale PUTs against one large
+  // component would pin tens of MB in the (never-shrinking) outgoing buffer.
+  // Repeats are byte-identical while our state is unchanged, so one echo per
+  // (entity, stored timestamp) is enough.
+  const echoedAtTimestamp = new Map<Entity, number>()
   /**
    * Process the received message only if the lamport number recieved is higher
    * than the stored one. If its lower, we spread it to the network to correct the peer.
@@ -118,11 +129,25 @@ export function createUpdateLwwFromCrdt<T>(
           data.delete(entityId)
         }
 
+        // Stored state changed, so the next conflict needs a fresh correction —
+        // this also covers the equal-timestamp/greater-data accept, where the
+        // VALUE changes while the timestamp doesn't (a timestamp-only dedupe key
+        // would wrongly suppress the new echo bytes there).
+        echoedAtTimestamp.delete(entityId)
+
         return true // change accepted
       }
       case ProcessMessageResultType.StateOutdatedTimestamp:
       case ProcessMessageResultType.StateOutdatedData: {
         const timestamp = timestamps.get(entityId)!
+
+        // Already echoed our state at this timestamp — a repeat would be
+        // byte-identical; skip the redundant serialization/buffer append.
+        if (echoedAtTimestamp.get(entityId) === timestamp) {
+          return false // change not accepted
+        }
+        if (echoedAtTimestamp.size >= MAX_ECHO_DEDUPE_ENTRIES) echoedAtTimestamp.clear()
+        echoedAtTimestamp.set(entityId, timestamp)
 
         if (data.has(entityId)) {
           // post conflict resolution update

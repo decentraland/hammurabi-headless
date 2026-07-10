@@ -30,11 +30,17 @@ export async function setupEnvironment(scene: BABYLON.Scene) {
 
   function repositionCamera() {
     if (!scene.activeCamera) return
-    // set the ground at 0 always and round position towards PARCEL_SIZE
+    // Follow the camera in ABSOLUTE world coordinates, snapped to the parcel
+    // grid, with the ground plane always at y=0. The upstream browser client
+    // used camera-relative offsets here because its ground was a child of a
+    // rootMesh moved to the camera every frame; this port has no such parent,
+    // so the relative math put the ground at world y = -cameraY — a free-fall
+    // trap for any scene without its own floor colliders the moment player
+    // movement is driven.
     ground.position.set(
-      Math.floor(scene.activeCamera.globalPosition.x / PARCEL_SIZE) * PARCEL_SIZE - scene.activeCamera.globalPosition.x,
-      -scene.activeCamera.globalPosition.y,
-      Math.floor(scene.activeCamera.globalPosition.z / PARCEL_SIZE) * PARCEL_SIZE - scene.activeCamera.globalPosition.z
+      Math.floor(scene.activeCamera.globalPosition.x / PARCEL_SIZE) * PARCEL_SIZE,
+      0,
+      Math.floor(scene.activeCamera.globalPosition.z / PARCEL_SIZE) * PARCEL_SIZE
     )
   }
 

@@ -30,6 +30,9 @@ export const meshColliderComponent = declareComponentUsingProtobufJs(PBMeshColli
     if (currentValue?.collider) {
       currentValue.collider.dispose()
     }
+    // Clear eagerly so a removal doesn't leave a stale reference to the
+    // disposed collider (the replace path below reassigns it).
+    entity.appliedComponents.meshCollider = undefined
   }
 
   if (isAddingNewValue || isReplacingValue) {
