@@ -55,6 +55,14 @@ export interface EngineOptions {
 
 let initialized = false
 
+// Everything main() created that outlives a scene: without disposing these on
+// reset, every restart leaks a live engine whose render loop keeps running and
+// whose systems keep ticking the SHARED loadedScenesByEntityId map (N restarts
+// ⇒ N+1 updates per scene per frame), plus a still-connected LiveKit room.
+let activeEngine: BABYLON.Engine | BABYLON.NullEngine | undefined
+let activeBabylonScene: BABYLON.Scene | undefined
+let activeTransport: { disconnect(): Promise<void> } | undefined
+
 export function resetEngine() {
   // Properly dispose all loaded scenes first
   for (const [entityId, scene] of loadedScenesByEntityId.entries()) {
@@ -68,6 +76,27 @@ export function resetEngine() {
   // Clear the map
   loadedScenesByEntityId.clear()
 
+  // Tear down comms: the DISCONNECTION handler ignores client-initiated closes,
+  // so this won't trigger the restart-on-comms-loss exit.
+  if (activeTransport) {
+    activeTransport.disconnect().catch((e) => console.error('Error disconnecting comms transport:', e))
+    activeTransport = undefined
+  }
+
+  // Stop the old render loop before disposing: engine.dispose() alone leaves
+  // the queued setTimeout frame chain alive.
+  if (activeEngine) {
+    try {
+      activeEngine.stopRenderLoop()
+      activeBabylonScene?.dispose()
+      activeEngine.dispose()
+    } catch (e) {
+      console.error('Error disposing engine:', e)
+    }
+    activeEngine = undefined
+    activeBabylonScene = undefined
+  }
+
   // Reset the initialization flag
   initialized = false
 }
@@ -80,8 +109,22 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   // Setup XMLHttpRequest polyfill for GLTF loading before initializing Babylon.js
   setupXMLHttpRequestPolyfill()
 
+  // Set eagerly so a concurrent call fails fast, but roll back on failure —
+  // otherwise a failed startup poisons every retry with "cannot be initialized
+  // twice" unless the caller knows to call resetEngine() first.
   initialized = true
+  try {
+    return await initializeEngine(options)
+  } catch (err) {
+    resetEngine()
+    throw err
+  }
+}
+
+async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> {
   const { scene } = await initEngine(options.canvas)
+  activeBabylonScene = scene
+  activeEngine = scene.getEngine() as BABYLON.Engine
 
   // Create identity based on private key or as guest. When a parent supplies a
   // pre-minted commsAdapter, the worker never needs the authoritative identity,
@@ -136,8 +179,10 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   }
   currentRealm.swap(realm)
 
-  // Determine realm type
-  const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
+  // Determine realm type. Match the hostname exactly: a substring check would
+  // misclassify domains like "mylocalhost.io" as local-dev realms.
+  const hostname = new URL(baseUrl).hostname
+  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1'
   const isWorld = isDclEns(realmUrl)
   const isGenesisCity = !isLocalhost && !isWorld
 
@@ -210,6 +255,8 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
     isLocalhost,
     commsAdapter: options.commsAdapter
   })
+
+  activeTransport = sceneTransport
 
   sceneContext.pipe(async (ctx) => {
     ctx.attachLivekitTransport(sceneTransport)
