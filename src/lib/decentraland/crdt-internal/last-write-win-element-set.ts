@@ -46,15 +46,16 @@ export function createUpdateLwwFromCrdt<T>(
   componentId: number,
   timestamps: Map<Entity, number>,
   schema: SerDe<T>,
-  data: Map<Entity, T>
-) {
+  data: Map<Entity, T>,
   // Echo amplification guard: a stale ~24-byte PUT makes us serialize our FULL
   // stored value (up to MAX_CRDT_PAYLOAD_BYTES) into the outgoing buffer as a
   // corrective message. A scene streaming tiny stale PUTs against one large
   // component would pin tens of MB in the (never-shrinking) outgoing buffer.
   // Repeats are byte-identical while our state is unchanged, so one echo per
-  // (entity, stored timestamp) is enough.
-  const echoedAtTimestamp = new Map<Entity, number>()
+  // (entity, stored timestamp) is enough. Owned by the caller (createLwwStore
+  // passes its own map) so purgeEntity can clear deleted entities' entries.
+  echoedAtTimestamp: Map<Entity, number> = new Map()
+) {
   /**
    * Process the received message only if the lamport number recieved is higher
    * than the stored one. If its lower, we spread it to the network to correct the peer.
@@ -227,6 +228,7 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
   const dirtyIterator = new Set<Entity>()
   const timestamps = new Map<Entity, number>()
   const updatedAtTick = new Map<Entity, number>()
+  const echoedAtTimestamp = new Map<Entity, number>()
   const tickState = { tick: 0 }
 
   return {
@@ -258,6 +260,7 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
       dirtyIterator.delete(entity)
       timestamps.delete(entity)
       updatedAtTick.delete(entity)
+      echoedAtTimestamp.delete(entity)
     },
     getOrNull(entity: Entity): Readonly<T> | null {
       return data.get(entity) ?? null
@@ -313,6 +316,6 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
     },
     dumpCrdtDeltas: createGetCrdtMessagesForLwwWithTick(componentDeclaration.componentId, updatedAtTick, timestamps, componentDeclaration, data),
     dumpCrdtUpdates: createGetCrdtMessagesForLww(componentDeclaration.componentId, updatedAtTick, timestamps, dirtyIterator, componentDeclaration, data, tickState),
-    updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data),
+    updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data, echoedAtTimestamp),
   }
 }

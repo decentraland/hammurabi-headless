@@ -10,7 +10,7 @@ import { BabylonEntity } from "../BabylonEntity"
  * 
  * This function also executes iteratively while scene.hierarchyChanged==true.
  */
-export function resolveCyclicParening(scene: SceneContext, hasQuota?: () => boolean) {
+export function resolveCyclicParenting(scene: SceneContext, hasQuota?: () => boolean) {
   // Quota-checked (per batch of entities): the fixpoint loop runs in host code
   // over an unparentedEntities set the scene fully controls — a single CRDT
   // batch declaring a ~100k-entity parent chain would otherwise stall the

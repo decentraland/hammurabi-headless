@@ -68,6 +68,11 @@ export function setupXMLHttpRequestPolyfill() {
     open(method: string, url: string, async = true) {
       this.method = method
       this.url = url
+      // Per spec, open() resets a finished/aborted request so the instance can
+      // be reused; without this, a second send() on a reused XHR silently
+      // no-ops because _settled stays true.
+      this._settled = false
+      this._currentReq = null
       this.readyState = 1
       this._setReadyState(1)
     }

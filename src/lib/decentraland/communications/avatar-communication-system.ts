@@ -358,6 +358,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         // allocated every frame.
         component.commitDirtyState()
       }
+      // Once per tick (not per subscription in getUpdates): the prune scans
+      // all trackers + all tombstones, and the emittedSeq values it needs only
+      // advance once per frame anyway — pruning here just trails by one frame.
+      pruneEmittedTombstones()
     },
 
     // Create subscription for CRDT synchronization
@@ -393,7 +397,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
             }
           }
           tracker.emittedSeq = deletionSequence
-          pruneEmittedTombstones()
 
           // Serialize all component updates from the last tick until now
           for (const [component, tick] of state) {

@@ -11,7 +11,7 @@ import { BabylonEntity } from './BabylonEntity'
 import { transformComponent } from '../../decentraland/sdk-components/transform-component'
 import { createLwwStore } from '../../decentraland/crdt-internal/last-write-win-element-set'
 import { ComponentDefinition } from '../../decentraland/crdt-internal/components'
-import { resolveCyclicParening } from './logic/cyclic-transform'
+import { resolveCyclicParenting } from './logic/cyclic-transform'
 import { Vector3 } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { billboardComponent } from '../../decentraland/sdk-components/billboard-component'
@@ -270,7 +270,7 @@ export class SceneContext implements EngineApiInterface {
       // parcel 0,0) and removes them from the rootNode subtree that raycasts
       // and culling traverse. Schedule them for reparenting instead: their
       // expectedParentEntityId now points at a tombstoned entity, so the
-      // deleted-parent branch of resolveCyclicParening re-roots them.
+      // deleted-parent branch of resolveCyclicParenting re-roots them.
       for (const child of entity.childrenEntities()) {
         this.unparentedEntities.add(child.entityId)
       }
@@ -291,6 +291,11 @@ export class SceneContext implements EngineApiInterface {
     }
   }
 
+  /**
+   * UNCAPPED creation — for HOST-initiated entities only (root entity, player
+   * entity). Anything materializing entities from scene/CRDT input must use
+   * tryGetOrCreateEntity instead, or it bypasses MAX_LIVE_ENTITIES.
+   */
   getOrCreateEntity(entityId: Entity): BabylonEntity {
     let entity = this.entities.get(entityId)
     if (!entity) {
@@ -333,10 +338,10 @@ export class SceneContext implements EngineApiInterface {
     let rollingOperationCounter = 0
 
     // Resume any reparenting work a previous quota-bounded frame left pending
-    // (resolveCyclicParening re-flags hierarchyChanged when it yields early);
+    // (resolveCyclicParenting re-flags hierarchyChanged when it yields early);
     // without this, leftover work would only resume when a NEW message arrives.
     if (this.hierarchyChanged) {
-      resolveCyclicParening(this, hasQuota)
+      resolveCyclicParenting(this, hasQuota)
     }
 
     // process all the incoming messages
@@ -396,7 +401,7 @@ export class SceneContext implements EngineApiInterface {
       this.incomingMessages.shift()
 
       // this process resolves the re parenting of all entities preventing cycles
-      resolveCyclicParening(this, hasQuota)
+      resolveCyclicParenting(this, hasQuota)
     }
 
     // Update avatar system if it exists
