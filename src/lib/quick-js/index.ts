@@ -1,9 +1,14 @@
 import { QuickJSHandle, QuickJSContext, Scope, newQuickJSWASMModuleFromVariant } from 'quickjs-emscripten-core'
 import { quickJsVariant } from './variant'
-import { dumpAndDispose, nativeToVmType, installMarshalHelpers, disposeMarshalHelpers, installPromiseTracking, disposePendingDeferreds } from './convert-handles';
+import { dumpAndDispose, nativeToVmType, installMarshalHelpers, disposeMarshalHelpers, installPromiseTracking, disposePendingDeferreds, drainPendingJobs, safeDispose } from './convert-handles';
 import { RunWithVmOptions } from './types';
 
 export * from './types'
+
+// WebAssembly is a Node.js global, but this headless project compiles against
+// lib ES2022 without DOM and @types/node 20 doesn't declare it — declare the
+// minimal surface the teardown catch below needs.
+declare const WebAssembly: { RuntimeError: new (message?: string) => Error }
 
 // Untrusted scene code runs inside quickjs-ng (the actively-maintained QuickJS
 // fork) compiled to WASM. We load the module once per process and reuse it.
@@ -34,23 +39,46 @@ export type QuickJsVmLimits = {
   memoryLimitBytes?: number
   maxStackBytes?: number
   maxSyncExecutionMs?: number
+  maxAsyncTurnMs?: number
 }
 
-// executePendingJobs returns a Disposable result whose FAIL branch owns a
-// QuickJS error handle; dropping it leaks one VM handle per throwing microtask
-// job, which eventually makes vm.dispose() throw and get misreported as leaking.
-// Always dispose that handle. Callers must run startSyncTurn() first — draining
-// jobs executes untrusted scene code, so it gets its own deadline turn.
-function drainPendingJobs(vm: QuickJSContext) {
-  const result = vm.runtime.executePendingJobs()
-  if ('error' in result && result.error) result.error.dispose()
+/**
+ * Classifies an error thrown by `vm.dispose()` at teardown. Pure so every branch
+ * is unit-testable without provoking a real WASM abort.
+ *
+ * - `dropCache`: any Emscripten-level abort permanently poisons the WASM module
+ *   for the whole process — every later newContext() would fail with "Aborted".
+ *   Aborts always surface as a WebAssembly.RuntimeError, so match the TYPE, not
+ *   the assert wording (JS_FreeRuntime has many asserts besides gc_obj_list,
+ *   e.g. `p->ref_count > 0`). The caller must additionally check the cache still
+ *   holds the module this VM was built from before clearing it.
+ * - `leaking`: the gc_obj_list assert specifically means a host-side handle
+ *   survived teardown (the leak class the pending-promise-leak tests pin).
+ * - `rethrow`: a non-leak teardown error surfaces only when the scene itself did
+ *   not fail — a pending scene failure always wins (the teardown error is logged
+ *   by the caller instead of masking it).
+ */
+export function classifyTeardownError(
+  err: unknown,
+  hasFailures: boolean
+): { dropCache: boolean; leaking: boolean; rethrow: boolean } {
+  const leaking = String(err).includes('list_empty(&rt->gc_obj_list)')
+  return {
+    dropCache: err instanceof WebAssembly.RuntimeError,
+    leaking,
+    rethrow: !leaking && !hasFailures
+  }
 }
 
 export async function withQuickJsVm<T>(
   cb: (opts: RunWithVmOptions) => Promise<T>,
   limits: QuickJsVmLimits = {}
 ): Promise<{ result: T; leaking: boolean }> {
-  const Q = await getQuickJsModule()
+  // Keep the module promise this VM was built from: if teardown aborts, only
+  // drop the cache when it still holds OUR module — a stale VM tearing down
+  // late must not clobber a fresh healthy module another scene already loaded.
+  const modulePromise = getQuickJsModule()
+  const Q = await modulePromise
   const vm = Q.newContext()
 
   // Bound the scene VM's resources. The interrupt handler enforces a per-turn
@@ -63,6 +91,7 @@ export async function withQuickJsVm<T>(
   const memoryLimitBytes = limits.memoryLimitBytes ?? SCENE_MEMORY_LIMIT_BYTES
   const maxStackBytes = limits.maxStackBytes ?? SCENE_MAX_STACK_BYTES
   const maxSyncExecutionMs = limits.maxSyncExecutionMs ?? MAX_SYNC_EXECUTION_MS
+  const maxAsyncTurnMs = limits.maxAsyncTurnMs ?? MAX_ASYNC_TURN_MS
   vm.runtime.setMemoryLimit(memoryLimitBytes)
   vm.runtime.setMaxStackSize(maxStackBytes)
   let syncDeadline = Number.POSITIVE_INFINITY
@@ -110,25 +139,24 @@ export async function withQuickJsVm<T>(
   // a never-resolving scene promise can't wedge the host loop forever.
   async function resolveTurnPromise(promiseHandle: QuickJSHandle) {
     let timer: ReturnType<typeof setTimeout> | undefined
-    let abandoned = false
     const settled = vm.resolvePromise(promiseHandle)
-    // If the timeout wins the race, the VM promise can still settle later and
-    // its result owns a freshly-dup'd handle; dispose it or it leaks and
-    // JS_FreeRuntime aborts at teardown.
-    void settled.then(
-      (result) => {
-        if (abandoned && vm.alive) result.dispose()
-      },
-      () => {}
-    )
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        abandoned = true
-        reject(new Error(`scene async turn exceeded ${MAX_ASYNC_TURN_MS}ms`))
-      }, MAX_ASYNC_TURN_MS)
+      timer = setTimeout(() => reject(new Error(`scene async turn exceeded ${maxAsyncTurnMs}ms`)), maxAsyncTurnMs)
     })
     try {
       return await Promise.race([settled, timeout])
+    } catch (err) {
+      // The timeout won the race and this turn is abandoned, but the VM promise
+      // can still settle later — and its result owns a freshly-dup'd handle;
+      // dispose it or it leaks and JS_FreeRuntime aborts at teardown. The
+      // observer is attached only here so the normal path (every frame) pays
+      // nothing. safeDispose, not a vm.alive check: after a throwing
+      // vm.dispose() the vm.alive flag is stale-true.
+      void settled.then(
+        (result) => safeDispose(result),
+        () => {}
+      )
+      throw err
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -254,38 +282,52 @@ export async function withQuickJsVm<T>(
     // interrupt handler for the life of the worker.
     let counter = 1000
     let drained = true
-    while (immediates.hasPendingJobs() || vm.runtime.hasPendingJob()) {
-      if (!counter--) {
-        drained = false
-        break
+    let drainFailed = false
+    try {
+      while (immediates.hasPendingJobs() || vm.runtime.hasPendingJob()) {
+        if (!counter--) {
+          drained = false
+          break
+        }
+        await new Promise((res) => setTimeout(res, 1))
       }
-      await new Promise((res) => setTimeout(res, 1))
+    } catch (err) {
+      // hasPendingJob is an FFI call: it throws if the WASM module aborted (e.g.
+      // a sibling VM's teardown assert). Keep tearing down — an early exit here
+      // would leak the 16ms interval for the life of the process.
+      drained = false
+      drainFailed = true
+      console.error('QuickJS drain loop failed at teardown:', err)
     }
 
     for (const handle of requireCache.values()) {
-      try {
-        handle.dispose()
-      } catch {
-        // handle may already have been reclaimed by VM teardown; ignore
-      }
+      safeDispose(handle)
     }
     requireCache.clear()
 
     immediates.dispose()
     disposeMarshalHelpers(vm)
     disposePendingDeferreds(vm)
-    vm.runtime.removeInterruptHandler()
+    try {
+      vm.runtime.removeInterruptHandler()
+    } catch (err) {
+      // Also an FFI call; a poisoned module must not stop vm.dispose() below.
+      console.error('QuickJS removeInterruptHandler failed at teardown:', err)
+    }
     try {
       vm.dispose()
     } catch (err: any) {
-      const message = String(err)
-      if (message.includes('list_empty(&rt->gc_obj_list)')) {
+      const teardown = classifyTeardownError(err, failures.length > 0)
+      if (teardown.dropCache && quickJsModulePromise === modulePromise) {
+        quickJsModulePromise = undefined
+      }
+      if (teardown.leaking) {
         leaking = true
-        // An Emscripten-level abort poisons the cached WASM module for the whole
-        // process — every later newContext() would fail with "Aborted". Drop the
-        // cache so the next VM instantiates a fresh module.
-        if (message.includes('Aborted')) quickJsModulePromise = undefined
-      } else if (!failures.length) {
+        // Surface the leak: callers discard the `leaking` flag in production,
+        // and a silent recovery would hide handle-leak regressions until the
+        // WASM-module churn becomes visible some other way.
+        console.error('QuickJS VM leaked handles at teardown (JS_FreeRuntime abort):', err)
+      } else if (teardown.rethrow) {
         throw err
       } else {
         // Don't let a teardown error mask the scene's own failure (thrown below).
@@ -295,7 +337,10 @@ export async function withQuickJsVm<T>(
     if (failures.length) {
       throw failures[0]
     }
-    if (!drained) {
+    if (!drained && !drainFailed) {
+      // Only the timed-out case: when the drain loop itself failed (poisoned
+      // module) the real cause was already logged above and this message would
+      // mislead.
       throw new Error("VM won't finish immediates or pending jobs")
     }
   }
@@ -343,11 +388,7 @@ export function setupSetImmediate(vm: QuickJSContext, startSyncTurn: () => void 
       // Callbacks still queued here (the drain loop timed out) are live handles;
       // any that survives vm.dispose() trips the JS_FreeRuntime leak assert.
       for (const elem of immediates.splice(0)) {
-        try {
-          elem.dispose()
-        } catch {
-          // handle may already have been reclaimed; ignore
-        }
+        safeDispose(elem)
       }
     }
   }
