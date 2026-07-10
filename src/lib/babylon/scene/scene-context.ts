@@ -1,5 +1,6 @@
 import * as BABYLON from '@babylonjs/core'
 import future, { IFuture } from 'fp-future'
+import { Transport as RpcTransport } from '@dcl/rpc'
 import { Entity } from '../../decentraland/types'
 
 import { EngineApiInterface } from '../../decentraland/scene/types'
@@ -79,6 +80,13 @@ export class SceneContext implements EngineApiInterface {
   private _avatarSystem?: AvatarCommunicationSystem
   // this future is resolved when the scene is disposed
   readonly stopped = future<void>()
+  // RPC transports owned by this scene (registered by the runtime connector,
+  // e.g. the QuickJS memory transport). Unlike the shared comms transport
+  // below, these die with the scene: dispose() closes them, which flips the
+  // scene runtime's port to 'closed' and ends its update loop. Owning this
+  // here (not at each connector call site) means every runtime flavor gets
+  // hot-reload shutdown for free.
+  private readonly rpcTransports: RpcTransport[] = []
 
   readonly metadata: Scene
 
@@ -455,38 +463,70 @@ export class SceneContext implements EngineApiInterface {
     this.finishedProcessingIncomingMessagesOfTick = false
   }
 
+  /**
+   * Registers an RPC transport owned by this scene; dispose() will close it,
+   * which ends the scene runtime's update loop on hot reload. If the scene was
+   * already disposed (a dispose racing runtime setup), the transport is closed
+   * on the spot instead of leaking a runtime nothing would ever shut down.
+   */
+  registerRpcTransport(transport: RpcTransport) {
+    if (!this.stopped.isPending) {
+      transport.close()
+      return
+    }
+    this.rpcTransports.push(transport)
+  }
+
   dispose() {
-    for (const [entityId] of this.entities) {
-      this.removeEntity(entityId)
+    try {
+      // Close scene-owned RPC transports first: the scene runtime's port flips
+      // to 'closed' (ending its update loop) and in-flight scene RPCs reject
+      // with 'RPC Transport closed' instead of hanging on a disposed scene.
+      for (const transport of this.rpcTransports) {
+        try {
+          transport.close()
+        } catch (err) {
+          console.error(`Error closing RPC transport of scene ${this.entityId}:`, err)
+        }
+      }
+      this.rpcTransports.length = 0
+
+      for (const [entityId] of this.entities) {
+        this.removeEntity(entityId)
+      }
+      for (const s of this.subscriptions) {
+        s.dispose()
+      }
+      this.subscriptions.length = 0
+
+      // Dispose avatar system if it exists
+      if (this._avatarSystem) {
+        this._avatarSystem.dispose()
+        this._avatarSystem = undefined
+      }
+
+      // Unsubscribe this context's message-bus handler BEFORE dropping the
+      // transport reference (the transport itself outlives this scene).
+      if (this._transport && this.sceneMessageBusHandler) {
+        this._transport.events.off('sceneMessageBus', this.sceneMessageBusHandler)
+        this.sceneMessageBusHandler = undefined
+      }
+
+      // Clear transport reference but DON'T disconnect it.
+      // The transport is shared and its lifecycle is managed by the caller (engine-main.ts).
+      // This allows the transport to stay connected during hot-reload.
+      this._transport = undefined
+
+      this.assetManager.dispose()
+      this.rootNode.parent = null
+      this.rootNode.dispose(false)
+    } finally {
+      // The runtime shutdown hangs off this future: resolve it even when a
+      // teardown step above throws (Babylon entity disposal runs real scene
+      // teardown), or a hot reload would leave the old VM running forever
+      // against a disposed scene.
+      this.stopped.resolve()
     }
-    for (const s of this.subscriptions) {
-      s.dispose()
-    }
-    this.subscriptions.length = 0
-
-    // Dispose avatar system if it exists
-    if (this._avatarSystem) {
-      this._avatarSystem.dispose()
-      this._avatarSystem = undefined
-    }
-
-    // Unsubscribe this context's message-bus handler BEFORE dropping the
-    // transport reference (the transport itself outlives this scene).
-    if (this._transport && this.sceneMessageBusHandler) {
-      this._transport.events.off('sceneMessageBus', this.sceneMessageBusHandler)
-      this.sceneMessageBusHandler = undefined
-    }
-
-    // Clear transport reference but DON'T disconnect it.
-    // The transport is shared and its lifecycle is managed by the caller (engine-main.ts).
-    // This allows the transport to stay connected during hot-reload.
-    this._transport = undefined
-
-    this.stopped.resolve()
-
-    this.assetManager.dispose()
-    this.rootNode.parent = null
-    this.rootNode.dispose(false)
   }
 
   // this method exists to be a wrapper of the function. so it can be mocked for tests without wizzardy
