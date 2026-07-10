@@ -11,7 +11,7 @@ import { BabylonEntity } from './BabylonEntity'
 import { transformComponent } from '../../decentraland/sdk-components/transform-component'
 import { createLwwStore } from '../../decentraland/crdt-internal/last-write-win-element-set'
 import { ComponentDefinition } from '../../decentraland/crdt-internal/components'
-import { resolveCyclicParening } from './logic/cyclic-transform'
+import { resolveCyclicParenting } from './logic/cyclic-transform'
 import { Vector3 } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { billboardComponent } from '../../decentraland/sdk-components/billboard-component'
@@ -29,7 +29,7 @@ import {
 import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-component'
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
-import { StaticEntities, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
 import { engineInfoComponent } from '../../decentraland/sdk-components/engine-info'
@@ -264,13 +264,44 @@ export class SceneContext implements EngineApiInterface {
     }
     const entity = this.getEntityOrNull(entityId)
     if (entity) {
+      // Babylon's dispose(doNotRecurse=true) detaches children to parent=null —
+      // the WORLD root, not this scene's rootNode — which silently drops the
+      // scene offset (entities teleport toward world origin for scenes off
+      // parcel 0,0) and removes them from the rootNode subtree that raycasts
+      // and culling traverse. Schedule them for reparenting instead: their
+      // expectedParentEntityId now points at a tombstoned entity, so the
+      // deleted-parent branch of resolveCyclicParenting re-roots them.
+      for (const child of entity.childrenEntities()) {
+        this.unparentedEntities.add(child.entityId)
+      }
+      this.hierarchyChanged = true
       entity.dispose()
+      // dispose() only clears the component VALUES (entityDeleted). The CRDT
+      // bookkeeping (LWW timestamps / updatedAtTick) must be purged explicitly
+      // or it grows one entry per component per deleted id forever — outside
+      // every documented cap, over 2^32 generational ids of untrusted input.
+      // TRADE-OFF: while the id remains in deletedEntities, its updates are
+      // dropped by the guard in update() and the purged timestamps are never
+      // consulted. Once the tombstone itself is evicted (past
+      // MAX_DELETED_TOMBSTONES, i.e. 100k+ subsequent deletions), a stale PUT
+      // for this id would be accepted as fresh — a ghost bounded by
+      // MAX_LIVE_ENTITIES. Deliberately accepted: retaining timestamps past
+      // tombstone eviction is exactly the unbounded growth this purge fixes.
+      for (const component of this.componentList) {
+        component.purgeEntity(entityId)
+      }
       this.entities.delete(entityId)
       this.unparentedEntities.delete(entityId)
     }
   }
 
-  getOrCreateEntity(entityId: Entity): BabylonEntity {
+  /**
+   * UNCAPPED creation — private so no future CRDT-input path can reach it and
+   * silently bypass MAX_LIVE_ENTITIES; scene/CRDT-driven code must go through
+   * tryGetOrCreateEntity, host-initiated static entities through
+   * getOrCreateStaticEntity.
+   */
+  private getOrCreateEntity(entityId: Entity): BabylonEntity {
     let entity = this.entities.get(entityId)
     if (!entity) {
       entity = new BabylonEntity(entityId, this.#ref)
@@ -279,6 +310,31 @@ export class SceneContext implements EngineApiInterface {
       this.entities.set(entityId, entity)
     }
     return entity
+  }
+
+  /**
+   * Host-initiated entities in the reserved static range only (root, player,
+   * camera). The range guard keeps this narrow accessor from becoming a
+   * general uncapped-creation backdoor.
+   */
+  getOrCreateStaticEntity(entityId: Entity): BabylonEntity {
+    if (entityId >= MAX_RESERVED_ENTITY) {
+      throw new Error(`getOrCreateStaticEntity is reserved for static entities (< ${MAX_RESERVED_ENTITY}), got ${entityId}`)
+    }
+    return this.getOrCreateEntity(entityId)
+  }
+
+  /**
+   * Cap-aware variant for untrusted CRDT input: never creates a NEW entity past
+   * MAX_LIVE_ENTITIES (already-live entities are always returned). Every path
+   * that materializes entities from scene messages must go through this, or the
+   * cap can be amplified (e.g. transforms referencing nonexistent parents).
+   */
+  tryGetOrCreateEntity(entityId: Entity): BabylonEntity | null {
+    if (!this.entities.has(entityId) && this.entities.size >= MAX_LIVE_ENTITIES) {
+      return null
+    }
+    return this.getOrCreateEntity(entityId)
   }
 
   getEntityOrNull(entityId: Entity): BabylonEntity | null {
@@ -298,6 +354,13 @@ export class SceneContext implements EngineApiInterface {
   update(hasQuota: () => boolean) {
     let rollingOperationCounter = 0
 
+    // Resume any reparenting work a previous quota-bounded frame left pending
+    // (resolveCyclicParenting re-flags hierarchyChanged when it yields early);
+    // without this, leftover work would only resume when a NEW message arrives.
+    if (this.hierarchyChanged) {
+      resolveCyclicParenting(this, hasQuota)
+    }
+
     // process all the incoming messages
     while (this.incomingMessages.length) {
       const message = this.incomingMessages[0]
@@ -316,11 +379,8 @@ export class SceneContext implements EngineApiInterface {
             // distinct entity ids (entity number + generational version), each
             // allocating a host BabylonEntity. Refuse to create NEW entities past
             // a hard ceiling; updates to already-live entities still apply.
-            if (!this.entities.has(crdtMessage.entityId) && this.entities.size >= MAX_LIVE_ENTITIES) {
-              continue
-            }
-
-            const entity = this.getOrCreateEntity(crdtMessage.entityId)
+            const entity = this.tryGetOrCreateEntity(crdtMessage.entityId)
+            if (!entity) continue
             const component = (this.components as any)[crdtMessage.componentId] as ComponentDefinition<any> | void
 
             // if the change is accepted, then we instruct the entity to update its internal state
@@ -358,7 +418,7 @@ export class SceneContext implements EngineApiInterface {
       this.incomingMessages.shift()
 
       // this process resolves the re parenting of all entities preventing cycles
-      resolveCyclicParening(this)
+      resolveCyclicParenting(this, hasQuota)
     }
 
     // Update avatar system if it exists

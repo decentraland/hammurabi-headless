@@ -37,21 +37,23 @@ export function setColliderMask(mesh: AbstractMesh, layers: number) {
 
   mesh.checkCollisions = (layers & ColliderLayer.CL_PHYSICS) != 0
   mesh.isPickable = (layers & ColliderLayer.CL_POINTER) != 0
-
-  mesh.onDisposeObservable.addOnce(() => {
-    const ix = floorMeshes.indexOf(mesh)
-    if (ix != -1) {
-      floorMeshes.splice(ix, 1)
-    }
-  })
 }
 
-function addFloorMesh(mesh: AbstractMesh) {
+export function addFloorMesh(mesh: AbstractMesh) {
   // add only when NOT already present (the previous inverted check meant no
   // collider mesh was ever added — only the ambient ground reached the list)
   const ix = floorMeshes.indexOf(mesh)
   if (ix === -1) {
     floorMeshes.push(mesh)
+    // Registered on first add only: setColliderMask runs on EVERY accepted
+    // GltfContainer PUT, and an unconditional addOnce there grew each mesh's
+    // observer array by one closure per PUT for the mesh's lifetime.
+    mesh.onDisposeObservable.addOnce(() => {
+      const i = floorMeshes.indexOf(mesh)
+      if (i != -1) {
+        floorMeshes.splice(i, 1)
+      }
+    })
   }
 }
 

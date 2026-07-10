@@ -7,6 +7,7 @@ import { engineInfoComponent } from '../../../decentraland/sdk-components/engine
 import { realmInfoComponent } from '../../../decentraland/sdk-components/realm-info'
 import { EntityUtils } from '../../../decentraland/crdt-internal/generational-index-pool'
 import { playerEntityAtom, currentRealm } from '../../../decentraland/state'
+import { isLocalhostRealm } from '../../../decentraland/realm/resolution'
 
 export const StaticEntities = {
   RootEntity: 0 as Entity,
@@ -54,7 +55,7 @@ export function updateStaticEntities(context: SceneContext) {
 
   if (realm) {
     const { aboutResponse, baseUrl } = realm
-    const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1')
+    const isLocalhost = isLocalhostRealm(baseUrl)
     const roomInfo = context.transport?.getRoomInfo?.()
 
     if (!RealmInfo.has(StaticEntities.RootEntity)) {

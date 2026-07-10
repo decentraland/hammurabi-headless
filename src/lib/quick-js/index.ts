@@ -140,6 +140,14 @@ export async function withQuickJsVm<T>(
   async function resolveTurnPromise(promiseHandle: QuickJSHandle) {
     let timer: ReturnType<typeof setTimeout> | undefined
     const settled = vm.resolvePromise(promiseHandle)
+    // resolvePromise itself queues the VM job that settles `settled` (it
+    // attaches a .then inside the VM). Nothing else drains that job until the
+    // 16ms setImmediate interval fires, which taxed EVERY turn (onStart,
+    // onUpdate, in-turn RPC round-trips) with up to a frame of dead latency —
+    // measured ~16ms/turn vs ~0.07ms with this pump. Job execution runs
+    // untrusted scene continuations, so it gets its own deadline turn.
+    startSyncTurn()
+    drainPendingJobs(vm)
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`scene async turn exceeded ${maxAsyncTurnMs}ms`)), maxAsyncTurnMs)
     })
@@ -358,9 +366,15 @@ export function setupSetImmediate(vm: QuickJSContext, startSyncTurn: () => void 
   }).consume((fn) => vm.setProp(vm.global, 'setImmediate', fn))
 
   const int = setInterval(() => {
-    while (immediates.length) {
-      const elem = immediates.shift()!
-
+    // Drain a SNAPSHOT of the queue, never the live array: callbacks run
+    // synchronously here and can call setImmediate again, so a live
+    // `while (immediates.length)` drain spins forever on a self-requeuing
+    // callback (`function f(){ setImmediate(f) }`) — each iteration resets the
+    // per-turn deadline, so the interrupt handler never fires and the whole
+    // host event loop (all scenes, comms, render loop) wedges. With a snapshot,
+    // re-queued callbacks run on the NEXT tick, matching Node's own
+    // setImmediate semantics.
+    for (const elem of immediates.splice(0)) {
       try {
         // Each callback is its own synchronous turn: reset the deadline so a slow
         // (but legitimate) callback isn't charged against a previous one, while a

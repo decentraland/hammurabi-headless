@@ -72,11 +72,12 @@ export async function initHotReload(baseUrl: string, entityId: string, reloadSce
 
     logger.log('Shutting down preview features')
     
-    if (wsConnection && wsConnection.OPEN) {
-      logger.log(`Stopping watcher for scene: ${entityId}`)
-      wsConnection.close()
-      wsConnection = null
-    }
+    // No readyState gate: ws.close() is state-safe — it aborts a CONNECTING
+    // handshake and no-ops when already CLOSING/CLOSED. Gating on OPEN would
+    // leak a handshake-in-progress socket with reloadScene still wired to it.
+    logger.log(`Stopping watcher for scene: ${entityId}`)
+    wsConnection.close()
+    wsConnection = null
   }
 
   return {

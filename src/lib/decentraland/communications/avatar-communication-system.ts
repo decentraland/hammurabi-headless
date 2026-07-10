@@ -42,6 +42,32 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const MAX_DELETED_ENTITIES = 4096
   let currentTick = 0
 
+  // One tracker per live subscription: its highest emitted deletion sequence.
+  const subscriptionTrackers = new Set<{ emittedSeq: number }>()
+  let lastPrunedMinSeq = 0
+
+  // Drop tombstones every live subscription has already emitted. A tombstone
+  // only exists to deliver DELETE_ENTITY to subscriptions that saw the entity;
+  // a subscription created later starts from a state dump that no longer
+  // contains the (purged) entity, so it never needs old tombstones. With no
+  // live subscriptions, nothing can ever need them.
+  function pruneEmittedTombstones() {
+    if (deletedEntities.size === 0) return
+    let minEmitted = deletionSequence
+    for (const tracker of subscriptionTrackers) {
+      if (tracker.emittedSeq < minEmitted) minEmitted = tracker.emittedSeq
+    }
+    // Skip the tombstone scan when the low-water mark hasn't advanced since
+    // the last prune (e.g. a stalled subscription): every entry with
+    // seq <= lastPrunedMinSeq was already deleted then, so the scan would
+    // re-iterate up to MAX_DELETED_ENTITIES entries per frame deleting nothing.
+    if (minEmitted <= lastPrunedMinSeq) return
+    lastPrunedMinSeq = minEmitted
+    for (const [entity, seq] of deletedEntities) {
+      if (seq <= minEmitted) deletedEntities.delete(entity)
+    }
+  }
+
   // Cache for profiles fetched from Catalyst
   const profileCache = new Map<string, {profile: any, version: number}>()
 
@@ -112,10 +138,17 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     try {
       const profile = await fetchProfileFromCatalyst(address, lambdasEndpoint)
 
+      // The peer may have disconnected — or disconnected and reconnected onto a
+      // fresh entity — while the fetch was in flight. removePlayerEntity already
+      // purged its components and emitted DELETE_ENTITY; writing now would
+      // resurrect the freed entity as a ghost avatar and permanently leak the
+      // cache/LWW entries (a departed address never disconnects a second time).
+      const current = profileFetchState.get(address)
+      if (!current || playerEntityManager.getEntityForAddress(address) !== entity) return
+
       // The fetch resolved: this announced version has a definitive answer, so
       // don't fetch it again even if the profile's real version was lower.
-      const current = profileFetchState.get(address)
-      if (current) current.attemptedVersion = Math.max(current.attemptedVersion, announcedVersion)
+      current.attemptedVersion = Math.max(current.attemptedVersion, announcedVersion)
 
       if (profile && profile.version >= announcedVersion) {
         profileCache.set(address, {profile, version: profile.version})
@@ -332,6 +365,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         // allocated every frame.
         component.commitDirtyState()
       }
+      // Once per tick (not per subscription in getUpdates): the prune scans
+      // all trackers + all tombstones, and the emittedSeq values it needs only
+      // advance once per frame anyway — pruning here just trails by one frame.
+      pruneEmittedTombstones()
     },
 
     // Create subscription for CRDT synchronization
@@ -339,11 +376,17 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       const state = new Map<ComponentDefinition<any>, number>(
         listOfComponentsToSynchronize.map(component => [component, -1])
       )
-      let lastEmittedDeletionSeq = 0  // highest deletion sequence already emitted
+      // Registered so emitted tombstones can be pruned once EVERY live
+      // subscription has delivered them (see pruneEmittedTombstones); without
+      // pruning, getUpdates rescans up to MAX_DELETED_ENTITIES entries per
+      // subscription per frame for the rest of the session.
+      const tracker = { emittedSeq: 0 }
+      subscriptionTrackers.add(tracker)
 
       return {
         range: [32, 256] as [number, number],
         dispose() {
+          subscriptionTrackers.delete(tracker)
           state.clear()
           // Clear player entity manager and profile cache
           playerEntityManager.clear()
@@ -356,11 +399,11 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
           // Keyed on the monotonic deletion sequence, not the frame tick, so a
           // disconnect that lands between frames is still delivered exactly once.
           for (const [entityId, seq] of deletedEntities) {
-            if (seq > lastEmittedDeletionSeq) {
+            if (seq > tracker.emittedSeq) {
               DeleteEntity.write({ entityId }, writer)
             }
           }
-          lastEmittedDeletionSeq = deletionSequence
+          tracker.emittedSeq = deletionSequence
 
           // Serialize all component updates from the last tick until now
           for (const [component, tick] of state) {

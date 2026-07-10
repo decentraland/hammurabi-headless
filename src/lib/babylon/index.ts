@@ -2,6 +2,7 @@ import * as BABYLON from '@babylonjs/core'
 import '@babylonjs/loaders/glTF/2.0/glTFLoader'
 import { setupEnvironment } from './visual/ambientLights'
 import { pickPointerEventsMesh } from './scene/logic/pointer-events'
+import { createRateLimitedErrorLogger } from '../misc/logger'
 
 // Renderer tick rate. Without a requestAnimationFrame global, Babylon paces the
 // render loop with a hard-coded setTimeout(fn, 16) AFTER each frame finishes, so
@@ -81,10 +82,20 @@ export async function initEngine(canvas?: HTMLCanvasElement) {
   scene.gravity.set(0, -0.2, 0)
 
   // Register a render loop but don't start it immediately
-  // The render loop will be started later after cameras are set up
+  // The render loop will be started later after cameras are set up.
+  // The try/catch is load-bearing: Babylon's ThinEngine._renderLoop only
+  // re-queues the next frame AFTER the render functions return, so an uncaught
+  // throw anywhere inside scene.render() (systems, avatar code, meshes from a
+  // malformed glTF) would permanently stop the frame scheduler while the
+  // process stays alive — a silent zombie. Log (rate-limited) and keep ticking.
+  const logRenderError = createRateLimitedErrorLogger()
   function renderLoop() {
-    if (scene.activeCamera) {
-      scene.render()
+    try {
+      if (scene.activeCamera) {
+        scene.render()
+      }
+    } catch (error: any) {
+      logRenderError('Error inside the render loop (frame skipped):', error)
     }
   }
   babylon.runRenderLoop(renderLoop)

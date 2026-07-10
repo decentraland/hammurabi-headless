@@ -62,7 +62,7 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
             if (mesh.name.endsWith('_collider')) {
               setColliderMask(mesh, newValue.invisibleMeshesCollisionMask ?? DEFAULT_INVISIBLE_COLLIDER_LAYERS)
             } else {
-              setColliderMask(mesh, newValue.invisibleMeshesCollisionMask ?? DEFAULT_VISIBLE_COLLIDER_LAYERS)
+              setColliderMask(mesh, newValue.visibleMeshesCollisionMask ?? DEFAULT_VISIBLE_COLLIDER_LAYERS)
             }
           }
         })
@@ -92,7 +92,7 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
         if (mesh.name.endsWith('_collider')) {
           setColliderMask(mesh, newValue.invisibleMeshesCollisionMask ?? DEFAULT_INVISIBLE_COLLIDER_LAYERS)
         } else {
-          setColliderMask(mesh, newValue.invisibleMeshesCollisionMask ?? DEFAULT_VISIBLE_COLLIDER_LAYERS)
+          setColliderMask(mesh, newValue.visibleMeshesCollisionMask ?? DEFAULT_VISIBLE_COLLIDER_LAYERS)
         }
       }
     })

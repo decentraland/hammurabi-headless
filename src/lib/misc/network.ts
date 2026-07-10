@@ -29,6 +29,52 @@ function backoffMs(attempt: number) {
   return Math.min(250 * 2 ** (attempt - 1), 2000)
 }
 
+// Default body ceiling for responses whose URL is user- or scene-influenceable
+// (signed fetches, realm /about). Far above any legitimate API response; the
+// per-attempt timeout bounds time, not volume, so a hostile endpoint on a fast
+// link could otherwise stream unbounded bytes into host memory.
+export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
+
+/**
+ * Reads a Response body as text, enforcing a byte ceiling.
+ *
+ * The cap is enforced twice: on the declared Content-Length (cheap rejection
+ * before reading) and again on the streamed bytes, because chunked responses
+ * can omit or lie about the header. The decode matches the fetch spec's UTF-8
+ * decode by stripping a leading BOM — `Buffer.toString('utf-8')` keeps U+FEFF,
+ * which broke JSON.parse on BOM-prefixed bodies that `response.json()` used to
+ * accept (common from Windows/.NET backends).
+ */
+export async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await drainResponse(response)
+    throw new Error(`response body exceeds ${maxBytes} bytes`)
+  }
+
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        throw new Error(`response body exceeds ${maxBytes} bytes`)
+      }
+      chunks.push(value)
+    }
+  } finally {
+    // Release the socket if the cap aborted the read mid-stream (no-op after a
+    // complete drain).
+    await reader.cancel().catch(() => undefined)
+  }
+  const text = Buffer.concat(chunks).toString('utf-8')
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+}
+
 // fetch with a per-attempt timeout, retry-with-backoff on network errors and
 // 5xx/429 (2 attempts by default), and a single log line per failure naming the
 // url, duration and cause. When every attempt fails it logs a final "gave up"

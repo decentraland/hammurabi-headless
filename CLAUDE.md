@@ -20,7 +20,8 @@ npm start                  # Runs: node dist/cli.js --realm=localhost:8000
 
 # Run with different configurations
 node dist/cli.js --realm=https://peer.decentraland.org --position=80,80
-node dist/cli.js --realm=http://localhost:8000 --authenticated
+node dist/cli.js --realm=http://localhost:8000 --env=zone
+node dist/cli.js --position=0,0 --production   # No interactive controls, exits non-zero on failed startup
 npx @dcl/hammurabi-server --position=0,0  # Default to peer.decentraland.org
 
 # Environment variables
@@ -161,7 +162,7 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 - CRDT message passing between scene and kernel
 
 **CLI Interface (`src/cli.ts`)**
-- Command-line argument parsing: `--realm`, `--position`, `--authenticated`
+- Command-line argument parsing: `--realm`, `--position`, `--scene-id`, `--private-key`, `--env`, `--production`
 - XMLHttpRequest polyfill for Babylon.js GLTF loading
 - Global error handlers that keep server running
 - Restart listener for 'r' key during development

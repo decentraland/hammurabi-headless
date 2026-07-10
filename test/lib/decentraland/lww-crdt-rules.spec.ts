@@ -284,7 +284,7 @@ describe('Conflict resolution rules for LWW-ElementSet based components', () => 
     expect(timestamps.get(entityId)).toEqual(3)
   })
 
-  it('PUT in case of empty data returns a correction message', () => {
+  it('PUT in case of empty data is rejected without repeating the identical correction message', () => {
     const entityId = 0 as Entity
     const conflictBuffer = new ReadWriteByteBuffer()
 
@@ -296,19 +296,53 @@ describe('Conflict resolution rules for LWW-ElementSet based components', () => 
       type: CrdtMessageType.PUT_COMPONENT
     }, conflictBuffer)
 
-    // result assertions
-    expect(readMessage(conflictBuffer)).toEqual({
-      componentId,
-      entityId,
-      length: 25,
-      data: Uint8Array.of(10),
-      timestamp: 3,
-      type: CrdtMessageType.PUT_COMPONENT
-    })
+    // result assertions: the previous test already emitted the byte-identical
+    // correction (PUT value=10 @ts3) and the stored state has not changed since,
+    // so the echo is deduped — a scene streaming tiny stale PUTs cannot make the
+    // host serialize its (potentially large) stored value once per stale message.
+    expect(updateAccepted).toEqual(false)
+    expect(conflictBuffer.currentWriteOffset()).toEqual(0)
 
     // state assertions
     expect(data.get(entityId)).toEqual(10)
     expect(timestamps.get(entityId)).toEqual(3)
+  })
+
+  it('a correction message is re-emitted once the stored state changes', () => {
+    const entityId = 0 as Entity
+    const conflictBuffer = new ReadWriteByteBuffer()
+
+    // advance the stored state (accepted change resets the echo dedupe)
+    expect(updateFn({
+      componentId,
+      entityId,
+      data: Uint8Array.of(11),
+      timestamp: 4,
+      type: CrdtMessageType.PUT_COMPONENT
+    }, conflictBuffer)).toEqual(true)
+
+    // a stale PUT now gets a fresh correction for the NEW state
+    const updateAccepted = updateFn({
+      componentId,
+      entityId,
+      data: Uint8Array.of(1),
+      timestamp: 3,
+      type: CrdtMessageType.PUT_COMPONENT
+    }, conflictBuffer)
+
+    expect(updateAccepted).toEqual(false)
+    expect(readMessage(conflictBuffer)).toEqual({
+      componentId,
+      entityId,
+      length: 25,
+      data: Uint8Array.of(11),
+      timestamp: 4,
+      type: CrdtMessageType.PUT_COMPONENT
+    })
+
+    // state assertions
+    expect(data.get(entityId)).toEqual(11)
+    expect(timestamps.get(entityId)).toEqual(4)
   })
 })
 

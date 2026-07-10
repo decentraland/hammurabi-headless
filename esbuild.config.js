@@ -53,8 +53,10 @@ const buildWorkerBundle = {
   // Handle dynamic imports
   mainFields: ['module', 'main'],
   resolveExtensions: ['.ts', '.js', '.mjs'],
+  // Inline the ACTUAL build mode: hardcoding "production" gave dev worker
+  // bundles production behavior in every NODE_ENV-gated dependency code path.
   define: {
-    'process.env.NODE_ENV': '"production"'
+    'process.env.NODE_ENV': isProduction ? '"production"' : '"development"'
   },
   // Handle problematic imports
   plugins: [

@@ -1,4 +1,4 @@
-import { robustFetch } from './network'
+import { robustFetch, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from './network'
 
 type FlatFetchResponse = {
   ok: boolean
@@ -27,12 +27,15 @@ export async function flatFetch(url: string, init?: FlatFetchInit): Promise<Flat
     headers
   }
 
+  // SignedFetch URLs are scene-controlled: after the SSRF guard passes (public
+  // host), the body size is attacker-chosen, so it must be capped. The XHR
+  // asset path enforces its own cap; this path shares the network.ts one.
   switch (responseBodyType) {
     case 'json':
-      flatFetchResponse.json = await response.json()
+      flatFetchResponse.json = JSON.parse(await readBodyCapped(response, DEFAULT_MAX_BODY_BYTES))
       break
     case 'text':
-      flatFetchResponse.text = await response.text()
+      flatFetchResponse.text = await readBodyCapped(response, DEFAULT_MAX_BODY_BYTES)
       break
   }
 

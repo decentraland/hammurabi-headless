@@ -10,17 +10,20 @@ export const raycastComponent = declareComponentUsingProtobufJs(PBRaycast, 1067,
   if (component.componentType !== ComponentType.LastWriteWinElementSet) return
 
   const prevValue = entity.appliedComponents.raycast
-  const shouldCreateNewRay = Boolean(component.has(entity.entityId) && !prevValue)
-  const shouldDeleteRay = !component.has(entity.entityId)
+  const hasValue = component.has(entity.entityId)
 
   const context = entity.context.deref()
 
-  if (shouldCreateNewRay) {
+  if (hasValue) {
+    // EVERY accepted PUT re-arms the query, not just the first one: scenes
+    // re-trigger a one-shot raycast by re-PUTting the component with a bumped
+    // timestamp, and processRaycasts removes non-continuous entries after one
+    // pass — without the re-add here, only DELETE_COMPONENT + re-PUT would ever
+    // produce a fresh RaycastResult.
     const raycast = component.get(entity.entityId)!
-    const ray = new BABYLON.Ray(Vector3.Zero(), Vector3.Forward(), 999)
     entity.appliedComponents.raycast = {
-      value: raycast!,
-      ray
+      value: raycast,
+      ray: prevValue?.ray ?? new BABYLON.Ray(Vector3.Zero(), Vector3.Forward(), 999)
     }
 
     // NOTE: no debug RayHelper for continuous rays — RayHelper.show() creates a
@@ -29,7 +32,7 @@ export const raycastComponent = declareComponentUsingProtobufJs(PBRaycast, 1067,
 
     if (context)
       context.pendingRaycastOperations.add(entity.entityId)
-  } else if (shouldDeleteRay && prevValue) {
+  } else if (prevValue) {
     if (context)
       context.pendingRaycastOperations.delete(entity.entityId)
 

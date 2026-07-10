@@ -43,40 +43,41 @@ Examples:
     process.exit(0)
   }
 
-  if (arg.startsWith('--realm=')) {
-    realmUrl = arg.split('=')[1]
-  }
+  // Everything after the first '=' is the value: split('=')[1] would silently
+  // truncate values that themselves contain '=' (e.g. realm URLs with query
+  // params like ?access=abc). undefined (not the whole flag string) for
+  // '='-less args, so a future branch that forgets the '=' in its prefix
+  // fails loudly instead of receiving a plausible-looking wrong value.
+  const equalsIndex = arg.indexOf('=')
+  const argValue = equalsIndex === -1 ? undefined : arg.slice(equalsIndex + 1)
 
-  if (arg.startsWith('--position=')) {
-    position = arg.split('=')[1]
-    // Validate position format
-    const coords = position.split(',')
-    if (coords.length !== 2 || isNaN(parseInt(coords[0])) || isNaN(parseInt(coords[1]))) {
+  if (arg.startsWith('--realm=')) {
+    realmUrl = argValue!
+  } else if (arg.startsWith('--position=')) {
+    position = argValue!
+    // Validate strictly: the raw string is used verbatim as the content-server
+    // pointer, so a lenient parseInt check would let e.g. "80.5,80" through
+    // only to fail later with a misleading "No scene found".
+    if (!/^-?\d+,-?\d+$/.test(position)) {
       console.error('❌ Invalid position format. Use --position=x,y (e.g., --position=80,80)')
       process.exit(1)
     }
-  }
-
-  if (arg.startsWith('--scene-id=')) {
-    sceneId = arg.split('=')[1]
-  }
-
-  if (arg.startsWith('--private-key=')) {
-    privateKey = arg.split('=')[1]
-  }
-
-  if (arg.startsWith('--env=')) {
-    const envValue = arg.split('=')[1]
-    if (envValue === 'zone' || envValue === 'org') {
-      environment = envValue
+  } else if (arg.startsWith('--scene-id=')) {
+    sceneId = argValue!
+  } else if (arg.startsWith('--private-key=')) {
+    privateKey = argValue!
+  } else if (arg.startsWith('--env=')) {
+    if (argValue === 'zone' || argValue === 'org') {
+      environment = argValue
     } else {
       console.error('❌ Invalid --env value. Use --env=zone or --env=org')
       process.exit(1)
     }
-  }
-
-  if (arg === '--production') {
+  } else if (arg === '--production') {
     developmentMode = false
+  } else if (arg.startsWith('--')) {
+    // A typoed flag silently falling through to defaults is confusing; warn.
+    console.warn(`⚠️ Unrecognized argument "${arg}" ignored. See --help for supported options.`)
   }
 }
 
@@ -91,16 +92,18 @@ if (!privateKey && process.env.PRIVATE_KEY) {
   console.log('🔑 Using private key from PRIVATE_KEY environment variable')
 }
 
-// Global error handlers
+// Global error handlers. Always print the stack: a message-only line hides
+// where the failure happened, which matters because an uncaught exception here
+// may mean a subsystem (not protected by its own try/catch) just died.
 process.on('uncaughtException', (error) => {
-  console.error('❌ Error:', error.message)
+  console.error('❌ Error:', error.stack || error.message)
   if (developmentMode) {
     console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
   }
 })
 
 process.on('unhandledRejection', (reason: any) => {
-  console.error('❌ Error:', reason?.message || reason)
+  console.error('❌ Error:', reason?.stack || reason?.message || reason)
   if (developmentMode) {
     console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
   }
@@ -165,5 +168,11 @@ if (developmentMode && process.stdin.setRawMode) {
 
 // Start server
 start().catch(() => {
-  // Error already logged, just setup retry listener
+  // Error already logged. In development the user can retry with 'r', but in
+  // production nothing can recover: the render loop started by main() keeps the
+  // event loop alive, so without an explicit exit a supervisor would see a
+  // healthy-looking process that will never serve.
+  if (!developmentMode) {
+    process.exit(1)
+  }
 })

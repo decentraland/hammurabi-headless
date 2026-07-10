@@ -58,10 +58,35 @@ export function setupXMLHttpRequestPolyfill() {
 
     private method = ''
     private url = ''
+    // Once load/error/abort has been dispatched the request is settled: no
+    // retry may re-issue it and no late socket event may fire a second,
+    // contradictory event into Babylon (e.g. a retry succeeding AFTER the
+    // caller already handled the error for the same asset).
+    private _settled = false
+    private _currentReq: any = null
+    private _retryTimer: any = null
+    // Generation counter for XHR reuse: every open() bump invalidates ALL
+    // callbacks (socket events, retry timers) belonging to a previous send.
+    // The _settled flag alone cannot do this — resetting it in open() would
+    // RE-ARM the previous send's still-live callbacks, letting an old
+    // response settle the re-opened request with the old URL's bytes.
+    private _sendSeq = 0
 
     open(method: string, url: string, async = true) {
       this.method = method
       this.url = url
+      // Per spec, open() terminates an in-flight fetch and resets a
+      // finished/aborted request so the instance can be reused.
+      this._sendSeq++
+      if (this._retryTimer) {
+        clearTimeout(this._retryTimer)
+        this._retryTimer = null
+      }
+      if (this._currentReq) {
+        this._currentReq.destroy()
+        this._currentReq = null
+      }
+      this._settled = false
       this.readyState = 1
       this._setReadyState(1)
     }
@@ -88,14 +113,23 @@ export function setupXMLHttpRequestPolyfill() {
 
       const id = ++XMLHttpRequestPolyfill._seq
       const timeoutMs = this.timeout && this.timeout > 0 ? this.timeout : 15000
+      // Everything this send schedules (socket callbacks, retries) belongs to
+      // this generation; a later open() bumps _sendSeq and all of it goes inert.
+      const sendToken = this._sendSeq
+      const isStale = () => this._settled || this._sendSeq !== sendToken
 
       // retry transient connect failures/timeouts with backoff before giving up
       const attempt = (n: number) => {
+        if (isStale()) return
         const t0 = Date.now()
         let sizeExceeded = false
         if (XHR_DEBUG) console.log(`[XHR] #${id} → ${this.method} ${this.url}${n > 1 ? ` (retry ${n}/${MAX_ATTEMPTS})` : ''}`)
 
         const req = client.request(options, (res: any) => {
+          if (isStale()) {
+            res.resume()
+            return
+          }
           this.status = res.statusCode
           this.statusText = res.statusMessage
           this._setReadyState(3)
@@ -128,6 +162,7 @@ export function setupXMLHttpRequestPolyfill() {
           })
 
           res.on('end', () => {
+            if (isStale()) return
             const buffer = Buffer.concat(chunks)
 
             if (this.responseType === 'arraybuffer') {
@@ -157,16 +192,25 @@ export function setupXMLHttpRequestPolyfill() {
         })
 
         req.on('error', (error: any) => {
+          // Settled or superseded requests (error already dispatched, abort()
+          // destroying the socket, or a re-open) must not retry or re-dispatch.
+          if (isStale()) return
           const cause = error?.code || error?.message || error
           console.error(`[XHR] #${id} ✗ FAILED in ${Date.now() - t0}ms (attempt ${n}/${MAX_ATTEMPTS}): ${this.method} ${this.url} — ${cause}`)
           // A size-cap abort is deterministic — don't retry it.
           if (!sizeExceeded && n < MAX_ATTEMPTS) {
-            setTimeout(() => attempt(n + 1), backoffMs(n))
+            // Tracked so open()/abort() can cancel a pending backoff instead of
+            // letting it re-issue the old request into a reused instance.
+            this._retryTimer = setTimeout(() => {
+              this._retryTimer = null
+              attempt(n + 1)
+            }, backoffMs(n))
           } else {
             this._triggerError()
           }
         })
 
+        this._currentReq = req
         if (body) req.write(body)
         req.end()
       }
@@ -197,13 +241,21 @@ export function setupXMLHttpRequestPolyfill() {
     }
 
     private _triggerLoad() {
+      if (this._settled) return
+      this._settled = true
       if (this.onload) this.onload()
       this._dispatchEvent('load', {})
+      if (this.onloadend) this.onloadend()
+      this._dispatchEvent('loadend', {})
     }
 
     private _triggerError() {
+      if (this._settled) return
+      this._settled = true
       if (this.onerror) this.onerror()
       this._dispatchEvent('error', {})
+      if (this.onloadend) this.onloadend()
+      this._dispatchEvent('loadend', {})
     }
 
     private _dispatchEvent(type: string, event: any) {
@@ -211,7 +263,26 @@ export function setupXMLHttpRequestPolyfill() {
       listeners.forEach(listener => listener(event))
     }
 
-    abort() { /* No-op */ }
+    // Babylon aborts in-flight asset requests on scene dispose / hot reload.
+    // The previous no-op let the downloads (up to 64MB each) run to completion
+    // and fire load into disposed loaders.
+    abort() {
+      if (this._settled) return
+      this._settled = true
+      if (this._retryTimer) {
+        clearTimeout(this._retryTimer)
+        this._retryTimer = null
+      }
+      if (this._currentReq) {
+        this._currentReq.destroy()
+        this._currentReq = null
+      }
+      this.readyState = 0
+      if (this.onabort) this.onabort()
+      this._dispatchEvent('abort', {})
+      if (this.onloadend) this.onloadend()
+      this._dispatchEvent('loadend', {})
+    }
     getAllResponseHeaders() { return '' }
     getResponseHeader() { return null }
     overrideMimeType() { /* No-op */ }

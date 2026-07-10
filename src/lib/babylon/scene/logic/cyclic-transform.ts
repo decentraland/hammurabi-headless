@@ -10,13 +10,23 @@ import { BabylonEntity } from "../BabylonEntity"
  * 
  * This function also executes iteratively while scene.hierarchyChanged==true.
  */
-export function resolveCyclicParening(scene: SceneContext) {
+export function resolveCyclicParenting(scene: SceneContext, hasQuota?: () => boolean) {
+  // Quota-checked (per batch of entities): the fixpoint loop runs in host code
+  // over an unparentedEntities set the scene fully controls — a single CRDT
+  // batch declaring a ~100k-entity parent chain would otherwise stall the
+  // shared render loop for the whole O(n²) resolution. On exhaustion the work
+  // is re-flagged and resumed by the next frame's update().
+  let visited = 0
   while (scene.hierarchyChanged) {
     scene.hierarchyChanged = false
 
     // Iterate over the unparentedEntities and try to re-parent them if there are no cycles
     // > set hierarchyChanged=true in case of successful reparenting
     for (const entityId of scene.unparentedEntities) {
+      if ((++visited & 63) === 0 && hasQuota && !hasQuota()) {
+        scene.hierarchyChanged = true
+        return
+      }
       const entity = scene.getEntityOrNull(entityId)
       // pending reparentings may be outdated due to entity deletion messages
       if (entity) {
@@ -34,8 +44,19 @@ export function resolveCyclicParening(scene: SceneContext) {
           continue
         }
 
-        // get or create the entity that should be the parent as defined per TransformComponent
-        const desiredParent = scene.getOrCreateEntity(parentEntityId)
+        // get or create the entity that should be the parent as defined per TransformComponent.
+        // Cap-aware: at MAX_LIVE_ENTITIES the referenced parent cannot be
+        // materialized — park the entity at the scene root but KEEP it pending
+        // (same treatment as a cycle, NOT as a deleted parent): the parent id
+        // is not tombstoned and can legitimately be created once cap space
+        // frees, and removeEntity — the only way space frees — re-flags
+        // hierarchyChanged, so the retry costs nothing until then. Deleting
+        // the entry here would freeze the child at the root forever.
+        const desiredParent = scene.tryGetOrCreateEntity(parentEntityId)
+        if (!desiredParent) {
+          entity.parent = scene.rootNode
+          continue
+        }
 
         // walk up the parents of the desiredParent to find the current entity, that would be a cycle
         const needsCorrection = entity.parent !== desiredParent

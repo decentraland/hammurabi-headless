@@ -1,5 +1,5 @@
 import * as BABYLON from '@babylonjs/core'
-import { floorMeshes, setColliderMask } from '../scene/logic/colliders'
+import { addFloorMesh, setColliderMask } from '../scene/logic/colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 
 const PARCEL_SIZE = 16
@@ -26,15 +26,25 @@ export async function setupEnvironment(scene: BABYLON.Scene) {
   ground.material = groundMaterial
 
   setColliderMask(ground, ColliderLayer.CL_PHYSICS)
-  floorMeshes.push(ground)
+  // Through addFloorMesh (not a direct push): it registers the dispose
+  // observer that removes the mesh from the module-level array — without it,
+  // every engine reset ('r' restart disposes the Babylon scene) would leave
+  // one more disposed ground accumulating in floorMeshes.
+  addFloorMesh(ground)
 
   function repositionCamera() {
     if (!scene.activeCamera) return
-    // set the ground at 0 always and round position towards PARCEL_SIZE
+    // Follow the camera in ABSOLUTE world coordinates, snapped to the parcel
+    // grid, with the ground plane always at y=0. The upstream browser client
+    // used camera-relative offsets here because its ground was a child of a
+    // rootMesh moved to the camera every frame; this port has no such parent,
+    // so the relative math put the ground at world y = -cameraY — a free-fall
+    // trap for any scene without its own floor colliders the moment player
+    // movement is driven.
     ground.position.set(
-      Math.floor(scene.activeCamera.globalPosition.x / PARCEL_SIZE) * PARCEL_SIZE - scene.activeCamera.globalPosition.x,
-      -scene.activeCamera.globalPosition.y,
-      Math.floor(scene.activeCamera.globalPosition.z / PARCEL_SIZE) * PARCEL_SIZE - scene.activeCamera.globalPosition.z
+      Math.floor(scene.activeCamera.globalPosition.x / PARCEL_SIZE) * PARCEL_SIZE,
+      0,
+      Math.floor(scene.activeCamera.globalPosition.z / PARCEL_SIZE) * PARCEL_SIZE
     )
   }
 

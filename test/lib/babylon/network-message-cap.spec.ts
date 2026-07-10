@@ -1,22 +1,10 @@
 import { Scene } from '@dcl/schemas'
+import mitt from 'mitt'
 import { testWithEngine } from './babylon-test-helper'
 
-// Minimal event emitter standing in for a CommsTransportWrapper; attachLivekitTransport
-// only needs `.events` (on/off/emit).
-function makeEmitter() {
-  const handlers: Record<string, Function[]> = {}
-  return {
-    on(t: string, h: Function) {
-      ;(handlers[t] ||= []).push(h)
-    },
-    off(t: string, h: Function) {
-      handlers[t] = (handlers[t] || []).filter((x) => x !== h)
-    },
-    emit(t: string, e: any) {
-      ;(handlers[t] || []).forEach((h) => h(e))
-    }
-  }
-}
+// The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
+// so the stub uses the same library; attachLivekitTransport only needs `.events`.
+const makeEmitter = () => mitt<Record<string, any>>()
 
 testWithEngine(
   'inbound scene-bus queue is bounded',

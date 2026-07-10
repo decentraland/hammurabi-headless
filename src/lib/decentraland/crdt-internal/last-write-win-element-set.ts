@@ -38,11 +38,27 @@ function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
   return serializationScratch.toBinary()
 }
 
+// Bound for the echo-dedupe map below. Overflow evicts ONE oldest entry per
+// insert (Map preserves insertion order) — clearing the whole map made it
+// thrash (fill→clear→refill) once stale PUTs spanned more than this many
+// entities, re-enabling the echo amplification the map exists to prevent at
+// exactly the scale where it matters. Eviction only ever costs a redundant
+// corrective message, never correctness.
+const MAX_ECHO_DEDUPE_ENTRIES = 8192
+
 export function createUpdateLwwFromCrdt<T>(
   componentId: number,
   timestamps: Map<Entity, number>,
   schema: SerDe<T>,
-  data: Map<Entity, T>
+  data: Map<Entity, T>,
+  // Echo amplification guard: a stale ~24-byte PUT makes us serialize our FULL
+  // stored value (up to MAX_CRDT_PAYLOAD_BYTES) into the outgoing buffer as a
+  // corrective message. A scene streaming tiny stale PUTs against one large
+  // component would pin tens of MB in the (never-shrinking) outgoing buffer.
+  // Repeats are byte-identical while our state is unchanged, so one echo per
+  // (entity, stored timestamp) is enough. Owned by the caller (createLwwStore
+  // passes its own map) so purgeEntity can clear deleted entities' entries.
+  echoedAtTimestamp: Map<Entity, number> = new Map()
 ) {
   /**
    * Process the received message only if the lamport number recieved is higher
@@ -118,11 +134,28 @@ export function createUpdateLwwFromCrdt<T>(
           data.delete(entityId)
         }
 
+        // Stored state changed, so the next conflict needs a fresh correction —
+        // this also covers the equal-timestamp/greater-data accept, where the
+        // VALUE changes while the timestamp doesn't (a timestamp-only dedupe key
+        // would wrongly suppress the new echo bytes there).
+        echoedAtTimestamp.delete(entityId)
+
         return true // change accepted
       }
       case ProcessMessageResultType.StateOutdatedTimestamp:
       case ProcessMessageResultType.StateOutdatedData: {
         const timestamp = timestamps.get(entityId)!
+
+        // Already echoed our state at this timestamp — a repeat would be
+        // byte-identical; skip the redundant serialization/buffer append.
+        if (echoedAtTimestamp.get(entityId) === timestamp) {
+          return false // change not accepted
+        }
+        if (echoedAtTimestamp.size >= MAX_ECHO_DEDUPE_ENTRIES) {
+          const oldest = echoedAtTimestamp.keys().next().value
+          if (oldest !== undefined) echoedAtTimestamp.delete(oldest)
+        }
+        echoedAtTimestamp.set(entityId, timestamp)
 
         if (data.has(entityId)) {
           // post conflict resolution update
@@ -202,6 +235,7 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
   const dirtyIterator = new Set<Entity>()
   const timestamps = new Map<Entity, number>()
   const updatedAtTick = new Map<Entity, number>()
+  const echoedAtTimestamp = new Map<Entity, number>()
   const tickState = { tick: 0 }
 
   return {
@@ -233,6 +267,7 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
       dirtyIterator.delete(entity)
       timestamps.delete(entity)
       updatedAtTick.delete(entity)
+      echoedAtTimestamp.delete(entity)
     },
     getOrNull(entity: Entity): Readonly<T> | null {
       return data.get(entity) ?? null
@@ -288,6 +323,6 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
     },
     dumpCrdtDeltas: createGetCrdtMessagesForLwwWithTick(componentDeclaration.componentId, updatedAtTick, timestamps, componentDeclaration, data),
     dumpCrdtUpdates: createGetCrdtMessagesForLww(componentDeclaration.componentId, updatedAtTick, timestamps, dirtyIterator, componentDeclaration, data, tickState),
-    updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data),
+    updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data, echoedAtTimestamp),
   }
 }
