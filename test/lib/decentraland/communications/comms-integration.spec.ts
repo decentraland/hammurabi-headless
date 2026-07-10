@@ -29,14 +29,24 @@ function makeEmitter() {
 // Fully in-memory: no LiveKit, no network.
 
 describe('comms: a remote peer position materializes a player entity + CRDT', () => {
+  let transport: { events: ReturnType<typeof makeEmitter> }
+  let system: ReturnType<typeof createAvatarCommunicationSystem>
+
   beforeEach(() => {
     // playerEntityManager is a shared singleton across the process.
     playerEntityManager.clear()
+    transport = { events: makeEmitter() }
+    // worldToScene converts comms world positions into the owning scene's
+    // coordinates; identity (as a fresh clone, since the LWW store retains the
+    // vector) is enough here.
+    system = createAvatarCommunicationSystem(transport as any, (position) => position.clone())
   })
 
-  it('allocates a player-range entity and emits its transform as CRDT', () => {
-    const transport = { events: makeEmitter() }
-    const system = createAvatarCommunicationSystem(transport as any)
+  afterEach(() => {
+    system.dispose()
+  })
+
+  it('should allocate a player-range entity and emit its transform as CRDT', () => {
     const subscription = system.createSubscription()
 
     // A remote peer reports a position (finite coords).
@@ -64,8 +74,6 @@ describe('comms: a remote peer position materializes a player entity + CRDT', ()
       return num >= 32 && num < 256
     })
     expect(playerMessages.length).toBeGreaterThan(0)
-
-    system.dispose()
   })
 })
 
