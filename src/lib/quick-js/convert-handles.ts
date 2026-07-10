@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto"
-import { QuickJSContext, QuickJSHandle, Scope } from "quickjs-emscripten-core"
+import { QuickJSContext, QuickJSDeferredPromise, QuickJSHandle, Scope } from "quickjs-emscripten-core"
 import { MaybeUint8Array } from "./types"
 
 // Upper bound on a single scene-supplied binary payload marshalled out of the VM,
@@ -89,6 +89,32 @@ function buildExtractBinariesSource(nonceKey: string): string {
 })()`
 }
 
+/**
+ * Disposes a QuickJS lifetime during teardown, tolerating both a handle that was
+ * already reclaimed and an FFI-level throw from a poisoned (aborted) WASM
+ * module. Teardown paths use this so one failing dispose can't skip the rest of
+ * the cleanup. (The library's own alive-guards don't cover the poisoned-module
+ * case: the FFI free itself throws there.)
+ */
+export function safeDispose(disposable: { alive?: boolean; dispose(): void }) {
+  if (disposable.alive === false) return
+  try {
+    disposable.dispose()
+  } catch {
+    // already reclaimed, or the WASM module aborted; keep tearing down
+  }
+}
+
+// executePendingJobs returns a Disposable result whose FAIL branch owns a
+// QuickJS error handle; dropping it leaks one VM handle per throwing microtask
+// job, which eventually makes vm.dispose() throw and get misreported as leaking.
+// Always dispose that handle. Callers must run startSyncTurn() first — draining
+// jobs executes untrusted scene code, so it gets its own deadline turn.
+export function drainPendingJobs(vm: QuickJSContext) {
+  const result = vm.runtime.executePendingJobs()
+  if ('error' in result && result.error) result.error.dispose()
+}
+
 type MarshalHelpers = {
   extractBinaries: QuickJSHandle
   wrapBytes: QuickJSHandle
@@ -121,8 +147,62 @@ export function disposeMarshalHelpers(vm: QuickJSContext) {
   const helpers = marshalHelpers.get(vm)
   if (!helpers) return
   marshalHelpers.delete(vm)
-  helpers.extractBinaries.dispose()
-  helpers.wrapBytes.dispose()
+  safeDispose(helpers.extractBinaries)
+  safeDispose(helpers.wrapBytes)
+}
+
+type PromiseTracking = {
+  deferreds: Set<QuickJSDeferredPromise>
+  startSyncTurn: () => void
+  // Set by disposePendingDeferreds. Settle callbacks gate on this instead of
+  // `vm.alive`: after a THROWING vm.dispose() the library leaves vm.alive
+  // stale-true (Lifetime only flips _alive after its disposer returns), so
+  // vm.alive cannot be trusted on exactly the teardown path this protects.
+  tornDown: boolean
+}
+
+// Host promises marshalled into the VM (nativeToVmType promise branch) hold
+// resolve/reject function handles until they settle. Any still in flight when
+// the VM is torn down (hot reload with an RPC call pending is the common case)
+// would keep QuickJS GC objects alive and make JS_FreeRuntime abort with
+// `list_empty(&rt->gc_obj_list)` — fatal in the release WASM build. Track them
+// per-VM so teardown can dispose the stragglers.
+const promiseTracking = new WeakMap<QuickJSContext, PromiseTracking>()
+
+// Tracking is created lazily so the leak protection is self-enforcing: a VM set
+// up outside withQuickJsVm that marshals a host promise still gets its pending
+// deferreds tracked (and disposed via disposePendingDeferreds), instead of
+// silently reverting to the JS_FreeRuntime abort.
+function getOrCreateTracking(vm: QuickJSContext): PromiseTracking {
+  let tracking = promiseTracking.get(vm)
+  if (!tracking) {
+    tracking = { deferreds: new Set(), startSyncTurn: () => {}, tornDown: false }
+    promiseTracking.set(vm, tracking)
+  }
+  return tracking
+}
+
+/**
+ * Registers the deadline hook for a VM's promise tracking. `startSyncTurn` is
+ * invoked before draining pending jobs on settle (job execution is untrusted
+ * scene code, so it gets its own deadline turn).
+ */
+export function installPromiseTracking(vm: QuickJSContext, startSyncTurn: () => void) {
+  getOrCreateTracking(vm).startSyncTurn = startSyncTurn
+}
+
+/** Disposes deferred promises still in flight. Must run before `vm.dispose()`. */
+export function disposePendingDeferreds(vm: QuickJSContext) {
+  const tracking = promiseTracking.get(vm)
+  if (!tracking) return
+  // Flip the flag BEFORE disposing: settle callbacks captured this object and
+  // must see the teardown even after the WeakMap entry is gone.
+  tracking.tornDown = true
+  promiseTracking.delete(vm)
+  for (const deferred of tracking.deferreds) {
+    safeDispose(deferred)
+  }
+  tracking.deferreds.clear()
 }
 
 /**
@@ -166,7 +246,9 @@ export function dumpAndDispose(vm: QuickJSContext, val: QuickJSHandle) {
     }
     return vm.dump(val)
   } finally {
-    val.dispose()
+    // vm.dump() disposes the handle itself when the value is a promise
+    // (pending/fulfilled/rejected) — disposing again would throw UseAfterFree.
+    if (val.alive) val.dispose()
   }
 }
 
@@ -245,14 +327,52 @@ export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
     return vm.unwrapResult(vm.evalCode(code))
   }
   if (value && typeof value === 'object' && typeof value.then === 'function' && typeof value.catch === 'function') {
+    const tracking = getOrCreateTracking(vm)
     const promise = vm.newPromise()
+    tracking.deferreds.add(promise)
+    // The tornDown/alive guards make a settle that races VM teardown a no-op
+    // instead of a call into a disposed context.
     value
-      .then((result: any) => nativeToVmType(vm, result).consume(($) => promise.resolve($)))
-      .catch((error: any) => nativeToVmType(vm, error).consume(($) => promise.reject($)))
+      .then(
+        (result: any) => {
+          if (tracking.tornDown || !vm.alive || !promise.alive) return
+          nativeToVmType(vm, result).consume(($) => promise.resolve($))
+        },
+        (error: any) => {
+          if (tracking.tornDown || !vm.alive || !promise.alive) return
+          nativeToVmType(vm, error).consume(($) => promise.reject($))
+        }
+      )
+      .catch((marshalError: any) => {
+        // Marshalling the settle value itself failed (e.g. VM heap pressure on a
+        // large payload). Leaving the deferred pending would hang the scene's
+        // await for the VM's life — reject it with a plain VM-side error instead.
+        if (tracking.tornDown || !promise.alive) return
+        try {
+          vm.newError(String(marshalError?.message ?? marshalError)).consume(($) => promise.reject($))
+        } catch (err) {
+          // The deferred stays pending but tracked, so teardown still disposes it.
+          console.error('QuickJS: failed to reject deferred after a marshal error:', err)
+        }
+      })
     // IMPORTANT: Once you resolve an async action inside QuickJS,
     // call runtime.executePendingJobs() to run any code that was
-    // waiting on the promise or callback.
-    void promise.settled.then(vm.runtime.executePendingJobs)
+    // waiting on the promise or callback. Its FAIL branch owns an error handle
+    // that must be disposed (a throwing scene microtask would otherwise leak
+    // one handle per throw and abort JS_FreeRuntime at teardown).
+    void promise.settled.then(() => {
+      tracking.deferreds.delete(promise)
+      if (tracking.tornDown || !vm.alive) return
+      try {
+        tracking.startSyncTurn()
+        drainPendingJobs(vm)
+      } catch (err) {
+        // A poisoned (aborted) WASM module throws from executePendingJobs even
+        // while vm.alive reads true; contain it — an unhandled rejection here
+        // would surface once per settling promise.
+        console.error('QuickJS pending-jobs pump failed:', err)
+      }
+    })
     return promise.handle
   }
   if (typeof value === 'function') {

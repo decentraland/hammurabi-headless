@@ -7,7 +7,7 @@ import { Scene } from "@dcl/schemas"
 import { connectContextToRpcServer } from "./connect-context-rpc"
 import { TestingServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/testing.gen"
 import { startQuickJsSceneRuntime } from '../../quick-js/rpc-scene-runtime'
-import { defaultUpdateLoop } from '../../common-runtime/game-loop'
+import { defaultUpdateLoop, isTransportClosedError } from '../../common-runtime/game-loop'
 
 // Create shared RPC server for this scene context
 const rpcServer = createRpcServer<SceneContext>({})
@@ -56,6 +56,13 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
     // Connect server to memory transport with scene context
     rpcServer.attachTransport(memoryTransport.server, ctx)
 
+    // Register the transport as scene-owned: SceneContext.dispose() closes it
+    // (hot reload), flipping port.state to 'closed', which ends the update
+    // loop. Without this the old VM hangs awaiting an RPC that will never be
+    // answered, until the async-turn timeout kills it 60 seconds later with a
+    // spurious error.
+    ctx.registerRpcTransport(memoryTransport.client)
+
     // Initialize RPC client and create port
     const client = await rpcClient
     const clientPort = await client.createPort(`scene-${scene.scene?.base || 'unknown'}`)
@@ -80,8 +87,18 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
       updateLoop: defaultUpdateLoop
     })
 
-    console.log(`[NODEJS] QuickJS runtime started successfully for scene: ${scene.display?.title}`)
+    // startQuickJsSceneRuntime resolves when the update loop ends, so this logs
+    // the runtime's clean shutdown, not its startup.
+    console.log(`[NODEJS] QuickJS runtime stopped for scene: ${scene.display?.title}`)
   } catch (error) {
-    console.error(`[NODEJS] Failed to start QuickJS runtime for scene ${scene.display?.title}:`, error)
+    // A transport-closed rejection after the scene was disposed is a hot reload
+    // racing scene startup (getStartupData / module-load RPCs run before the
+    // update loop's own shutdown handling kicks in) — a normal shutdown, not a
+    // runtime failure.
+    if (!ctx.stopped.isPending && isTransportClosedError(error)) {
+      console.log(`[NODEJS] QuickJS runtime stopped during startup for scene: ${scene.display?.title}`)
+    } else {
+      console.error(`[NODEJS] QuickJS runtime for scene ${scene.display?.title} terminated with error:`, error)
+    }
   }
 }

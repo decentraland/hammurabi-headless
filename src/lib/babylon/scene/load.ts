@@ -83,8 +83,16 @@ export async function loadSceneContextFromLocal(sceneContext: Atom<SceneContext>
 export function unloadScene(entityId: string) {
   const scene = loadedScenesByEntityId.get(entityId)
   if (scene) {
-    scene.dispose()
-    loadedScenesByEntityId.delete(entityId)
+    try {
+      // Entity disposal runs real Babylon teardown and can throw; a failed
+      // dispose must not leave the scene registered (hot reload would abort
+      // before loading the replacement) — same defensive shape as resetEngine.
+      scene.dispose()
+    } catch (err) {
+      console.error(`Error disposing scene ${entityId}:`, err)
+    } finally {
+      loadedScenesByEntityId.delete(entityId)
+    }
   }
 }
 
