@@ -92,6 +92,25 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   timeout bounds a never-settling onUpdate promise. `require()` results are
   cached so repeated calls don't leak host handles; VM teardown always disposes
   even if job-draining times out.
+- **QuickJS teardown & hot-reload shutdown (do not weaken).** Any host-side
+  handle still alive at `vm.dispose()` aborts JS_FreeRuntime in the release WASM
+  build, and any Emscripten abort permanently poisons the process-wide cached
+  WASM module. The recovery in `withQuickJsVm` therefore drops the module cache
+  on the error TYPE (`WebAssembly.RuntimeError`, via `classifyTeardownError`) —
+  never narrow it back to matching the assert message, JS_FreeRuntime has many
+  asserts besides `gc_obj_list`. `vm.alive` is STALE-TRUE after a throwing
+  `vm.dispose()` (the library flips `_alive` only after the disposer returns),
+  so teardown-race guards must use host-controlled state (`PromiseTracking.tornDown`,
+  `safeDispose`), never `vm.alive` alone; every step of the teardown `finally`
+  is individually throw-proofed so a poisoned module can't skip `clearInterval`
+  or mask the scene's failure. `SceneContext` owns the scene's RPC transports
+  (`registerRpcTransport`): `dispose()` closes them (ending the runtime's update
+  loop) and resolves `stopped` in a `finally` — new runtime flavors must register
+  their transport instead of hooking `stopped` at the call site. Shutdown vs.
+  scene failure is classified by `isTransportClosedError` (`common-runtime/game-loop.ts`),
+  which matches @dcl/rpc's `'RPC Transport closed'` rejection and is pinned by a
+  contract test against the real library — update both together if the message
+  ever changes.
 - **Binary marshalling (`quick-js/convert-handles.ts`).** Uint8Arrays cross the
   VM boundary through the WASM ArrayBuffer APIs (`newArrayBuffer` /
   `getArrayBuffer`), NOT as JSON text — the JSON detour measured 2-3 orders of
