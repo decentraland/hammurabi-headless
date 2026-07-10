@@ -39,7 +39,7 @@ export function setColliderMask(mesh: AbstractMesh, layers: number) {
   mesh.isPickable = (layers & ColliderLayer.CL_POINTER) != 0
 }
 
-function addFloorMesh(mesh: AbstractMesh) {
+export function addFloorMesh(mesh: AbstractMesh) {
   // add only when NOT already present (the previous inverted check meant no
   // collider mesh was ever added — only the ambient ground reached the list)
   const ix = floorMeshes.indexOf(mesh)

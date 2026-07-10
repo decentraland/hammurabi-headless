@@ -1,7 +1,7 @@
 // Node.js 18+ has native fetch
 import * as BABYLON from '@babylonjs/core'
 import { setupXMLHttpRequestPolyfill } from './polyfills/xmlhttprequest'
-import { robustFetch } from './misc/network'
+import { robustFetch, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from './misc/network'
 import { Scene } from '@dcl/schemas'
 import { initEngine } from './babylon'
 import { loadSceneContextFromLocal, loadSceneContextFromPosition, loadSceneContextFromWorld } from './babylon/scene/load'
@@ -21,7 +21,7 @@ import { Atom } from './misc/atom'
 import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
-import { resolveRealmBaseUrl, isDclEns } from './decentraland/realm/resolution'
+import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/realm/resolution'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
@@ -55,13 +55,43 @@ export interface EngineOptions {
 
 let initialized = false
 
-// Everything main() created that outlives a scene: without disposing these on
-// reset, every restart leaks a live engine whose render loop keeps running and
-// whose systems keep ticking the SHARED loadedScenesByEntityId map (N restarts
-// ⇒ N+1 updates per scene per frame), plus a still-connected LiveKit room.
-let activeEngine: BABYLON.Engine | BABYLON.NullEngine | undefined
-let activeBabylonScene: BABYLON.Scene | undefined
-let activeTransport: { disconnect(): Promise<void> } | undefined
+// Everything one main() run creates that outlives a scene: without disposing
+// these on reset, every restart leaks a live engine whose render loop keeps
+// running and whose systems keep ticking the SHARED loadedScenesByEntityId map
+// (N restarts ⇒ N+1 updates per scene per frame), plus a still-connected
+// LiveKit room. Owned per-run (not as loose module globals): resetEngine() can
+// fire while a main() is still awaiting (dev-mode 'r' during a slow startup),
+// and the superseded run must then abort and dispose only ITS resources —
+// letting it keep writing module state would silently clobber the replacement
+// session's engine/transport and reintroduce the leak this exists to prevent.
+type EngineSession = {
+  babylonScene?: BABYLON.Scene
+  transport?: { disconnect(): Promise<void> }
+}
+let activeSession: EngineSession | undefined
+
+function disposeSession(session: EngineSession) {
+  // Tear down comms: the DISCONNECTION handler ignores client-initiated closes,
+  // so this won't trigger the restart-on-comms-loss exit.
+  if (session.transport) {
+    session.transport.disconnect().catch((e) => console.error('Error disconnecting comms transport:', e))
+    session.transport = undefined
+  }
+
+  // Stop the old render loop before disposing: engine.dispose() alone leaves
+  // the queued setTimeout frame chain alive.
+  if (session.babylonScene) {
+    try {
+      const engine = session.babylonScene.getEngine()
+      engine.stopRenderLoop()
+      session.babylonScene.dispose()
+      engine.dispose()
+    } catch (e) {
+      console.error('Error disposing engine:', e)
+    }
+    session.babylonScene = undefined
+  }
+}
 
 export function resetEngine() {
   // Properly dispose all loaded scenes first
@@ -76,25 +106,9 @@ export function resetEngine() {
   // Clear the map
   loadedScenesByEntityId.clear()
 
-  // Tear down comms: the DISCONNECTION handler ignores client-initiated closes,
-  // so this won't trigger the restart-on-comms-loss exit.
-  if (activeTransport) {
-    activeTransport.disconnect().catch((e) => console.error('Error disconnecting comms transport:', e))
-    activeTransport = undefined
-  }
-
-  // Stop the old render loop before disposing: engine.dispose() alone leaves
-  // the queued setTimeout frame chain alive.
-  if (activeEngine) {
-    try {
-      activeEngine.stopRenderLoop()
-      activeBabylonScene?.dispose()
-      activeEngine.dispose()
-    } catch (e) {
-      console.error('Error disposing engine:', e)
-    }
-    activeEngine = undefined
-    activeBabylonScene = undefined
+  if (activeSession) {
+    disposeSession(activeSession)
+    activeSession = undefined
   }
 
   // Reset the initialization flag
@@ -113,18 +127,40 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
   // otherwise a failed startup poisons every retry with "cannot be initialized
   // twice" unless the caller knows to call resetEngine() first.
   initialized = true
+  const session: EngineSession = {}
+  activeSession = session
   try {
-    return await initializeEngine(options)
+    return await initializeEngine(options, session)
   } catch (err) {
-    resetEngine()
+    if (activeSession === session) {
+      resetEngine()
+    } else {
+      // A restart superseded this run mid-startup: the shared state (loaded
+      // scenes, initialized flag) now belongs to the NEW session — tear down
+      // only what this run created.
+      disposeSession(session)
+    }
     throw err
   }
 }
 
-async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> {
+/**
+ * Throws when a resetEngine() superseded this startup while it was awaiting.
+ * Called after each await cluster and BEFORE every mutation of shared state
+ * (identity atoms, realm atom, scene loading, transport attach): between the
+ * check and the mutation there is no await, so on a single-threaded event loop
+ * the pair is atomic and a stale run can never clobber the new session.
+ */
+function assertSessionCurrent(session: EngineSession) {
+  if (activeSession !== session) {
+    throw new Error('Engine was reset while starting up; this startup was aborted')
+  }
+}
+
+async function initializeEngine(options: EngineOptions, session: EngineSession): Promise<BABYLON.Scene> {
   const { scene } = await initEngine(options.canvas)
-  activeBabylonScene = scene
-  activeEngine = scene.getEngine() as BABYLON.Engine
+  session.babylonScene = scene
+  assertSessionCurrent(session)
 
   // Create identity based on private key or as guest. When a parent supplies a
   // pre-minted commsAdapter, the worker never needs the authoritative identity,
@@ -133,13 +169,16 @@ async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> 
     ? await createIdentityFromPrivateKey(options.privateKey)
     : await createGuestIdentity()
 
+  assertSessionCurrent(session)
   userIdentity.swap(identity)
 
   // Scene-facing APIs get a SEPARATE, always-unprivileged guest identity so that
   // untrusted scene code (via ~system/SignedFetch / ~system/UserIdentity) can
   // never sign requests as — or leak the address of — the authoritative server
   // identity above.
-  sceneIdentity.swap(await createGuestIdentity())
+  const unprivilegedSceneIdentity = await createGuestIdentity()
+  assertSessionCurrent(session)
+  sceneIdentity.swap(unprivilegedSceneIdentity)
 
   // Optional world-scoped storage delegation. Kept separate from both identities
   // above and used ONLY for storage.decentraland.* requests (see connect-context-rpc).
@@ -170,8 +209,11 @@ async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> 
 
   console.log('🌐 Fetching realm info from:', baseUrl + '/about')
   const res = await robustFetch(baseUrl + '/about', {}, { label: 'realm/about' })
-  const aboutResponse = (await res.json() as any)
+  // The realm URL is user-supplied (--realm): cap the body instead of letting
+  // a hostile realm stream an unbounded /about into host memory.
+  const aboutResponse = JSON.parse(await readBodyCapped(res, DEFAULT_MAX_BODY_BYTES)) as any
 
+  assertSessionCurrent(session)
   realm = {
     baseUrl,
     connectionString: realmUrl,
@@ -179,10 +221,7 @@ async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> 
   }
   currentRealm.swap(realm)
 
-  // Determine realm type. Match the hostname exactly: a substring check would
-  // misclassify domains like "mylocalhost.io" as local-dev realms.
-  const hostname = new URL(baseUrl).hostname
-  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1'
+  const isLocalhost = isLocalhostRealm(baseUrl)
   const isWorld = isDclEns(realmUrl)
   const isGenesisCity = !isLocalhost && !isWorld
 
@@ -220,6 +259,10 @@ async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> 
 
   let ctx: Atom<SceneContext>
 
+  // The load functions register the scene in the SHARED loadedScenesByEntityId
+  // map — a superseded run must not add to the new session's map.
+  assertSessionCurrent(session)
+
   if (isLocalhost) {
     // Load local scene
     ctx = await loadSceneContextFromLocal(sceneContext, scene, { baseUrl: realm.baseUrl, isGlobal: false })
@@ -256,7 +299,8 @@ async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> 
     commsAdapter: options.commsAdapter
   })
 
-  activeTransport = sceneTransport
+  session.transport = sceneTransport
+  assertSessionCurrent(session)
 
   sceneContext.pipe(async (ctx) => {
     ctx.attachLivekitTransport(sceneTransport)
@@ -278,6 +322,7 @@ async function initializeEngine(options: EngineOptions): Promise<BABYLON.Scene> 
   })
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)
+  assertSessionCurrent(session)
   characterControllerSystem.teleport(position)
   characterControllerSystem.capsule.position.y += PLAYER_HEIGHT
 

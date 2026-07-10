@@ -1,5 +1,5 @@
 import * as BABYLON from '@babylonjs/core'
-import { floorMeshes, setColliderMask } from '../scene/logic/colliders'
+import { addFloorMesh, setColliderMask } from '../scene/logic/colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 
 const PARCEL_SIZE = 16
@@ -26,7 +26,11 @@ export async function setupEnvironment(scene: BABYLON.Scene) {
   ground.material = groundMaterial
 
   setColliderMask(ground, ColliderLayer.CL_PHYSICS)
-  floorMeshes.push(ground)
+  // Through addFloorMesh (not a direct push): it registers the dispose
+  // observer that removes the mesh from the module-level array — without it,
+  // every engine reset ('r' restart disposes the Babylon scene) would leave
+  // one more disposed ground accumulating in floorMeshes.
+  addFloorMesh(ground)
 
   function repositionCamera() {
     if (!scene.activeCamera) return

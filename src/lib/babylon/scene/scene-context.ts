@@ -280,9 +280,13 @@ export class SceneContext implements EngineApiInterface {
       // bookkeeping (LWW timestamps / updatedAtTick) must be purged explicitly
       // or it grows one entry per component per deleted id forever — outside
       // every documented cap, over 2^32 generational ids of untrusted input.
-      // Safe: tombstoned entities drop all further CRDT updates (see the
-      // deletedEntities guard in update()), so stale-update protection from a
-      // retained timestamp is never exercised.
+      // TRADE-OFF: while the id remains in deletedEntities, its updates are
+      // dropped by the guard in update() and the purged timestamps are never
+      // consulted. Once the tombstone itself is evicted (past
+      // MAX_DELETED_TOMBSTONES, i.e. 100k+ subsequent deletions), a stale PUT
+      // for this id would be accepted as fresh — a ghost bounded by
+      // MAX_LIVE_ENTITIES. Deliberately accepted: retaining timestamps past
+      // tombstone eviction is exactly the unbounded growth this purge fixes.
       for (const component of this.componentList) {
         component.purgeEntity(entityId)
       }

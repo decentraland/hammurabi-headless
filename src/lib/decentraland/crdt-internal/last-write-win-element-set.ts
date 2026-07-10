@@ -38,8 +38,12 @@ function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
   return serializationScratch.toBinary()
 }
 
-// Bound for the echo-dedupe map below; clearing it on overflow only costs a
-// rare redundant corrective message, never correctness.
+// Bound for the echo-dedupe map below. Overflow evicts ONE oldest entry per
+// insert (Map preserves insertion order) — clearing the whole map made it
+// thrash (fill→clear→refill) once stale PUTs spanned more than this many
+// entities, re-enabling the echo amplification the map exists to prevent at
+// exactly the scale where it matters. Eviction only ever costs a redundant
+// corrective message, never correctness.
 const MAX_ECHO_DEDUPE_ENTRIES = 8192
 
 export function createUpdateLwwFromCrdt<T>(
@@ -147,7 +151,10 @@ export function createUpdateLwwFromCrdt<T>(
         if (echoedAtTimestamp.get(entityId) === timestamp) {
           return false // change not accepted
         }
-        if (echoedAtTimestamp.size >= MAX_ECHO_DEDUPE_ENTRIES) echoedAtTimestamp.clear()
+        if (echoedAtTimestamp.size >= MAX_ECHO_DEDUPE_ENTRIES) {
+          const oldest = echoedAtTimestamp.keys().next().value
+          if (oldest !== undefined) echoedAtTimestamp.delete(oldest)
+        }
         echoedAtTimestamp.set(entityId, timestamp)
 
         if (data.has(entityId)) {

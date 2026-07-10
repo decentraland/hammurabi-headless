@@ -65,4 +65,28 @@ describe('flatFetch response body cap', () => {
       expect(response.json).toEqual({ ok: true })
     })
   })
+
+  describe('when the response body is prefixed with a UTF-8 BOM', () => {
+    beforeEach(() => {
+      requestHandler = (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        // Windows/.NET backends commonly emit EF BB BF before the JSON. The
+        // fetch-spec decode used by response.json() strips it; the capped
+        // reader must too, or previously-working endpoints throw SyntaxError.
+        res.end(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify({ ok: true }))]))
+      }
+    })
+
+    it('should strip the BOM and parse the JSON body', async () => {
+      const response = await flatFetch(`${baseUrl}/bom`, { responseBodyType: 'json' })
+
+      expect(response.json).toEqual({ ok: true })
+    })
+
+    it('should strip the BOM from a text body', async () => {
+      const response = await flatFetch(`${baseUrl}/bom`, { responseBodyType: 'text' })
+
+      expect(response.text).toEqual(JSON.stringify({ ok: true }))
+    })
+  })
 })

@@ -46,13 +46,15 @@ export function resolveCyclicParenting(scene: SceneContext, hasQuota?: () => boo
 
         // get or create the entity that should be the parent as defined per TransformComponent.
         // Cap-aware: at MAX_LIVE_ENTITIES the referenced parent cannot be
-        // materialized — park the entity at the scene root (same treatment as a
-        // deleted parent) instead of doubling the entity ceiling.
+        // materialized — park the entity at the scene root but KEEP it pending
+        // (same treatment as a cycle, NOT as a deleted parent): the parent id
+        // is not tombstoned and can legitimately be created once cap space
+        // frees, and removeEntity — the only way space frees — re-flags
+        // hierarchyChanged, so the retry costs nothing until then. Deleting
+        // the entry here would freeze the child at the root forever.
         const desiredParent = scene.tryGetOrCreateEntity(parentEntityId)
         if (!desiredParent) {
           entity.parent = scene.rootNode
-          scene.hierarchyChanged = true
-          scene.unparentedEntities.delete(entityId)
           continue
         }
 

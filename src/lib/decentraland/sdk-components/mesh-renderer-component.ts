@@ -52,9 +52,15 @@ export const meshRendererComponent = declareComponentUsingProtobufJs(PBMeshRende
 
   // create a box and attach it to an entity
 
-  if (entity.appliedComponents.meshRenderer?.mesh) {
-    entity.appliedComponents.meshRenderer.mesh.parent = null
-    entity.appliedComponents.meshRenderer.mesh.dispose()
+  // Gate on the ENTRY, not on `?.mesh`: an unsupported mesh $case (e.g.
+  // cylinder) stores { mesh: null, info }, and a mesh-gated clear would leave
+  // that stale entry attached after DELETE_COMPONENT forever.
+  if (entity.appliedComponents.meshRenderer) {
+    const previousMesh = entity.appliedComponents.meshRenderer.mesh
+    if (previousMesh) {
+      previousMesh.parent = null
+      previousMesh.dispose()
+    }
     // Clear eagerly: on DELETE_COMPONENT nothing below reassigns this, and a
     // stale entry would hand the disposed mesh to setMeshRendererMaterial on a
     // later Material PUT.
