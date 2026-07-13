@@ -60,11 +60,30 @@ export async function loadSceneContextFromLocal(sceneContext: Atom<SceneContext>
 
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, options.isGlobal, virtualScene))
 
+  let reloading = false
   async function reloadScene() {
-    unloadScene(entityId)
-    await sleep(100)
-    options.withoutHotReload = true
-    loadSceneContextFromLocal(sceneContext, engineScene, options)
+    // Guard against overlapping reloads: the WebSocket onmessage fires this
+    // fire-and-forget, so two saves inside the sleep window would otherwise run
+    // two concurrent loads and leak the first context when the second swaps in.
+    if (reloading) return
+    reloading = true
+    try {
+      // Unload whatever is CURRENTLY loaded, by its LIVE id — not the id captured
+      // at first load. The local entity id is the content-derived deployment
+      // hash, which changes on every edit, so unloading the captured id would
+      // no-op from the 2nd reload onward and leak the previous SceneContext (it
+      // stays in loadedScenesByEntityId, keeps ticking, and keeps its comms
+      // handler subscribed to the shared transport).
+      const current = sceneContext.getOrNull()
+      if (current) unloadScene(current.entityId)
+      await sleep(100)
+      options.withoutHotReload = true
+      await loadSceneContextFromLocal(sceneContext, engineScene, options, virtualScene)
+    } catch (err) {
+      console.error('Error during hot reload:', err)
+    } finally {
+      reloading = false
+    }
   }
 
   if (!options.withoutHotReload) {

@@ -24,7 +24,8 @@ Options:
   --scene-id=<hash>  Target scene entity hash for multi-scene worlds. When omitted, the first scene
                      in the world's about.json is loaded
   --private-key=<hex> Use a specific private key for authentication (hex string with or without 0x prefix)
-                     Can also be set via PRIVATE_KEY environment variable
+                     Prefer the PRIVATE_KEY environment variable: a key passed here is visible
+                     in the process list (ps / /proc/<pid>/cmdline) to other local users
   --env=<zone|org>   Environment to use for Decentraland services (default: org)
                      'org' = production (decentraland.org)
                      'zone' = development (decentraland.zone)
@@ -66,6 +67,10 @@ Examples:
     sceneId = argValue!
   } else if (arg.startsWith('--private-key=')) {
     privateKey = argValue!
+    // A key on the command line is visible to any local user via `ps` /
+    // /proc/<pid>/cmdline. The PRIVATE_KEY env var is only readable by the same
+    // UID, so it is meaningfully less exposed — prefer it.
+    console.warn('⚠️ --private-key is visible in the process list (ps). Prefer the PRIVATE_KEY environment variable.')
   } else if (arg.startsWith('--env=')) {
     if (argValue === 'zone' || argValue === 'org') {
       environment = argValue
@@ -99,6 +104,13 @@ process.on('uncaughtException', (error) => {
   console.error('❌ Error:', error.stack || error.message)
   if (developmentMode) {
     console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
+  } else {
+    // In production a supervisor is expected to restart the worker. After an
+    // uncaughtException process state may be corrupt, and the render-loop timer
+    // keeps the event loop alive, so without an explicit exit the supervisor
+    // would see a healthy-looking process that can never recover (same rationale
+    // as the failed-startup path below). Exit non-zero so it gets restarted.
+    process.exit(1)
   }
 })
 
@@ -106,6 +118,8 @@ process.on('unhandledRejection', (reason: any) => {
   console.error('❌ Error:', reason?.stack || reason?.message || reason)
   if (developmentMode) {
     console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
+  } else {
+    process.exit(1)
   }
 })
 

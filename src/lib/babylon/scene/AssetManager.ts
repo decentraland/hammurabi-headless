@@ -5,7 +5,7 @@
 // buffers for each model requies us to find a reusable solution
 
 import * as BABYLON from '@babylonjs/core'
-import { robustFetch, drainResponse } from '../../misc/network'
+import { robustFetch, drainResponse, readBodyCappedBytes } from '../../misc/network'
 import { LoadableScene, WearableContentServerEntity, resolveFile, resolveFileAbsolute } from '../../decentraland/scene/content-server-entity'
 import { GLTFFileLoader, GLTFLoaderAnimationStartMode } from '@babylonjs/loaders/glTF/glTFFileLoader'
 import { GLTFLoader } from '@babylonjs/loaders/glTF/2.0'
@@ -14,6 +14,10 @@ import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/
 import { BabylonEntity } from './BabylonEntity'
 
 const sceneContextMap = new Map<string /*sceneId*/, WeakRef<LoadableScene>>()
+
+// Ceiling for a single scene-callable readFile / main.crdt read. Matches the XHR
+// asset cap; bounds host memory against an oversized deployed file.
+const MAX_READ_FILE_BYTES = 64 * 1024 * 1024
 
 export class AssetManager {
   models = new Map<string, Promise<BABYLON.AssetContainer>>()
@@ -58,6 +62,10 @@ export class AssetManager {
       // Consumers still observe the rejection via their own handlers on the stored promise.
       ret.catch((err) => {
         console.error(`‼️ Failed to load model ${normalizedSrc}: ${err?.message || err}`)
+        // Evict the rejected promise so a later PUT of the same src can retry
+        // instead of getting the cached failure for the rest of the scene's life
+        // (a transient network error would otherwise be permanent).
+        if (this.models.get(fileHash!) === ret) this.models.delete(fileHash!)
       })
 
       // store the promise in the map, it will be reused for the whole scene
@@ -81,7 +89,9 @@ export class AssetManager {
       throw new Error(`Error loading URL: ${absoluteLocation}`)
     }
 
-    return { content: new Uint8Array(await res.arrayBuffer()), hash }
+    // Cap the read: this is scene-callable (and reads main.crdt), so the file
+    // size is attacker-influenceable and must not buffer unbounded host memory.
+    return { content: await readBodyCappedBytes(res, MAX_READ_FILE_BYTES), hash }
   }
 
   async loadTexture(file: string) {

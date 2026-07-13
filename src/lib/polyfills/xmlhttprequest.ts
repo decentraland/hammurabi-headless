@@ -95,7 +95,20 @@ export function setupXMLHttpRequestPolyfill() {
       this.readyState = 2
       this._setReadyState(2)
 
-      const parsedUrl = new URL(this.url)
+      let parsedUrl: URL
+      try {
+        parsedUrl = new URL(this.url)
+      } catch {
+        // A non-absolute / malformed URL would otherwise throw synchronously out
+        // of send() into Babylon's file loader, leaving the request unsettled (no
+        // error/load event fired) so an awaiter hangs forever. Dispatch an error
+        // and settle instead.
+        console.error(`[XHR] ✗ invalid URL: ${this.url}`)
+        this.readyState = 4
+        this._setReadyState(4)
+        this._triggerError()
+        return
+      }
       const isHttps = parsedUrl.protocol === 'https:'
       const client = isHttps ? https : http
 

@@ -13,10 +13,14 @@ export type InstancedSpawnPoint = { position: Vector3; cameraTarget?: Vector3 }
  * @param loadPosition Parcel position on which the player is teleporting to
  */
 export function pickWorldSpawnpoint(scene: Scene): InstancedSpawnPoint {
-  const baseParcel = scene.scene.base
+  const baseParcel = scene.scene?.base ?? ''
   const [bx, by] = baseParcel.split(',')
+  const baseX = parseInt(bx, 10)
+  const baseY = parseInt(by, 10)
   const basePosition = new Vector3()
-  gridToWorld(parseInt(bx, 10), parseInt(by, 10), basePosition)
+  // `base` is untrusted scene metadata: a malformed value ("garbage" / missing)
+  // yields NaN, which would propagate into a NaN teleport. Fall back to 0,0.
+  gridToWorld(Number.isFinite(baseX) ? baseX : 0, Number.isFinite(baseY) ? baseY : 0, basePosition)
 
   const spawnpoint = pickSpawnpoint(scene)
   const { position, cameraTarget } = spawnpoint
@@ -50,14 +54,20 @@ function pickSpawnpoint(land: Scene): InstancedSpawnPoint {
   // 3 - get a random spawn point
   const index = Math.floor(Math.random() * eligiblePoints.length)
 
-  const { position, cameraTarget } = eligiblePoints[index]
+  const chosen = eligiblePoints[index]
+  const position = chosen?.position
+  const cameraTarget = chosen?.cameraTarget
 
-  // 4 - generate random x, y, z components when in arrays
-  const finalPosition = new Vector3(
-    computeComponentValue(position.x),
-    computeComponentValue(position.y),
-    computeComponentValue(position.z)
-  )
+  // 4 - generate random x, y, z components when in arrays. A spawn point may omit
+  // `position` entirely (untrusted scene metadata); fall back to the scene-center
+  // default rather than throwing on `position.x`.
+  const finalPosition = position
+    ? new Vector3(
+        computeComponentValue(position.x),
+        computeComponentValue(position.y),
+        computeComponentValue(position.z)
+      )
+    : new Vector3(8, 0, 8)
 
   return {
     position: finalPosition,
@@ -66,8 +76,23 @@ function pickSpawnpoint(land: Scene): InstancedSpawnPoint {
 }
 
 function computeComponentValue(x: number | number[]) {
+  return sanitizeFinite(rawComponentValue(x))
+}
+
+// Untrusted scene metadata: guarantee the spawn component is a finite number so a
+// NaN/Infinity (from a bad scalar OR array element) can't reach the teleport.
+function sanitizeFinite(value: number) {
+  return Number.isFinite(value) ? value : 0
+}
+
+function rawComponentValue(x: number | number[]) {
   if (typeof x === 'number') {
     return x
+  }
+
+  // anything that isn't a number or an array is unusable.
+  if (!Array.isArray(x)) {
+    return 0
   }
 
   const length = x.length

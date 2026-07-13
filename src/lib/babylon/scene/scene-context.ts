@@ -74,6 +74,11 @@ export class SceneContext implements EngineApiInterface {
   #ref = new WeakRef(this)
   rootNode: BabylonEntity
 
+  // Parcel-outline LinesMesh parented to rootNode. It is NOT an entity, so the
+  // removeEntity loop never disposes it; dispose() must free it explicitly or one
+  // mesh+geometry leaks into the process-long Babylon scene per scene unload.
+  private parcelOutline: BABYLON.AbstractMesh | null = null
+
   readonly entityId: string
 
   private _transport?: CommsTransportWrapper
@@ -198,6 +203,7 @@ export class SceneContext implements EngineApiInterface {
 
       const r = createParcelOutline(babylonScene, this.metadata.scene.base, this.metadata.scene.parcels)
       r.result.parent = this.rootNode
+      this.parcelOutline = r.result
     }
 
     // calculate a naive bounding box for the scene to calculate the distance to the outer bounds
@@ -218,7 +224,12 @@ export class SceneContext implements EngineApiInterface {
       // as per https://docs.decentraland.org/creator/development-guide/scene-limitations/
       const height = Math.log2(this.metadata.scene.parcels.length + 1) * 20
 
-      if (minX) {
+      // `minX !== null`, NOT `if (minX)`: a scene whose westmost parcel sits on
+      // the x=0 column (common in Genesis City) has minX === 0, which is falsy.
+      // Dropping the bounding box there made distanceToPoint() return 0 (so the
+      // scene always won the nearest-scene message quota) and skipped it from
+      // frustum culling.
+      if (minX !== null) {
         this.boundingBox = new BABYLON.BoundingBox(
           new Vector3(minX! * PARCEL_SIZE_METERS, -1, minZ! * PARCEL_SIZE_METERS),
           new Vector3((maxX! + 1) * PARCEL_SIZE_METERS, height, (maxZ! + 1) * PARCEL_SIZE_METERS)
@@ -250,8 +261,10 @@ export class SceneContext implements EngineApiInterface {
   // naivest implementation of the distance to the outer bounds of the scene
   distanceToPoint(point: BABYLON.Vector3) {
     if (!this.boundingBox) return 0
-    if (this.boundingBox?.intersectsPoint(point)) return 0
-    return this.boundingBox?.centerWorld.subtract(point).length()
+    if (this.boundingBox.intersectsPoint(point)) return 0
+    // Vector3.Distance avoids the temporary vector that subtract().length() would
+    // allocate per scene per frame (this runs in the per-frame scene sort).
+    return Vector3.Distance(this.boundingBox.centerWorld, point)
   }
 
   removeEntity(entityId: Entity) {
@@ -372,8 +385,14 @@ export class SceneContext implements EngineApiInterface {
           case CrdtMessageType.APPEND_VALUE:
           case CrdtMessageType.DELETE_COMPONENT:
           case CrdtMessageType.PUT_COMPONENT: {
-            // ignore updates of entities outside range
-            // if (!entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) continue
+            // Intentionally NOT range-checked here (unlike DELETE_ENTITY below).
+            // The range floor of 1 exists to protect the root entity 0 from
+            // DELETION, but scenes legitimately attach components to entity 0
+            // (RootEntity); those are handled per-component (e.g. the transform
+            // component ignores entity 0) rather than dropped wholesale. Enabling
+            // the check here silently drops every root-entity component write.
+            // Subscription buffers are host-generated with correct in-range ids,
+            // so the guard would add no real protection.
 
             // Bound host memory: a scene can stream PUT/APPEND for unbounded
             // distinct entity ids (entity number + generational version), each
@@ -578,6 +597,17 @@ export class SceneContext implements EngineApiInterface {
       this._transport = undefined
 
       this.assetManager.dispose()
+      // The outline is parented to rootNode but is not an entity, so nothing above
+      // disposed it. Free it explicitly (BabylonEntity.dispose is intentionally
+      // non-recursive — entities are disposed individually by the loop above).
+      if (this.parcelOutline) {
+        try {
+          this.parcelOutline.dispose()
+        } catch (err) {
+          console.error(`Error disposing parcel outline of scene ${this.entityId}:`, err)
+        }
+        this.parcelOutline = null
+      }
       this.rootNode.parent = null
       this.rootNode.dispose(false)
     } finally {
