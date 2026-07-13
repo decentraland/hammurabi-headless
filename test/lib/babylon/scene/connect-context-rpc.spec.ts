@@ -14,7 +14,10 @@ jest.mock('../../../../src/lib/decentraland/identity/signed-fetch', () => ({
 
 const { createRpcClient, createRpcServer } = require('@dcl/rpc')
 const { MemoryTransport } = require('@dcl/rpc/dist/transports/Memory')
-const { connectContextToRpcServer } = require('../../../../src/lib/babylon/scene/connect-context-rpc')
+const { connectContextToRpcServer, registerService } = require('../../../../src/lib/babylon/scene/connect-context-rpc')
+const {
+  UserActionModuleServiceDefinition
+} = require('@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen')
 const { loadModuleForPort } = require('../../../../src/lib/common-runtime/modules')
 const { sceneIdentity, userIdentity, currentRealm } = require('../../../../src/lib/decentraland/state')
 const { signedFetch } = require('../../../../src/lib/decentraland/identity/signed-fetch')
@@ -232,6 +235,56 @@ describe('scene RPC capabilities', () => {
     })
   })
 
+  describe('when a scene calls signedFetch for the realm\'s own (otherwise blocked) origin', () => {
+    let response: any
+
+    beforeEach(async () => {
+      // Local preview: the realm runs on localhost, which the SSRF guard blocks
+      // for every other destination. The realm origin is operator-supplied, so
+      // scene requests to it (storage endpoints) must go through.
+      currentRealm.swap({
+        baseUrl: 'http://localhost:8000',
+        connectionString: 'http://localhost:8000',
+        aboutResponse: { configurations: { realmName: 'localhost' } } as any
+      })
+      const service: any = loadModuleForPort(port, '~system/SignedFetch')
+      response = await service.signedFetch({
+        url: 'http://localhost:8000/values/leaderboard',
+        init: { method: 'GET', headers: {} }
+      })
+    })
+
+    it('should perform the request instead of blocking it', () => {
+      expect(signedFetchMock).toHaveBeenCalledTimes(1)
+      expect(signedFetchMock.mock.calls[0][0]).toBe('http://localhost:8000/values/leaderboard')
+      expect(response.ok).toBe(true)
+    })
+  })
+
+  describe('when a scene targets a blocked host that is NOT the realm origin', () => {
+    let response: any
+
+    beforeEach(async () => {
+      currentRealm.swap({
+        baseUrl: 'http://localhost:8000',
+        connectionString: 'http://localhost:8000',
+        aboutResponse: { configurations: { realmName: 'localhost' } } as any
+      })
+      const service: any = loadModuleForPort(port, '~system/SignedFetch')
+      // Same host, different port: a different origin, so the exemption must
+      // not apply and the guard must still block it.
+      response = await service.signedFetch({
+        url: 'http://localhost:9999/admin',
+        init: { method: 'GET', headers: {} }
+      })
+    })
+
+    it('should still block the request', () => {
+      expect(signedFetchMock).not.toHaveBeenCalled()
+      expect(response.ok).toBe(false)
+    })
+  })
+
   describe('when a scene requests the user public key', () => {
     let response: any
 
@@ -260,6 +313,57 @@ describe('scene RPC capabilities', () => {
 
     it('should report the caller as not web3-connected', () => {
       expect(data.hasConnectedWeb3).toBe(false)
+    })
+  })
+})
+
+// @dcl/protocol is resolved at the user's install time, so the runtime can see
+// service definitions declaring methods this server was never compiled with.
+// @dcl/rpc binds every declared method at module load, so without the tolerant
+// wrapper ONE missing method breaks the whole module ("Cannot read properties
+// of undefined (reading 'bind')").
+describe('registerService protocol-drift tolerance', () => {
+  let port: RpcClientPort
+  let consoleErrorSpy: jest.SpyInstance
+
+  beforeEach(async () => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+    const rpcServer = createRpcServer<SceneContext>({})
+    rpcServer.setHandler(async (serverPort: any) => {
+      // Simulates drift: the definition declares requestTeleport, the
+      // implementation provides nothing.
+      registerService(serverPort, UserActionModuleServiceDefinition, async () => ({}))
+    })
+    const { client: clientSocket, server: serverSocket } = MemoryTransport()
+    const clientPromise = createRpcClient(clientSocket)
+    rpcServer.attachTransport(serverSocket, sceneCtx)
+    const client = await clientPromise
+    port = await client.createPort('drift-test')
+  })
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore()
+  })
+
+  describe('when the implementation is missing a declared method', () => {
+    let service: any
+
+    beforeEach(async () => {
+      service = loadModuleForPort(port, '~system/UserActionModule')
+      // Force the module load to complete (loadService defers it to first call).
+      await service.requestTeleport({ destination: '0,0' }).catch(() => {})
+    })
+
+    it('should log the missing method by service and name', () => {
+      const logged = consoleErrorSpy.mock.calls.flat().join(' ')
+      expect(logged).toContain('UserActionModuleService')
+      expect(logged).toContain('requestTeleport')
+    })
+
+    it('should reject calls to the missing method with a descriptive error', async () => {
+      await expect(service.requestTeleport({ destination: '0,0' })).rejects.toThrow(
+        /requestTeleport is not implemented by this server version/
+      )
     })
   })
 })

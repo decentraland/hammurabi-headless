@@ -1,6 +1,6 @@
 import { createRpcClient, createRpcServer } from '@dcl/rpc'
 import { MemoryTransport } from '@dcl/rpc/dist/transports/Memory'
-import { defaultUpdateLoop, isTransportClosedError } from '../../../src/lib/common-runtime/game-loop'
+import { defaultUpdateLoop, isPortTeardownError, isTransportClosedError } from '../../../src/lib/common-runtime/game-loop'
 import { RuntimeAbstraction } from '../../../src/lib/common-runtime/types'
 
 describe('isTransportClosedError', () => {
@@ -81,6 +81,71 @@ describe('isTransportClosedError', () => {
   })
 })
 
+describe('isPortTeardownError', () => {
+  describe('when given the RemoteError a dropped port produces', () => {
+    it('should match the host-side Error instance', () => {
+      expect(isPortTeardownError(new Error('RemoteError: invalid portId'))).toBe(true)
+    })
+
+    it('should match the marshalled plain-object shape', () => {
+      expect(isPortTeardownError({ message: 'RemoteError: invalid portId', stack: '...' })).toBe(true)
+    })
+  })
+
+  describe('when given unrelated errors', () => {
+    it('should not match a genuine scene error', () => {
+      expect(isPortTeardownError(new TypeError('cannot read properties of undefined'))).toBe(false)
+    })
+
+    it('should not match null, undefined or primitives', () => {
+      expect(isPortTeardownError(null)).toBe(false)
+      expect(isPortTeardownError(undefined)).toBe(false)
+      expect(isPortTeardownError(42)).toBe(false)
+    })
+  })
+
+  // Contract test: the predicate matches the RemoteError the REAL @dcl/rpc
+  // server sends when a request reaches it after the port was dropped (the
+  // other rejection flavor a hot-reload shutdown produces). A dependency bump
+  // that rewords "invalid portId" fails here instead of silently bringing the
+  // spurious "Scene error during shutdown" logs back.
+  describe('when a request reaches a real @dcl/rpc server after its port was destroyed', () => {
+    let rejection: unknown
+
+    beforeEach(async () => {
+      const memoryTransport = MemoryTransport()
+      const rpcServer = createRpcServer<unknown>({})
+      rpcServer.setHandler(async (port) => {
+        port.registerModule('Test', async () => ({
+          echo: async () => Uint8Array.from([1])
+        }))
+      })
+      const clientPromise = createRpcClient(memoryTransport.client)
+      rpcServer.attachTransport(memoryTransport.server, {})
+      const client = await clientPromise
+      const port = await client.createPort('contract-test')
+      const mod = (await port.loadModule('Test')) as { echo(payload: Uint8Array): Promise<unknown> }
+      // Destroying the port server-side while keeping the transport open is
+      // exactly the shutdown race: the next request finds no port.
+      port.close()
+      rejection = await mod.echo(new Uint8Array()).then(
+        () => {
+          throw new Error('expected the request to reject')
+        },
+        (err) => err
+      )
+    })
+
+    it('should reject with an error our classifier recognizes as port teardown', () => {
+      expect(isPortTeardownError(rejection)).toBe(true)
+    })
+
+    it('should not be classified as a transport closure', () => {
+      expect(isTransportClosedError(rejection)).toBe(false)
+    })
+  })
+})
+
 describe('defaultUpdateLoop', () => {
   let consoleErrorSpy: jest.SpyInstance
 
@@ -122,6 +187,22 @@ describe('defaultUpdateLoop', () => {
     beforeEach(() => {
       runtime = makeRuntime({
         onUpdate: jest.fn().mockRejectedValue(new Error('RPC Transport closed')),
+        isRunning: jest.fn().mockReturnValue(false)
+      })
+    })
+
+    it('should treat it as a clean shutdown without logging', async () => {
+      await expect(defaultUpdateLoop(runtime)).resolves.toBeUndefined()
+      expect(consoleErrorSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when the port closed and the error is the invalid-portId rejection', () => {
+    let runtime: RuntimeAbstraction
+
+    beforeEach(() => {
+      runtime = makeRuntime({
+        onUpdate: jest.fn().mockRejectedValue(new Error('RemoteError: invalid portId')),
         isRunning: jest.fn().mockReturnValue(false)
       })
     })

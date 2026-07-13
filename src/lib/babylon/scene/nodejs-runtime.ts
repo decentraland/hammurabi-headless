@@ -100,7 +100,7 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
     // racing scene startup (getStartupData / module-load RPCs run before the
     // update loop's own shutdown handling kicks in) — a normal shutdown, not a
     // runtime failure.
-    if (!ctx.stopped.isPending && isTransportClosedError(error)) {
+    if (!ctx.stopped.isPending && (isTransportClosedError(error) || isPortTeardownError(error))) {
       console.log(`[NODEJS] QuickJS runtime stopped during startup for scene: ${scene.display?.title}`)
     } else {
       console.error(`[NODEJS] QuickJS runtime for scene ${scene.display?.title} terminated with error:`, error)

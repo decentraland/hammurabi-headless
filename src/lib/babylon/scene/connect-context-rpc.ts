@@ -119,9 +119,9 @@ export function getStorageSigningStrategy(
  * install time, so a published server routinely runs against a NEWER
  * @dcl/protocol (with new methods) than it was compiled with. Fill any gap
  * with a rejecting stub instead: the module loads, only the unimplemented
- * method fails, and the log names it.
+ * method fails, and the log names it. Exported for tests.
  */
-function registerService<Service extends TsProtoServiceDefinition>(
+export function registerService<Service extends TsProtoServiceDefinition>(
   port: RpcServerPort<SceneContext>,
   service: Service,
   moduleInitializator: (
@@ -395,7 +395,11 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         let realmOrigin: string | null = null
         try {
           realmOrigin = new URL(realm.baseUrl).origin
-        } catch {}
+        } catch {
+          // Without a parseable realm origin the exemption silently disappears
+          // and local preview breaks again — make that diagnosable.
+          console.warn(`SignedFetch: cannot derive realm origin from "${realm.baseUrl}", realm-origin exemption disabled`)
+        }
 
         for (let hop = 0; ; hop++) {
           if (realmOrigin === null || new URL(currentUrl).origin !== realmOrigin) {
