@@ -47,10 +47,32 @@ export function readMessage(buf: ByteBuffer): CrdtMessage | null | undefined {
 export function* readAllMessages(buf: ByteBuffer): Iterable<CrdtMessage> {
   while (true) {
     const offsetBefore = buf.currentReadOffset()
-    const msg = readMessage(buf)
+    let msg: CrdtMessage | null | undefined
+    try {
+      msg = readMessage(buf)
+    } catch {
+      // A recognized message whose internal variable-length body (PUT/APPEND
+      // data) overruns the buffer makes a ByteBuffer read throw from bounds
+      // checking, BEFORE the frame reconciliation below can run. Stop the batch
+      // cleanly rather than letting the throw escape to the consumer — an escaped
+      // throw would skip the queue's shift() and leave the poison buffer at the
+      // head to disrupt processing again.
+      return
+    }
     if (msg === undefined) return // no complete header left
 
     if (msg) {
+      // Treat the declared header length as authoritative for framing. A type
+      // reader consumes body fields directly, so a hostile length that disagrees
+      // with the body would otherwise misframe every following message. If the
+      // reader consumed MORE than the declared frame, the internal length fields
+      // overran the header (malformed) — drop it and stop the batch. Otherwise
+      // skip any trailing padding so the next message starts exactly at
+      // messageStart + length.
+      const frameEnd = offsetBefore + msg.length
+      const consumed = buf.currentReadOffset()
+      if (consumed > frameEnd) return
+      if (consumed < frameEnd) buf.incrementReadOffset(frameEnd - consumed)
       yield msg
     } else {
       // Unrecognized message type: skip it (by its declared length) so later

@@ -15,6 +15,9 @@ const serializationScratch = new ReadWriteByteBuffer()
 function freezeSet<T>(set: Set<T>): ReadonlySet<T> {
   ;(set as any).add = frozenError
   ;(set as any).clear = frozenError
+  // `delete` also mutates — without stubbing it the "frozen" grow-only set could
+  // still be shrunk at runtime, violating the grow-only contract.
+  ;(set as any).delete = frozenError
 
   return set as ReadonlySet<T>
 }

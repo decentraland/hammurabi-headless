@@ -6,7 +6,12 @@ import { ProcessMessageResultType } from "./conflict-resolution"
 import { dataCompare } from "./dataCompare"
 
 export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, number>): number {
-  const newTimestamp = (timestamps.get(entity) || 0) + 1
+  // Mask to uint32: the timestamp is written to the wire via writeUint32, so an
+  // internal value past 2^32-1 would be truncated on the wire while the host kept
+  // the full-precision number — the two would diverge and the host's own updates
+  // would be rejected as stale. A scene can seed a near-max timestamp on a
+  // host-written component, so this wrap must stay consistent on both sides.
+  const newTimestamp = ((timestamps.get(entity) || 0) + 1) >>> 0
   timestamps.set(entity, newTimestamp)
   return newTimestamp
 }
@@ -58,8 +63,27 @@ export function createUpdateLwwFromCrdt<T>(
   // Repeats are byte-identical while our state is unchanged, so one echo per
   // (entity, stored timestamp) is enough. Owned by the caller (createLwwStore
   // passes its own map) so purgeEntity can clear deleted entities' entries.
-  echoedAtTimestamp: Map<Entity, number> = new Map()
+  echoedAtTimestamp: Map<Entity, number> = new Map(),
+  // Cache of the serialized bytes of each stored value, so the equal-timestamp
+  // tie-break doesn't re-encode the (potentially multi-MB) stored value on EVERY
+  // incoming message. Lazily populated; invalidated by the store on every
+  // mutation of `data` (create/replace/mutate/delete/purge) and on the CRDT
+  // accept/delete paths below. Without it, a scene streaming tiny stale PUTs at
+  // the same timestamp against one large component pins the render loop.
+  serializedCache: Map<Entity, Uint8Array> = new Map()
 ) {
+  // Returns the serialized bytes of the CURRENT stored value, from cache when
+  // possible. serializeToScratch yields a view over a shared buffer, so the cache
+  // entry is a copy (valid until the next mutation invalidates it).
+  function storedBytes(entityId: Entity): Uint8Array {
+    let cached = serializedCache.get(entityId)
+    if (cached === undefined) {
+      cached = new Uint8Array(serializeToScratch(schema, data.get(entityId)!))
+      serializedCache.set(entityId, cached)
+    }
+    return cached
+  }
+
   /**
    * Process the received message only if the lamport number recieved is higher
    * than the stored one. If its lower, we spread it to the network to correct the peer.
@@ -93,7 +117,7 @@ export function createUpdateLwwFromCrdt<T>(
     let currentDataGreater = 0
 
     if (data.has(entityId)) {
-      currentDataGreater = dataCompare(serializeToScratch(schema, data.get(entityId)!), (message as any).data || null)
+      currentDataGreater = dataCompare(storedBytes(entityId), (message as any).data || null)
     } else {
       currentDataGreater = dataCompare(null, (message as any).data)
     }
@@ -117,6 +141,12 @@ export function createUpdateLwwFromCrdt<T>(
     const action = crdtRuleForCurrentState(msg)
     const entityId = msg.entityId as Entity
     switch (action) {
+      case ProcessMessageResultType.NoChanges:
+        // A byte-identical duplicate (same data, same timestamp) or an idempotent
+        // delete: nothing changed. Return false so the caller does NOT re-run
+        // applyChanges (which for mesh/gltf components disposes and rebuilds
+        // Babylon objects) on a no-op message.
+        return false
       case ProcessMessageResultType.StateUpdatedData:
       case ProcessMessageResultType.StateUpdatedTimestamp: {
         if (msg.type === CrdtMessageType.PUT_COMPONENT) {
@@ -129,9 +159,11 @@ export function createUpdateLwwFromCrdt<T>(
           const value = schema.deserialize(buf)
           timestamps.set(entityId, msg.timestamp)
           data.set(entityId, value)
+          serializedCache.delete(entityId)
         } else {
           timestamps.set(entityId, msg.timestamp)
           data.delete(entityId)
+          serializedCache.delete(entityId)
         }
 
         // Stored state changed, so the next conflict needs a fresh correction —
@@ -236,6 +268,9 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
   const timestamps = new Map<Entity, number>()
   const updatedAtTick = new Map<Entity, number>()
   const echoedAtTimestamp = new Map<Entity, number>()
+  // Serialized-bytes cache for the equal-timestamp tie-break (see
+  // createUpdateLwwFromCrdt). Invalidated on every mutation below.
+  const serializedCache = new Map<Entity, Uint8Array>()
   const tickState = { tick: 0 }
 
   return {
@@ -255,12 +290,14 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
       if (data.delete(entity) && markAsDirty) {
         dirtyIterator.add(entity)
       }
+      serializedCache.delete(entity)
       return component || null
     },
     entityDeleted(entity: Entity, markAsDirty: boolean): void {
       if (data.delete(entity) && markAsDirty) {
         dirtyIterator.add(entity)
       }
+      serializedCache.delete(entity)
     },
     purgeEntity(entity: Entity): void {
       data.delete(entity)
@@ -268,6 +305,7 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
       timestamps.delete(entity)
       updatedAtTick.delete(entity)
       echoedAtTimestamp.delete(entity)
+      serializedCache.delete(entity)
     },
     getOrNull(entity: Entity): Readonly<T> | null {
       return data.get(entity) ?? null
@@ -282,11 +320,13 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
       }
       data.set(entity, value)
       dirtyIterator.add(entity)
+      serializedCache.delete(entity)
       return value
     },
     createOrReplace(entity: Entity, value: T): T {
       data.set(entity, value)
       dirtyIterator.add(entity)
+      serializedCache.delete(entity)
       return value
     },
     getMutableOrNull(entity: Entity): T | null {
@@ -295,6 +335,9 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
         return null
       }
       dirtyIterator.add(entity)
+      // The caller may mutate the returned value in place, so the cached
+      // serialization is no longer trustworthy.
+      serializedCache.delete(entity)
       return component
     },
     getMutable(entity: Entity): T {
@@ -323,6 +366,6 @@ export function createLwwStore<T, Num extends number>(componentDeclaration: Comp
     },
     dumpCrdtDeltas: createGetCrdtMessagesForLwwWithTick(componentDeclaration.componentId, updatedAtTick, timestamps, componentDeclaration, data),
     dumpCrdtUpdates: createGetCrdtMessagesForLww(componentDeclaration.componentId, updatedAtTick, timestamps, dirtyIterator, componentDeclaration, data, tickState),
-    updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data, echoedAtTimestamp),
+    updateFromCrdt: createUpdateLwwFromCrdt(componentDeclaration.componentId, timestamps, componentDeclaration, data, echoedAtTimestamp, serializedCache),
   }
 }

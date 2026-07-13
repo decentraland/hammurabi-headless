@@ -23,7 +23,12 @@ export class ReadWriteByteBuffer implements ByteBuffer {
    */
   constructor(buffer?: Uint8Array | undefined, readingOffset?: number | undefined, writingOffset?: number | undefined) {
     this.#buffer = buffer || new Uint8Array(defaultInitialCapacity)
-    this.#view = new DataView(this.#buffer.buffer, this.#buffer.byteOffset)
+    // Bound the view to this buffer's own length. When `buffer` is a subarray
+    // view into a larger ArrayBuffer (common: protobuf-decoded / CRDT payloads),
+    // omitting the length would let the absolute get*/set* accessors read or write
+    // neighbouring bytes of the shared allocation (another message's data) instead
+    // of throwing a RangeError.
+    this.#view = new DataView(this.#buffer.buffer, this.#buffer.byteOffset, this.#buffer.byteLength)
     this.woffset = writingOffset ?? (buffer ? this.#buffer.length : null) ?? 0
     this.roffset = readingOffset ?? 0
   }

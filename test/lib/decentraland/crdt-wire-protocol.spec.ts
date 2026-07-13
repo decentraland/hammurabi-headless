@@ -30,6 +30,75 @@ describe('readAllMessages hardening against untrusted input', () => {
   })
 })
 
+describe('readAllMessages treats the declared length as authoritative for framing', () => {
+  // A recognized type whose declared length disagrees with the body would
+  // otherwise misframe (or over-read) every following message.
+  it('skips the padding of an over-declared message and frames the next one correctly', () => {
+    const buf = new ReadWriteByteBuffer()
+    // DELETE_ENTITY needs 12 bytes but declares 20 (8 bytes of trailing padding).
+    buf.writeUint32(20)
+    buf.writeUint32(CrdtMessageType.DELETE_ENTITY)
+    buf.writeUint32(7) // entityId
+    buf.writeUint32(0) // padding
+    buf.writeUint32(0) // padding
+    // A valid DELETE_ENTITY immediately after the declared frame.
+    DeleteEntity.write({ entityId: 9 as Entity }, buf)
+
+    const messages = Array.from(readAllMessages(buf))
+
+    expect(messages.map((m) => [m.type, m.entityId])).toEqual([
+      [CrdtMessageType.DELETE_ENTITY, 7],
+      [CrdtMessageType.DELETE_ENTITY, 9]
+    ])
+  })
+
+  it('rejects a recognized type whose declared length is below its per-type minimum', () => {
+    const buf = new ReadWriteByteBuffer()
+    // PUT_COMPONENT requires 24 bytes; declaring 20 can't frame its fixed body.
+    buf.writeUint32(20)
+    buf.writeUint32(CrdtMessageType.PUT_COMPONENT)
+    buf.writeUint32(1) // entityId
+    buf.writeUint32(1) // componentId
+    buf.writeUint32(0) // timestamp (fills the buffer to 20 bytes)
+
+    expect(CrdtMessageProtocol.validateFullMessageAvailable(buf)).toBe(false)
+    expect(Array.from(readAllMessages(buf))).toHaveLength(0)
+  })
+
+  it('drops a message whose internal data length overruns its declared frame', () => {
+    const buf = new ReadWriteByteBuffer()
+    // PUT declares length 24 (implies 0 data bytes) but its internal data-length
+    // field claims 4 bytes — the body overruns the declared frame.
+    buf.writeUint32(24)
+    buf.writeUint32(CrdtMessageType.PUT_COMPONENT)
+    buf.writeUint32(5) // entityId
+    buf.writeUint32(6) // componentId
+    buf.writeUint32(0) // timestamp
+    buf.writeUint32(4) // internal data length (inconsistent with declared frame)
+    buf.writeUint32(0) // 4 data bytes
+
+    expect(Array.from(readAllMessages(buf))).toHaveLength(0)
+  })
+
+  it('does not throw when a PUT internal data-length overruns the BUFFER end', () => {
+    const buf = new ReadWriteByteBuffer()
+    // Passes the per-type minimum (length 24), but the internal data-length field
+    // claims a byte that isn't present, so the ByteBuffer read would throw. That
+    // throw must be contained inside readAllMessages (otherwise it escapes the
+    // consumer's for-of and leaves the poison buffer un-shifted at the queue head).
+    buf.writeUint32(24)
+    buf.writeUint32(CrdtMessageType.PUT_COMPONENT)
+    buf.writeUint32(5) // entityId
+    buf.writeUint32(6) // componentId
+    buf.writeUint32(0) // timestamp
+    buf.writeUint32(1) // internal data length = 1, but no data byte follows
+
+    let messages: unknown[] | undefined
+    expect(() => { messages = Array.from(readAllMessages(buf)) }).not.toThrow()
+    expect(messages).toHaveLength(0)
+  })
+})
+
 describe('Component operation tests', () => {
   it('validate corrupt message', () => {
     const buf = new ReadWriteByteBuffer(

@@ -1,6 +1,18 @@
 import { ByteBuffer } from '../ByteBuffer'
 import { CrdtMessageType, CrdtMessageHeader, CRDT_MESSAGE_HEADER_LENGTH } from './types'
 
+// Minimum on-wire length (header included) for each recognized message type.
+// PUT/APPEND carry a 16-byte component header (entity + componentId + timestamp
+// + data-length), DELETE_COMPONENT a 12-byte one, DELETE_ENTITY a 4-byte one.
+// A declared length below its type's minimum means the header can't frame the
+// body, so the type reader would read fields past the declared frame — reject it.
+const MIN_LENGTH_BY_TYPE: Partial<Record<CrdtMessageType, number>> = {
+  [CrdtMessageType.PUT_COMPONENT]: CRDT_MESSAGE_HEADER_LENGTH + 16,
+  [CrdtMessageType.APPEND_VALUE]: CRDT_MESSAGE_HEADER_LENGTH + 16,
+  [CrdtMessageType.DELETE_COMPONENT]: CRDT_MESSAGE_HEADER_LENGTH + 12,
+  [CrdtMessageType.DELETE_ENTITY]: CRDT_MESSAGE_HEADER_LENGTH + 4
+}
+
 /**
  * @public
  */
@@ -23,6 +35,15 @@ export namespace CrdtMessageProtocol {
       return false
     }
     if (rem < messageLength) {
+      return false
+    }
+
+    // Reject a recognized type whose declared length can't hold its fixed body.
+    // (Unrecognized types keep the generic 8-byte minimum and are skipped by
+    // consumeMessage.) rem >= 8 was checked above, so reading the type is in-bounds.
+    const type = buf.getUint32(buf.currentReadOffset() + 4) as CrdtMessageType
+    const minForType = MIN_LENGTH_BY_TYPE[type]
+    if (minForType !== undefined && messageLength < minForType) {
       return false
     }
 

@@ -1,6 +1,6 @@
 import { ByteBuffer, ReadWriteByteBuffer } from "../../../src/lib/decentraland/ByteBuffer"
 import { CrdtMessageType, readAllMessages, readMessage } from "../../../src/lib/decentraland/crdt-wire-protocol"
-import { createLwwStore, createUpdateLwwFromCrdt } from "../../../src/lib/decentraland/crdt-internal/last-write-win-element-set"
+import { createLwwStore, createUpdateLwwFromCrdt, incrementTimestamp } from "../../../src/lib/decentraland/crdt-internal/last-write-win-element-set"
 import { Entity } from "../../../src/lib/decentraland/types"
 import { ComponentDeclaration } from "../../../src/lib/decentraland/crdt-internal/components"
 import { prettyPrintCrdtMessage } from "../../../src/lib/decentraland/crdt-wire-protocol/prettyPrint"
@@ -53,7 +53,10 @@ describe('Conflict resolution rules for LWW-ElementSet based components', () => 
     }, conflictBuffer)
 
     // result assertions
-    expect(updateAccepted).toEqual(true)
+    // A byte-identical duplicate (same value + timestamp) is NOT "accepted": the
+    // store returns false so the caller skips re-applying an unchanged value
+    // (which for mesh/gltf components would needlessly rebuild Babylon objects).
+    expect(updateAccepted).toEqual(false)
 
     // state assertions
     expect(data.get(entityId)).toEqual(1)
@@ -183,7 +186,8 @@ describe('Conflict resolution rules for LWW-ElementSet based components', () => 
     }, conflictBuffer)
 
     // result assertions
-    expect(updateAccepted).toEqual(true)
+    // No-op delete (already deleted at this timestamp): not re-applied.
+    expect(updateAccepted).toEqual(false)
 
     // state assertions
     expect(data.get(entityId)).toEqual(undefined)
@@ -249,7 +253,8 @@ describe('Conflict resolution rules for LWW-ElementSet based components', () => 
     }, conflictBuffer)
 
     // result assertions
-    expect(updateAccepted).toEqual(true)
+    // No-op PUT (same value + timestamp already stored): not re-applied.
+    expect(updateAccepted).toEqual(false)
 
     // state assertions
     expect(data.get(entityId)).toEqual(10)
@@ -442,5 +447,30 @@ describe('integration lww', () => {
     const deltas = new ReadWriteByteBuffer()
     store.dumpCrdtDeltas(deltas, 0)
     expect(Array.from(readAllMessages(deltas))).toEqual([])
+  })
+})
+
+describe('incrementTimestamp', () => {
+  describe('when the stored timestamp is at the uint32 maximum', () => {
+    it('should wrap to 0, matching the on-wire uint32 truncation instead of exceeding 2^32', () => {
+      const timestamps = new Map<Entity, number>()
+      const entity = 7 as Entity
+      timestamps.set(entity, 0xffffffff)
+
+      // Without the mask this would be 0x100000000, which writeUint32 truncates to
+      // 0 on the wire — diverging the host's stored value from what peers see.
+      expect(incrementTimestamp(entity, timestamps)).toEqual(0)
+      expect(timestamps.get(entity)).toEqual(0)
+    })
+  })
+
+  describe('when the stored timestamp is below the maximum', () => {
+    it('should increment by one', () => {
+      const timestamps = new Map<Entity, number>()
+      const entity = 7 as Entity
+      timestamps.set(entity, 41)
+
+      expect(incrementTimestamp(entity, timestamps)).toEqual(42)
+    })
   })
 })
