@@ -7,7 +7,7 @@ import { Scene } from "@dcl/schemas"
 import { connectContextToRpcServer } from "./connect-context-rpc"
 import { TestingServiceDefinition } from "@dcl/protocol/out-js/decentraland/kernel/apis/testing.gen"
 import { startQuickJsSceneRuntime } from '../../quick-js/rpc-scene-runtime'
-import { defaultUpdateLoop, isTransportClosedError } from '../../common-runtime/game-loop'
+import { defaultUpdateLoop, isPortTeardownError, isTransportClosedError } from '../../common-runtime/game-loop'
 
 // Create shared RPC server for this scene context
 const rpcServer = createRpcServer<SceneContext>({})
@@ -76,6 +76,11 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
     await startQuickJsSceneRuntime(clientPort, {
       // create console wrappers
       error(...args) {
+        // The shutdown rejection also echoes back through the scene's OWN error
+        // logging (the SDK catches it in its update loop and console.error's it).
+        // Once the scene is disposed that echo is teardown noise — drop it, but
+        // only the teardown markers, so a real error racing shutdown still logs.
+        if (!ctx.stopped.isPending && args.some((arg) => isTransportClosedError(arg) || isPortTeardownError(arg))) return
         const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
         console.error(`\x1b[90m[${timestamp}]\x1b[0m ❌`, ...args)
       },
@@ -95,7 +100,7 @@ export async function connectSceneContextUsingNodeJs(ctx: SceneContext, loadable
     // racing scene startup (getStartupData / module-load RPCs run before the
     // update loop's own shutdown handling kicks in) — a normal shutdown, not a
     // runtime failure.
-    if (!ctx.stopped.isPending && isTransportClosedError(error)) {
+    if (!ctx.stopped.isPending && (isTransportClosedError(error) || isPortTeardownError(error))) {
       console.log(`[NODEJS] QuickJS runtime stopped during startup for scene: ${scene.display?.title}`)
     } else {
       console.error(`[NODEJS] QuickJS runtime for scene ${scene.display?.title} terminated with error:`, error)

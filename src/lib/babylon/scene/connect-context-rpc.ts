@@ -5,6 +5,7 @@
 
 import { RpcServerPort } from '@dcl/rpc'
 import * as codegen from '@dcl/rpc/dist/codegen'
+import { TsProtoServiceDefinition } from '@dcl/rpc/dist/codegen-types'
 import { EngineApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/engine_api.gen'
 import { RuntimeServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen'
 import { UserIdentityServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen'
@@ -110,13 +111,46 @@ export function getStorageSigningStrategy(
   }
 }
 
+/**
+ * `codegen.registerService` calls `.bind` on every method the service
+ * definition declares, so ONE missing implementation makes the whole module
+ * fail to load ("Cannot read properties of undefined (reading 'bind')") and
+ * breaks every scene that requires it. Dependencies are resolved at the user's
+ * install time, so a published server routinely runs against a NEWER
+ * @dcl/protocol (with new methods) than it was compiled with. Fill any gap
+ * with a rejecting stub instead: the module loads, only the unimplemented
+ * method fails, and the log names it. Exported for tests.
+ */
+export function registerService<Service extends TsProtoServiceDefinition>(
+  port: RpcServerPort<SceneContext>,
+  service: Service,
+  moduleInitializator: (
+    port: RpcServerPort<SceneContext>,
+    context: SceneContext
+  ) => Promise<codegen.RpcServerModule<Service, SceneContext>>
+): void {
+  codegen.registerService(port, service, async (servicePort, context) => {
+    const mod = await moduleInitializator(servicePort, context)
+    const record = mod as Record<string, unknown>
+    for (const key of Object.keys(service.methods)) {
+      if (typeof record[key] !== 'function') {
+        console.error(`⚠️  RPC service ${service.name} declares "${key}" but this server does not implement it`)
+        record[key] = async () => {
+          throw new Error(`${service.name}.${key} is not implemented by this server version`)
+        }
+      }
+    }
+    return mod
+  })
+}
+
 export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
-  codegen.registerService(port, UserActionModuleServiceDefinition, async () => ({
+  registerService(port, UserActionModuleServiceDefinition, async () => ({
     async requestTeleport() {
       return {}
     }
   }))
-  codegen.registerService(port, RestrictedActionsServiceDefinition, async () => ({
+  registerService(port, RestrictedActionsServiceDefinition, async () => ({
     async movePlayerTo() {
       return { success: true }
     },
@@ -133,6 +167,9 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       return { success: true }
     },
     async triggerSceneEmote() {
+      return { success: true }
+    },
+    async stopEmote() {
       return { success: true }
     },
     async showAvatarEmoteWheel() {
@@ -154,7 +191,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       return {}
     }
   }))
-  codegen.registerService(port, RuntimeServiceDefinition, async () => ({
+  registerService(port, RuntimeServiceDefinition, async () => ({
     async getSceneInformation(_payload, context) {
       return {
         baseUrl: context.loadableScene.baseUrl!,
@@ -186,7 +223,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     }
   }))
 
-  codegen.registerService(port, EngineApiServiceDefinition, async () => ({
+  registerService(port, EngineApiServiceDefinition, async () => ({
     async subscribe() {
       throw new Error('not implemented')
     },
@@ -210,7 +247,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     }
   }))
 
-  codegen.registerService(port, CommunicationsControllerServiceDefinition, async () => ({
+  registerService(port, CommunicationsControllerServiceDefinition, async () => ({
     async send() {
       return {
         data: []
@@ -246,7 +283,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     }
   }))
 
-  codegen.registerService(port, CommsApiServiceDefinition, async () => ({
+  registerService(port, CommsApiServiceDefinition, async () => ({
     async getActiveVideoStreams() {
       // Return list of active video streams
       return {
@@ -266,10 +303,24 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         maxPeers: 100,
         currentPeers: 0
       }
+    },
+    // Topic-based pub/sub is not wired to the comms transport yet; these accept
+    // the calls so scenes keep running, but no messages flow through them.
+    async subscribeToTopic() {
+      return {}
+    },
+    async unsubscribeFromTopic() {
+      return {}
+    },
+    async publishData() {
+      return {}
+    },
+    async consumeMessages() {
+      return { messages: [] }
     }
   }))
 
-  codegen.registerService(port, UserIdentityServiceDefinition, async () => ({
+  registerService(port, UserIdentityServiceDefinition, async () => ({
     async getUserData() {
       // Scene-facing: report the unprivileged guest identity, never the server's.
       const identity = await sceneIdentity.deref()
@@ -310,7 +361,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     }
   }))
 
-  codegen.registerService(port, SignedFetchServiceDefinition, async () => ({
+  registerService(port, SignedFetchServiceDefinition, async () => ({
     async signedFetch(req, context) {
       // Sign with the unprivileged scene identity (never the authoritative
       // server), and refuse requests to non-public hosts to prevent SSRF.
@@ -335,8 +386,25 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         let currentUrl = req.url
         let result
 
+        // The realm's own origin is always a permitted destination: it is
+        // operator-supplied (CLI arg), not scene-controlled, and the server
+        // already talks to it. Matters in local preview, where the realm runs
+        // on localhost and serves the scene's storage endpoints — the SSRF
+        // guard would otherwise block them. Re-checked per hop, so a redirect
+        // off the realm origin still runs the guard.
+        let realmOrigin: string | null = null
+        try {
+          realmOrigin = new URL(realm.baseUrl).origin
+        } catch {
+          // Without a parseable realm origin the exemption silently disappears
+          // and local preview breaks again — make that diagnosable.
+          console.warn(`SignedFetch: cannot derive realm origin from "${realm.baseUrl}", realm-origin exemption disabled`)
+        }
+
         for (let hop = 0; ; hop++) {
-          await assertPublicSceneUrl(currentUrl)
+          if (realmOrigin === null || new URL(currentUrl).origin !== realmOrigin) {
+            await assertPublicSceneUrl(currentUrl)
+          }
 
           // Only forward scene-supplied headers while on the original origin. On a
           // cross-origin redirect, drop them (as browsers strip Authorization etc.)
