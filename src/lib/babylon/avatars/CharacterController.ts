@@ -67,6 +67,10 @@ export class CharacterController implements DecentralandSystem {
   constructor(public scene: Scene) {
     this.capsule = CreateCapsule("player", { height: PLAYER_HEIGHT, radius: 0.4 }, scene)
     this.capsule.material = colliderMaterial(scene)
+    // Match the collision ellipsoid to the capsule. Babylon's default is
+    // (0.5, 1, 0.5), so moveWithCollisions would otherwise collide as a 2m-tall,
+    // 1m-wide body, diverging from the declared capsule and the browser client.
+    this.capsule.ellipsoid.set(0.4, PLAYER_HEIGHT / 2, 0.4)
 
     this.camera = new ArcRotateCamera(
       "3rd person camera",
@@ -475,7 +479,11 @@ export class CharacterController implements DecentralandSystem {
     this.idleFallTime = 0
     this.jumpTime = 0
     this.movFallTime = 0
-    this.grounded = true
+    // NOT grounded: engine-main raises the capsule by PLAYER_HEIGHT after a
+    // teleport, and doIdle early-returns while grounded, so marking grounded here
+    // left the avatar hovering mid-air (gravity never ran) until the first input.
+    // Let the next frame settle it onto the ground.
+    this.grounded = false
   }
 }
 

@@ -51,7 +51,6 @@ export function createParcelOutline(scene: BABYLON.Scene, basePosition: string, 
       if (p !== western) {
         const p1 = new BABYLON.Vector3(0, 0, 0)
         gridToParcel(base, x, y, p1)
-        p1.z = p1.z
         const p2 = p1.clone()
         p2.z = p2.z + PARCEL_SIZE_METERS
         points.push([p1, p2])
@@ -59,7 +58,6 @@ export function createParcelOutline(scene: BABYLON.Scene, basePosition: string, 
       if (p !== northern) {
         const p1 = new BABYLON.Vector3(0, 0, 0)
         gridToParcel(base, x, y, p1)
-        p1.x = p1.x
         const p2 = p1.clone()
         p2.x = p2.x + PARCEL_SIZE_METERS
         points.push([p1, p2])

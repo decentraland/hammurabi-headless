@@ -5,7 +5,6 @@ import { globalCoordinatesToSceneCoordinatesToRef } from '../coordinates'
 import { Entity } from '../../../decentraland/types'
 import { engineInfoComponent } from '../../../decentraland/sdk-components/engine-info'
 import { realmInfoComponent } from '../../../decentraland/sdk-components/realm-info'
-import { EntityUtils } from '../../../decentraland/crdt-internal/generational-index-pool'
 import { playerEntityAtom, currentRealm } from '../../../decentraland/state'
 import { isLocalhostRealm } from '../../../decentraland/realm/resolution'
 
@@ -29,7 +28,10 @@ const READONLY_IDENTITY = Quaternion.Identity()
 // this function defines if the engine should accept updates to the entity by its
 // entity number
 export function entityIsInRange(entity: Entity, range: [number, number]) {
-  const [entityNumber, _version] = EntityUtils.fromEntityId(entity)
+  // Inline the low-16-bits entity-number extraction: this runs for every CRDT
+  // message (thousands/frame under load), and EntityUtils.fromEntityId allocates
+  // a [number, number] tuple per call.
+  const entityNumber = (entity & 0xffff) >>> 0
   return entityNumber < range[1] && entityNumber >= range[0]
 }
 

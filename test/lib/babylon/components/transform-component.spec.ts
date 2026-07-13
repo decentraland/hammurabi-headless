@@ -538,6 +538,49 @@ describe('cyclic recovery with permutations', () => {
     })
   })
 })
+testWithEngine("root entity (0) component writes are not dropped by the entity-range guard", {
+  baseUrl: '/',
+  entity: { content: [], metadata: {} as Scene, type: 'scene' },
+  urn: '123'
+}, ($) => {
+  beforeEach(() => $.startEngine())
+
+  test('a PUT_COMPONENT targeting entity 0 reaches the component store', async () => {
+    await $.ctx.crdtSendToRenderer({
+      data: new CrdtBuilder()
+        .put(transformComponent, 0 as Entity, 1, { ...baseTransform, parent: 0 })
+        .finish()
+    })
+
+    // The range floor of 1 exists to protect entity 0 from DELETION; it must NOT
+    // drop component writes to the root entity. Re-enabling the guard for
+    // PUT_COMPONENT (a regression that was reverted) would skip updateFromCrdt and
+    // leave the store without entity 0.
+    const store = $.ctx.components[transformComponent.componentId]
+    expect(store.has(0 as Entity)).toBe(true)
+  })
+})
+
+describe('transform component deserialize', () => {
+  describe('when the wire bytes contain non-finite floats (untrusted scene input)', () => {
+    it('should sanitize NaN/Infinity components to 0 so they cannot poison Babylon math', () => {
+      const buf = new ReadWriteByteBuffer()
+      // position (NaN, 1, +Inf), rotation (0, 0, 0, -Inf), scale (NaN, 2, 3), parent 5
+      buf.writeFloat32(NaN); buf.writeFloat32(1); buf.writeFloat32(Infinity)
+      buf.writeFloat32(0); buf.writeFloat32(0); buf.writeFloat32(0); buf.writeFloat32(-Infinity)
+      buf.writeFloat32(NaN); buf.writeFloat32(2); buf.writeFloat32(3)
+      buf.writeUint32(5)
+
+      const t = transformComponent.deserialize(buf)
+
+      expect(t.position.equals(new Vector3(0, 1, 0))).toBe(true)
+      expect(t.rotation.equals(new Quaternion(0, 0, 0, 0))).toBe(true)
+      expect(t.scale.equals(new Vector3(0, 2, 3))).toBe(true)
+      expect(t.parent).toEqual(5)
+    })
+  })
+})
+
 export function* dumpTree(entity: BabylonEntity, depth: number = 0) {
   yield '   '.repeat(Math.max(depth - 1, 0)) + (depth ? "└──" : '') + entity.entityId.toString(16).toUpperCase()
   for (const child of entity.childrenEntities()) {

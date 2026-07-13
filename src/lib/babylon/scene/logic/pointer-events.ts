@@ -43,20 +43,29 @@ function anySceneHasPointerEvents(): boolean {
 }
 
 export function pickPointerEventsMesh(scene: Scene) {
+  // Drop a hovered entity that was disposed (hot reload / scene unload): the
+  // module-level state would otherwise pin the disposed entity and its
+  // PickingInfo (a live mesh reference) until the next hover change, and a stale
+  // click could write into a disposed context's store.
+  if (lastPickedEntity?.isDisposed()) {
+    lastPickedEntity = null
+    lastPickPoint = null
+  }
+
   // The center-screen pick below is a full-scene CPU raycast (predicate over
   // every mesh, triangle-level tests) that runs every frame — skip it entirely
   // when no loaded scene has a PointerEvents component, since hover synthesis is
   // its only consumer on this headless server. When an entity is currently
-  // hovered, still run one more pass so HOVER_LEAVE fires after the last
-  // PointerEvents component disappears.
+  // hovered, still run one more pass so its hover state is reconciled (a
+  // HOVER_LEAVE fires if the entity still has a PointerEvents component).
   if (!lastPickedEntity && !anySceneHasPointerEvents()) return
 
-  const pickedEntity = pickActivePointerEventsEntity(scene)
+  const pick = pickActivePointerEventsEntity(scene)
 
-  hoverNewEntity(pickedEntity, scene)
+  hoverNewEntity(pick)
 }
 
-export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | null {
+export function pickActivePointerEventsEntity(scene: Scene): { entity: BabylonEntity; pickInfo: PickingInfo } | null {
   const camera = scene.activeCamera
 
   if (!camera) return null
@@ -80,10 +89,11 @@ export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | nul
     camera
   );
 
+  // Does NOT mutate the module state — the caller reconciles hover transitions so
+  // a HOVER_LEAVE fires with the PREVIOUS entity's pick data, not this one's.
   if (pickInfo.pickedMesh && pickInfo.pickedPoint) {
-    lastPickPoint = pickInfo
     const parentEntity = getParentEntity(pickInfo.pickedMesh)
-    return parentEntity
+    if (parentEntity) return { entity: parentEntity, pickInfo }
   }
 
   return null
@@ -103,21 +113,29 @@ function addPointerEventResult(entity: BabylonEntity, result: Omit<PBPointerEven
   })
 }
 
-function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
-  if (lastPickedEntity === entity) return
+function hoverNewEntity(pick: { entity: BabylonEntity; pickInfo: PickingInfo } | null) {
+  const entity = pick?.entity ?? null
 
-  // HOVER_LEAVE targets the previous entity, so it must fire BEFORE the
-  // reassignment; HOVER_ENTER targets the new one, so it fires after. (The
-  // previous version compared lastPickedEntity !== entity AFTER assigning it,
-  // so HOVER_ENTER could never fire.)
+  if (lastPickedEntity === entity) {
+    // Same entity still hovered: refresh the pick point so a click this frame
+    // reports the current hit position.
+    if (pick) lastPickPoint = pick.pickInfo
+    return
+  }
+
+  // HOVER_LEAVE targets the PREVIOUS entity and must fire with the PREVIOUS pick
+  // point, so it runs BEFORE we overwrite the module state below. HOVER_ENTER
+  // targets the new entity and fires after. (Hover has no specific input button,
+  // so it reports IA_ANY — the reference explorer's value — not UNRECOGNIZED.)
   if (lastPickedEntity) {
-    interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.UNRECOGNIZED)
+    interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.IA_ANY)
   }
 
   lastPickedEntity = entity
+  lastPickPoint = pick?.pickInfo ?? null
 
   if (entity) {
-    interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.UNRECOGNIZED)
+    interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.IA_ANY)
   }
 
   // headless: no hover-text label UI to update

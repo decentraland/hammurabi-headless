@@ -18,9 +18,22 @@ import { ColliderLayer } from "@dcl/protocol/out-js/decentraland/sdk/components/
  * 3. Updates the RaycastResult component with the result of the query
  * 4. If necessary, removes the raycast from pendingRaycastOperations
  */
+const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
+const EMPTY_PICKING_RESULTS: BABYLON.PickingInfo[] = []
+
 export function processRaycasts(scene: SceneContext) {
+  // Nothing pending: avoid the Array.from allocation (this runs every lateUpdate,
+  // with NO quota, so it must be cheap when idle).
+  if (scene.pendingRaycastOperations.size === 0) return
+
   const RaycastResult = scene.components[raycastResultComponent.componentId]
   const Raycast = scene.components[raycastComponent.componentId]
+
+  // Cache the filtered mesh list per collision mask for THIS pass. Masks repeat
+  // across rays (grounding sensors / line-of-sight share one) and the scene's
+  // collider set can't change mid-pass, so this turns an O(rays × meshes) subtree
+  // walk into O(distinct-masks × meshes).
+  const meshesByMask = new Map<number, BABYLON.AbstractMesh[]>()
 
   // clone the set into an array to mutate the set while iterating
   const iter = Array.from(scene.pendingRaycastOperations)
@@ -32,12 +45,25 @@ export function processRaycasts(scene: SceneContext) {
       if (entity && entity.appliedComponents.raycast) {
         const ray = computeRayDirection(scene, raycast, entity.appliedComponents.raycast.ray, entity)
 
-        // get a list of all possible meshes to project this ray to
-        const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
-        const intersectableMeshes = Array.from(pickMeshesForMask(scene.rootNode, raycast.collisionMask ?? DEFAULT_RAYCAST_MASK))
+        // Honor maxDistance: Babylon's intersect tests clip to ray.length, so a
+        // short proximity ray would otherwise report hits up to the default reach.
+        // Set it UNCONDITIONALLY (the Ray is reused across frames per entity, so a
+        // previous frame's maxDistance would linger if we only set it when > 0);
+        // fall back to the 999 default the Ray is created with when unset.
+        ray.length = Number.isFinite(raycast.maxDistance) && raycast.maxDistance > 0 ? raycast.maxDistance : 999
 
-        // then perform the actual raycast
-        const results = ray.intersectsMeshes(intersectableMeshes, false)
+        let results = EMPTY_PICKING_RESULTS
+        // RQT_NONE: the protocol says do not perform the raycast, only emit an
+        // empty result — skip the mesh collection and intersection entirely.
+        if (raycast.queryType !== RaycastQueryType.RQT_NONE) {
+          const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
+          let meshes = meshesByMask.get(mask)
+          if (!meshes) {
+            meshes = Array.from(pickMeshesForMask(scene.rootNode, mask))
+            meshesByMask.set(mask, meshes)
+          }
+          results = ray.intersectsMeshes(meshes, false)
+        }
 
         const raycastResult = raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
 
@@ -105,6 +131,9 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
   if (!raycast.direction) {
     // the default value if direction is missing is a local-space forward vector
     Vector3.TransformNormalToRef(Vector3.Forward(), entity.getWorldMatrix(), ray.direction);
+    // Normalize: transforming by the world matrix bakes the entity's scale into
+    // the direction magnitude (the global* branches below already normalize).
+    ray.direction.normalize()
   } else if (raycast.direction?.$case === 'localDirection') {
     // then localDirection, is used to detect collisions in a path
     // i.e. Vector3.Forward(), it takes into consideration the rotation of
@@ -119,6 +148,7 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
       entity.getWorldMatrix(),
       ray.direction
     );
+    ray.direction.normalize()
   } else if (raycast.direction?.$case === 'globalDirection') {
     ray.direction.set(
       raycast.direction?.globalDirection.x,
@@ -163,7 +193,10 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
 export function pickingToRaycastHit(scene: SceneContext, pickingInfo: BABYLON.PickingInfo, ray: BABYLON.Ray): RaycastHit {
   return {
     normalHit: pickingInfo.getNormal(true) || undefined,
-    direction: ray.direction,
+    // Clone: ray.direction is a reused mutable vector (raycast-component keeps one
+    // Ray per entity across frames), so storing the live reference into the LWW
+    // result would let a later raycast mutate already-stored hit bytes.
+    direction: ray.direction.clone(),
     globalOrigin: globalCoordinatesToSceneCoordinates(scene, ray.origin),
     length: pickingInfo.distance,
     position: globalCoordinatesToSceneCoordinates(scene, pickingInfo.pickedPoint!),

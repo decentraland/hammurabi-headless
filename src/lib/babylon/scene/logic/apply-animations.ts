@@ -21,18 +21,13 @@ export function applyAnimations(entity: BabylonEntity) {
       let clip: BABYLON.AnimationGroup | void = animationGroups.find($ => $.name === animationAttributes.clip)
 
       if (clip) {
-        if (animationAttributes.speed !== undefined) {
-          clip.speedRatio = animationAttributes.speed
-        }
+        // Omitted speed/weight default to the protocol's 1.0 (NOT "keep whatever
+        // the previous PUT set"), and a non-finite scene value is clamped to 1.
+        const speed = animationAttributes.speed ?? 1
+        clip.speedRatio = Number.isFinite(speed) ? speed : 1
 
         if (animationAttributes.shouldReset) {
           clip.reset()
-        }
-
-        if (!clip.onAnimationEndObservable.hasObservers()) {
-          clip.onAnimationEndObservable.addOnce(() => {
-            // dispatchEvent('onAnimationEnd', { clipName: animationAttributes.clip })
-          })
         }
 
         if (animationAttributes.playing && !(clip as any).isPlaying) {
@@ -41,9 +36,8 @@ export function applyAnimations(entity: BabylonEntity) {
           clip.pause()
         }
 
-        if (animationAttributes.weight !== undefined) {
-          clip.setWeightForAllAnimatables(animationAttributes.weight)
-        }
+        const weight = animationAttributes.weight ?? 1
+        clip.setWeightForAllAnimatables(Number.isFinite(weight) ? weight : 1)
       }
     }
   } else {

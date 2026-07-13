@@ -13,10 +13,18 @@ export type Transform = {
 export const transformComponent: ComponentDeclaration<Transform, 1> = {
   componentId: 1,
   deserialize(buffer) {
+    // Sanitize non-finite floats from untrusted scene CRDT to 0: a NaN/Infinity
+    // here would poison Babylon world matrices and the character-controller ground
+    // detection (the peer-avatar path already drops non-finite transforms). Reads
+    // stay in wire order (JS evaluates call args left-to-right).
+    const f = () => {
+      const n = buffer.readFloat32()
+      return Number.isFinite(n) ? n : 0
+    }
     return {
-      position: new Vector3(buffer.readFloat32(), buffer.readFloat32(), buffer.readFloat32()),
-      rotation: new Quaternion(buffer.readFloat32(), buffer.readFloat32(), buffer.readFloat32(), buffer.readFloat32()),
-      scale: new Vector3(buffer.readFloat32(), buffer.readFloat32(), buffer.readFloat32()),
+      position: new Vector3(f(), f(), f()),
+      rotation: new Quaternion(f(), f(), f(), f()),
+      scale: new Vector3(f(), f(), f()),
       parent: buffer.readUint32()
     }
   },
@@ -65,8 +73,11 @@ export function applyNewTransform(entity: BabylonEntity, transform: Transform | 
       parent: transform.parent
     }
 
-    // always keep only 10 commands in the array
-    while (commands.length > 10) {
+    // Keep only the latest command: the interpolation/tween consumers that read
+    // the 10-deep history are currently disabled and only the last command is
+    // used (BabylonEntity), so retaining 10 was pure per-tick allocation + memory.
+    // Restore the larger bound if/when interpolation lands.
+    while (commands.length > 1) {
       commands.shift()
     }
   } else {

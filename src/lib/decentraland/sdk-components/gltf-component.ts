@@ -28,8 +28,6 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
     const context = entity.context.deref()
     if (!context) return
 
-    const newSrc = newValue.src
-
     // inform the component is loading
     const loadingStateComponent = context.components[gltfContainerLoadingStateComponent.componentId]
     loadingStateComponent.createOrReplace(entity.entityId, {
@@ -47,8 +45,15 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
       // teardown / hot reload): instantiating now would parent orphan meshes into
       // the shared scene, and AssetManager.dispose() then frees the container's
       // geometry out from under them.
+      // Gate on object IDENTITY, not src-string equality: a scene can flip src
+      // A→B→A within one batch, producing multiple distinct applied objects that
+      // share the same src. A string check lets a STALE closure (its object no
+      // longer current) pass, instantiate onto its own dead object, and leak that
+      // instance tree into the shared Babylon scene (the current object's
+      // removeCurrentGltf never sees it). Identity ensures exactly the closure
+      // whose object is still current instantiates.
       const isCurrentValueUpdated =
-        !entity.isDisposed() && newSrc === entity.appliedComponents.gltfContainer?.value.src
+        !entity.isDisposed() && entity.appliedComponents.gltfContainer === newGltfContainerValue
       if (isCurrentValueUpdated) {
         // remove the previous gltf
         removeCurrentGltf(entity)
@@ -76,7 +81,7 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
         })
       }
     }).catch(() => {
-      const isCurrentValueUpdated = newSrc === entity.appliedComponents.gltfContainer?.value.src
+      const isCurrentValueUpdated = entity.appliedComponents.gltfContainer === newGltfContainerValue
 
       if (isCurrentValueUpdated) {
         // inform the component is failed loading
@@ -98,6 +103,11 @@ export const gltfContainerComponent = declareComponentUsingProtobufJs(PBGltfCont
     })
   } else if (!newValue) {
     removeCurrentGltf(entity)
+
+    // Clear the applied component so an in-flight load (its `.then` gates on
+    // object identity) can't resurrect the model or re-create the loading-state
+    // component the CRDT just deleted.
+    entity.appliedComponents.gltfContainer = undefined
 
     // remove the loading state of the removed entity
     const loadingStateComponent = entity.context.deref()?.components[gltfContainerLoadingStateComponent.componentId]

@@ -47,10 +47,13 @@ export async function createLocalAvatarSceneSystem(scene: Scene, currentAvatar: 
   }
   setAvatarShapeFromAvatar(currentAvatar)
 
+  // Hoisted so update() doesn't allocate a fresh quota closure every frame.
+  const alwaysHasQuota = () => true
+
   return {
     playerEntity,
     update() {
-      localAvatarScene.update(() => true)
+      localAvatarScene.update(alwaysHasQuota)
     },
     lateUpdate() {
       localAvatarScene.lateUpdate()

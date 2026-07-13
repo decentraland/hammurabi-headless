@@ -5,8 +5,6 @@ import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/
 import { BabylonEntity } from '../BabylonEntity'
 import { bitIntersectsAndContainsAny } from '../../../misc/bit-operations'
 
-export const floorMeshes: AbstractMesh[] = []
-
 const colliderSymbol = Symbol('isCollider')
 
 export const colliderMaterial = memoize((scene: Scene) => {
@@ -32,29 +30,10 @@ export function setColliderMask(mesh: AbstractMesh, layers: number) {
 
   if (mesh.name.endsWith('_collider')) {
     mesh.material = colliderMaterial(mesh.getScene())
-    addFloorMesh(mesh)
   }
 
   mesh.checkCollisions = (layers & ColliderLayer.CL_PHYSICS) != 0
   mesh.isPickable = (layers & ColliderLayer.CL_POINTER) != 0
-}
-
-export function addFloorMesh(mesh: AbstractMesh) {
-  // add only when NOT already present (the previous inverted check meant no
-  // collider mesh was ever added — only the ambient ground reached the list)
-  const ix = floorMeshes.indexOf(mesh)
-  if (ix === -1) {
-    floorMeshes.push(mesh)
-    // Registered on first add only: setColliderMask runs on EVERY accepted
-    // GltfContainer PUT, and an unconditional addOnce there grew each mesh's
-    // observer array by one closure per PUT for the mesh's lifetime.
-    mesh.onDisposeObservable.addOnce(() => {
-      const i = floorMeshes.indexOf(mesh)
-      if (i != -1) {
-        floorMeshes.splice(i, 1)
-      }
-    })
-  }
 }
 
 export function getColliderLayers(mesh: AbstractMesh): number {

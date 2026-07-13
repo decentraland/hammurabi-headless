@@ -149,9 +149,13 @@ export class BabylonEntity extends BABYLON.TransformNode {
   _afterComputeWorldMatrix() {
     const camera = this.getScene().activeCamera
 
-    if (this.appliedComponents.billboard && camera) {
-      const billboardMode = this.appliedComponents.billboard.billboardMode ?? BillboardMode.BM_ALL
+    const billboardMode = this.appliedComponents.billboard?.billboardMode ?? BillboardMode.BM_ALL
 
+    // BM_NONE (=0) means "no billboarding". It is NOT caught by `?? BM_ALL` (0 is
+    // not nullish), so without this guard the branch below would zero all three
+    // euler axes and force the entity's world rotation to identity every frame,
+    // destroying the Transform rotation of the entity and its whole subtree.
+    if (this.appliedComponents.billboard && billboardMode !== BillboardMode.BM_NONE && camera) {
       // save translation and scaling components of the world matrix calculated by
       // Babylon (the translation IS the entity's global position — transforming
       // the origin by the world matrix yields the same vector)
@@ -199,8 +203,11 @@ export class BabylonEntity extends BABYLON.TransformNode {
   // this function should return false if the world matrix needs to be recalculated
   // it is called internally by Babylon.js internal code
   _isSynchronized() {
-    const hasBillboard = !!this.appliedComponents.billboard
-    return !hasBillboard && super._isSynchronized()
+    // A BM_NONE billboard is inert (see _afterComputeWorldMatrix), so it must not
+    // force a per-frame world-matrix recompute either.
+    const billboard = this.appliedComponents.billboard
+    const hasActiveBillboard = !!billboard && (billboard.billboardMode ?? BillboardMode.BM_ALL) !== BillboardMode.BM_NONE
+    return !hasActiveBillboard && super._isSynchronized()
   }
 
   /**
@@ -224,6 +231,11 @@ export class BabylonEntity extends BABYLON.TransformNode {
       }
   }
 
+  // NOTE: the base-class recurse/dispose-materials flags are intentionally
+  // ignored. SceneContext disposes every entity individually (removeEntity loop)
+  // and frees the parcel outline explicitly, so this always performs a
+  // NON-recursive dispose (children are detached, not recursively disposed) to
+  // avoid double-disposing entities that the loop already handled.
   dispose(_doNotRecurse?: boolean | undefined, _disposeMaterialAndTextures?: boolean | undefined): void {
     // first dispose all components
     for (const [_, component] of this.usedComponents) {
