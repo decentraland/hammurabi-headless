@@ -76,7 +76,13 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   `connect-context-rpc.ts` `sendBinary` caps peers/messages/size to bound
   scene→LiveKit amplification, and its `signedFetch` follows redirects MANUALLY,
   re-running the SSRF guard on every hop (fetch would otherwise auto-follow a
-  redirect onto a private host); both `scene.update()` and `scene.lateUpdate()`
+  redirect onto a private host) — the realm's OWN origin is exempt from the
+  guard (operator-supplied via CLI, not scene-controlled; local preview serves
+  the scene's storage endpoints from localhost, which the guard would block);
+  `connect-context-rpc.ts` registers services through a drift-tolerant wrapper
+  because @dcl/protocol is resolved at user-install time and may declare methods
+  this server doesn't implement — a missing method must degrade to a rejecting
+  stub, never fail the whole module load (@dcl/rpc binds every declared method); both `scene.update()` and `scene.lateUpdate()`
   are wrapped in try/catch (`update-scheduler.ts`) so a malformed CRDT can't crash
   the shared render loop; the XHR polyfill caps response size and treats non-2xx
   as an error (never feeds an error body to the native glTF parser);
