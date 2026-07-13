@@ -2,17 +2,35 @@ import { RuntimeAbstraction } from "./types"
 
 const MIN_FRAME_TIME = 24
 
+// Extract an error message that survives the VM round-trip: host-side rejections
+// arrive as Error instances, errors bubbled through scene code as marshalled
+// objects carrying a `message` property.
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  const message = (err as { message?: unknown })?.message
+  return String(message ?? err)
+}
+
 /**
  * True when `err` is the rejection @dcl/rpc's dispatcher hands every in-flight
  * request as its transport closes — the marker of a call abandoned by shutdown
  * (hot reload closing the scene port), not of a scene failure. The message
- * survives the VM round-trip as the `message` property of the marshalled
- * rejection, so this works both for host-side rejections and for errors that
- * bubbled through scene code.
+ * survives the VM round-trip, so this works both for host-side rejections and
+ * for errors that bubbled through scene code.
  */
 export function isTransportClosedError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String((err as any)?.message ?? err)
-  return message.includes('RPC Transport closed')
+  return errorMessage(err).includes('RPC Transport closed')
+}
+
+/**
+ * The other rejection flavor a shutdown can produce: a request already queued
+ * when the transport closed reaches the server AFTER `removeTransport` dropped
+ * its ports, so instead of the dispatcher's transport-closed rejection the
+ * client gets the server's "invalid portId" RemoteError. Same teardown race,
+ * different loser.
+ */
+export function isPortTeardownError(err: unknown): boolean {
+  return errorMessage(err).includes('invalid portId')
 }
 
 // this is the default update loop used by the scenes. it can be overriden by tests
@@ -45,7 +63,7 @@ export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
     // closes the port while an onUpdate awaits an RPC that will never answer)
     // is a shutdown, not a scene failure. Only surface errors from a live scene.
     if (opts.isRunning()) throw err
-    if (!isTransportClosedError(err)) {
+    if (!isTransportClosedError(err) && !isPortTeardownError(err)) {
       // The port closed while this error was in flight, but the error is not
       // the shutdown rejection itself: a genuine scene failure racing the
       // shutdown. The runtime is already gone, so log it instead of losing it.
