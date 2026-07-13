@@ -10,9 +10,9 @@ import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
 import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
-import { playerEntityManager } from "./player-entity-manager"
+import { PlayerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
-import { robustFetch, drainResponse } from "../../misc/network"
+import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -22,6 +22,10 @@ import { robustFetch, drainResponse } from "../../misc/network"
  * coordinate system, so the Transforms written here are only valid for that scene.
  */
 export function createAvatarCommunicationSystem(transport: CommsTransportWrapper, worldToScene: (position: Vector3) => Vector3) {
+  // Per-system entity manager. Previously a process-wide singleton, so one
+  // system's dispose() (clear()) wiped every other system's peer→entity mappings.
+  // Safe today (single active scene) but a footgun if scenes ever run concurrently.
+  const playerEntityManager = new PlayerEntityManager()
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
   const AvatarEquippedData = createLwwStore(avatarEquippedDataComponent)
@@ -80,6 +84,24 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const profileFetchState = new Map<string, { attemptedVersion: number; lastFetchAt: number }>()
   const PROFILE_FETCH_COOLDOWN_MS = 10_000
 
+  // Cross-session fetch cooldown. profileFetchState is deleted on disconnect, and
+  // handlePeerConnected re-emits a version-1 announcement on every (re)connect, so
+  // a peer holding a reusable room token could reset its Catalyst fetch budget by
+  // rapidly leaving and rejoining. This timestamp SURVIVES disconnect and is
+  // consulted before every fetch, so the 10s cap holds across reconnects. Bounded
+  // + LRU-evicted (oldest first) so it can't grow without limit over a session.
+  const MAX_FETCH_COOLDOWN_ENTRIES = 4096
+  const recentProfileFetch = new Map<string, number>()
+  function noteProfileFetch(address: string, at: number) {
+    recentProfileFetch.delete(address) // re-insert to mark as most-recently-used
+    recentProfileFetch.set(address, at)
+    while (recentProfileFetch.size > MAX_FETCH_COOLDOWN_ENTRIES) {
+      const oldest = recentProfileFetch.keys().next().value
+      if (oldest === undefined) break
+      recentProfileFetch.delete(oldest)
+    }
+  }
+
   function normalizeAddress(address: string) {
     return address.toLowerCase()
   }
@@ -98,7 +120,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         throw new Error(`Failed to fetch profile: ${response.status}`)
       }
 
-      const data: any = await response.json()
+      // This fetch is triggered by an untrusted peer's profile-version
+      // announcement, so cap the body like the other host fetch paths instead of
+      // buffering an unbounded response.json().
+      const data: any = JSON.parse(await readBodyCapped(response, DEFAULT_MAX_BODY_BYTES))
       return data[0]?.avatars?.[0]
     } catch (error) {
       console.error('Failed to fetch profile:', error)
@@ -127,13 +152,18 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // so a transient failure is still retried after the cooldown.
     if (state && announcedVersion <= state.attemptedVersion) return
     // Rate-limit per peer so a peer announcing ever-higher versions can't drive
-    // unbounded outbound fetches.
+    // unbounded outbound fetches. Check BOTH the per-session state and the
+    // cross-session cooldown (the latter survives disconnect, so reconnect churn
+    // can't reset the budget).
     const now = Date.now()
     if (state && now - state.lastFetchAt < PROFILE_FETCH_COOLDOWN_MS) return
+    const lastCrossSession = recentProfileFetch.get(address)
+    if (lastCrossSession !== undefined && now - lastCrossSession < PROFILE_FETCH_COOLDOWN_MS) return
 
     // Reserve the fetch slot (for the cooldown) but keep any prior attemptedVersion
     // so an in-flight failure doesn't wrongly suppress a retry.
     profileFetchState.set(address, { attemptedVersion: state?.attemptedVersion ?? -1, lastFetchAt: now })
+    noteProfileFetch(address, now)
 
     try {
       const profile = await fetchProfileFromCatalyst(address, lambdasEndpoint)
@@ -352,6 +382,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   // Public API for managing the avatar system
   return {
+    // This system's own entity manager (per-system, not a global singleton), so
+    // consumers/tests can resolve a peer's entity from the instance that owns it.
+    playerEntityManager,
+
     // Entity range this system manages
     range: [32, 256] as [number, number],
 
@@ -392,6 +426,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
           playerEntityManager.clear()
           profileCache.clear()
           profileFetchState.clear()
+          recentProfileFetch.clear()
           deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {
@@ -426,6 +461,8 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
       playerEntityManager.clear()
       profileCache.clear()
+      profileFetchState.clear()
+      recentProfileFetch.clear()
       deletedEntities.clear()
     }
   }

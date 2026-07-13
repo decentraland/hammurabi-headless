@@ -4,14 +4,13 @@ import { ReadWriteByteBuffer } from '../../../../src/lib/decentraland/ByteBuffer
 import { readAllMessages } from '../../../../src/lib/decentraland/crdt-wire-protocol'
 import { CrdtMessageType } from '../../../../src/lib/decentraland/crdt-wire-protocol/types'
 import { createAvatarCommunicationSystem } from '../../../../src/lib/decentraland/communications/avatar-communication-system'
-import { playerEntityManager } from '../../../../src/lib/decentraland/communications/player-entity-manager'
 import { transformComponent } from '../../../../src/lib/decentraland/sdk-components/transform-component'
 
 // Replaces the retired comms-virtual-scene-system spec: the avatar
 // communication system is now the VirtualScene implementation whose
 // per-subscription delta semantics and DELETE_ENTITY tombstones were pinned
 // there. Assertions are semantic (decoded messages), not byte-exact, because
-// entity allocation moved to the shared playerEntityManager.
+// entity allocation is delegated to the system's own playerEntityManager.
 
 // The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
 // so the stub uses the same library instead of a hand-rolled copy of it.
@@ -32,7 +31,6 @@ describe('avatar communication system as a virtual scene', () => {
   let system: ReturnType<typeof createAvatarCommunicationSystem>
 
   beforeEach(() => {
-    playerEntityManager.clear()
     transport = { events: makeEmitter() }
     system = createAvatarCommunicationSystem(transport as any, (position: Vector3) => position.clone())
   })
@@ -95,7 +93,7 @@ describe('avatar communication system as a virtual scene', () => {
 
       transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
       system.update()
-      peerEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+      peerEntity = system.playerEntityManager.getEntityForAddress('0xpeer')!
       // Both subscriptions have seen the entity before the disconnect.
       subscriptionA.getUpdates(new ReadWriteByteBuffer())
       subscriptionB.getUpdates(new ReadWriteByteBuffer())

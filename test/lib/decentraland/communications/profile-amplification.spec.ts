@@ -4,13 +4,20 @@
 
 // robustFetch is mocked so no real Catalyst request is made and we can count how
 // many outbound profile fetches an untrusted peer's announcements trigger.
-jest.mock('../../../../src/lib/misc/network', () => ({ robustFetch: jest.fn() }))
+// readBodyCapped/drainResponse are the other network helpers the profile path
+// uses; readBodyCapped delegates to the mocked response.json() so the success
+// path (profile parsing/caching) is exercised.
+jest.mock('../../../../src/lib/misc/network', () => ({
+  robustFetch: jest.fn(),
+  readBodyCapped: jest.fn(async (response: any) => JSON.stringify(await response.json())),
+  drainResponse: jest.fn(async () => undefined),
+  DEFAULT_MAX_BODY_BYTES: 10 * 1024 * 1024
+}))
 
 const { robustFetch } = require('../../../../src/lib/misc/network')
 const {
   createAvatarCommunicationSystem
 } = require('../../../../src/lib/decentraland/communications/avatar-communication-system')
-const { playerEntityManager } = require('../../../../src/lib/decentraland/communications/player-entity-manager')
 const robustFetchMock = robustFetch as jest.Mock
 
 // The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
@@ -26,7 +33,8 @@ describe('avatar profile-fetch amplification guard', () => {
   let transport: any
 
   beforeEach(() => {
-    playerEntityManager.clear()
+    // Each system owns its own entity manager, so there is no shared process
+    // state to reset between tests.
     robustFetchMock.mockReset()
     // The real profile comes back with a version LOWER than the peer announced,
     // so the announced version is never satisfied by the cache — the exact
@@ -65,6 +73,38 @@ describe('avatar profile-fetch amplification guard', () => {
     transport.events.emit('profileMessage', { address: '0xpeer', data: { profileVersion: Infinity } })
 
     expect(robustFetchMock).not.toHaveBeenCalled()
+  })
+
+  describe('when a peer disconnects and reconnects', () => {
+    it('does not refetch within the cooldown window (the cooldown survives disconnect)', () => {
+      // A peer holding a reusable room token could otherwise reset its Catalyst
+      // fetch budget by rapidly leaving and rejoining: disconnect clears the
+      // per-session state and reconnect re-emits a version-1 announcement.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+      expect(robustFetchMock).toHaveBeenCalledTimes(1)
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+
+      expect(robustFetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('refetches once the cooldown has elapsed', () => {
+      let nowVal = 1_000_000
+      const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => nowVal)
+      try {
+        transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+        expect(robustFetchMock).toHaveBeenCalledTimes(1)
+
+        transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+        nowVal += 11_000 // past PROFILE_FETCH_COOLDOWN_MS
+        transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+
+        expect(robustFetchMock).toHaveBeenCalledTimes(2)
+      } finally {
+        nowSpy.mockRestore()
+      }
+    })
   })
 
   it('retries the same version after the cooldown when the first fetch FAILED', async () => {

@@ -3,10 +3,7 @@ import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comm
 import { ReadWriteByteBuffer } from '../../../../src/lib/decentraland/ByteBuffer'
 import { readAllMessages } from '../../../../src/lib/decentraland/crdt-wire-protocol'
 import { createAvatarCommunicationSystem } from '../../../../src/lib/decentraland/communications/avatar-communication-system'
-import {
-  playerEntityManager,
-  EntityUtils
-} from '../../../../src/lib/decentraland/communications/player-entity-manager'
+import { EntityUtils } from '../../../../src/lib/decentraland/communications/player-entity-manager'
 import { CommsTransportWrapper } from '../../../../src/lib/decentraland/communications/CommsTransportWrapper'
 
 // The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
@@ -22,8 +19,8 @@ describe('comms: a remote peer position materializes a player entity + CRDT', ()
   let system: ReturnType<typeof createAvatarCommunicationSystem>
 
   beforeEach(() => {
-    // playerEntityManager is a shared singleton across the process.
-    playerEntityManager.clear()
+    // Each system owns a fresh per-system entity manager, so there is no shared
+    // process state to reset between tests.
     transport = { events: makeEmitter() }
     // worldToScene converts comms world positions into the owning scene's
     // coordinates; identity (as a fresh clone, since the LWW store retains the
@@ -45,7 +42,7 @@ describe('comms: a remote peer position materializes a player entity + CRDT', ()
     })
 
     // The peer must now own an entity, allocated in the reserved remote-player range.
-    const entity = playerEntityManager.getEntityForAddress('0xpeer')
+    const entity = system.playerEntityManager.getEntityForAddress('0xpeer')
     expect(entity).not.toBeNull()
     const [entityNumber] = EntityUtils.fromEntityId(entity!)
     expect(entityNumber).toBeGreaterThanOrEqual(32)
