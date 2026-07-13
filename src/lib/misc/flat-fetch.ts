@@ -11,10 +11,12 @@ type FlatFetchResponse = {
 
 type BodyType = 'json' | 'text'
 
-export type FlatFetchInit = RequestInit & { responseBodyType?: BodyType }
+export type FlatFetchInit = RequestInit & { responseBodyType?: BodyType; dispatcher?: unknown }
 
 export async function flatFetch(url: string, init?: FlatFetchInit): Promise<FlatFetchResponse> {
-  const response = await robustFetch(url, init, { label: 'signedFetch' })
+  // Forward the optional dispatcher (e.g. the SSRF-pinning agent for scene egress)
+  // to the underlying fetch.
+  const response = await robustFetch(url, init, { label: 'signedFetch', dispatcher: init?.dispatcher })
   const responseBodyType = init?.responseBodyType || 'text'
   const headers: Record<string, string> = {}
 

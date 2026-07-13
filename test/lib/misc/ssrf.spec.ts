@@ -88,6 +88,40 @@ describe('assertPublicSceneUrl', () => {
     })
   })
 
+  describe('when the host carries a trailing dot (FQDN root label)', () => {
+    // new URL() keeps the trailing dot ("localhost." / "…internal."), which would
+    // slip past the exact/suffix literal matches while resolving to the same host.
+    it('should reject localhost.', async () => {
+      await expect(assertPublicSceneUrl('http://localhost./admin')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should reject an internal-suffixed name with a trailing dot', async () => {
+      await expect(assertPublicSceneUrl('http://metadata.google.internal./computeMetadata/')).rejects.toThrow(
+        /non-public/i
+      )
+    })
+  })
+
+  describe('when the host is a link-local / site-local IPv6 literal outside fe80::/16', () => {
+    // fe80::/10 (through febf::) and deprecated site-local fec0::/10 — the old
+    // startsWith('fe80') check covered only fe80::/16.
+    it('should reject fe90:: (link-local /10)', async () => {
+      await expect(assertPublicSceneUrl('http://[fe90::1]/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should reject fec0:: (site-local /10)', async () => {
+      await expect(assertPublicSceneUrl('http://[fec0::1]/')).rejects.toThrow(/non-public/i)
+    })
+  })
+
+  describe('when the host is an IPv4-compatible IPv6 literal (no ::ffff prefix)', () => {
+    // new URL() normalizes ::169.254.169.254 to ::a9fe:a9fe, which the ::ffff-only
+    // decoder missed.
+    it('should reject the cloud metadata address embedded as ::a9fe:a9fe', async () => {
+      await expect(assertPublicSceneUrl('http://[::169.254.169.254]/latest/meta-data/')).rejects.toThrow(/non-public/i)
+    })
+  })
+
   describe('when the host is a public IP literal', () => {
     it('should allow it without a DNS lookup', async () => {
       await expect(assertPublicSceneUrl('https://8.8.8.8/path')).resolves.toBeUndefined()

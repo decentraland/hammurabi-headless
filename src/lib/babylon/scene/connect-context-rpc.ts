@@ -19,6 +19,7 @@ import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '..
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
+import { sceneEgressAgent } from '../../misc/scene-egress-dispatcher'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { StaticEntities } from './logic/static-entities'
@@ -34,6 +35,11 @@ const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network messag
 // address (metadata endpoint, loopback admin) — the single-shot guard alone was
 // bypassable because the underlying fetch follows redirects transparently.
 const MAX_SIGNED_FETCH_REDIRECTS = 5
+
+// Cap the scene-supplied request body. The response body is already capped
+// (flatFetch → readBodyCapped); this bounds the egress side, which is otherwise
+// re-sent uncapped on every redirect hop / 5xx retry.
+const MAX_SIGNED_FETCH_BODY_BYTES = 10 * 1024 * 1024
 
 // The world-storage-service. Requests to these hosts are signed with the
 // world-scoped storage delegation (when present) instead of the guest identity.
@@ -317,6 +323,12 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       const identity = await sceneIdentity.deref()
       const realm = await currentRealm.deref()
 
+      // Bound the scene-supplied request body before it is dispatched (and
+      // re-dispatched per redirect hop / retry).
+      if (req.init?.body != null && Buffer.byteLength(req.init.body) > MAX_SIGNED_FETCH_BODY_BYTES) {
+        throw new Error('Blocked scene request: request body too large')
+      }
+
       const metadata = {
         origin: 'hammurabi-server//',
         signer: 'dcl:scene-guest',
@@ -366,7 +378,11 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
               headers: sameOrigin ? req.init?.headers || {} : {},
               body: req.init?.body,
               responseBodyType: 'text',
-              redirect: 'manual'
+              redirect: 'manual',
+              // Pin the connect-time resolution to the vetted address so a
+              // rebinding DNS answer can't land this on a private host after the
+              // upfront assertPublicSceneUrl check passed.
+              dispatcher: sceneEgressAgent
             },
             storageStrategy ? storageStrategy.metadata : metadata,
             storageStrategy?.options

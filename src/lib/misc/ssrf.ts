@@ -31,25 +31,38 @@ function isBlockedIpv4(ip: string): boolean {
 function isBlockedIpv6(ip: string): boolean {
   const v = ip.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
   if (v === '::1' || v === '::') return true // loopback / unspecified
-  if (v.startsWith('fe80')) return true // link-local
+  // Link-local fe80::/10 (through febf::) AND deprecated site-local fec0::/10
+  // (through feff::). The old `startsWith('fe80')` covered only fe80::/16, so
+  // e.g. fe90::/feb0:: slipped through. `fe8`–`fef` matches fe80::–feff::.
+  if (/^fe[89a-f]/.test(v)) return true
   if (v.startsWith('fc') || v.startsWith('fd')) return true // unique-local fc00::/7
 
   // IPv4-mapped / -compatible in DOTTED form, e.g. ::ffff:169.254.169.254 or ::1.2.3.4
   const dotted = v.match(/(\d+\.\d+\.\d+\.\d+)$/)
   if (dotted) return isBlockedIpv4(dotted[1])
 
-  // IPv4-mapped in HEX form. `new URL()` normalizes ::ffff:169.254.169.254 to
-  // ::ffff:a9fe:a9fe, so the dotted match above never sees it — decode the last
-  // 32 bits back to IPv4 and apply the same block list. Without this the SSRF
-  // guard is bypassable (metadata endpoint, loopback, private ranges).
-  const mappedHex = v.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
-  if (mappedHex) {
-    const hi = parseInt(mappedHex[1], 16)
-    const lo = parseInt(mappedHex[2], 16)
+  // IPv4-mapped/-compatible in HEX form. `new URL()` normalizes the trailing 32
+  // bits to two hex hextets — ::ffff:169.254.169.254 becomes ::ffff:a9fe:a9fe and
+  // the IPv4-compatible ::169.254.169.254 becomes ::a9fe:a9fe. The dotted match
+  // above never sees either, so decode both (`ffff:` optional) back to IPv4 and
+  // apply the same block list. Without this the SSRF guard is bypassable.
+  const embedded = v.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+  if (embedded) {
+    const hi = parseInt(embedded[1], 16)
+    const lo = parseInt(embedded[2], 16)
     const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
     return isBlockedIpv4(ipv4)
   }
   return false
+}
+
+/**
+ * True if a RESOLVED address (from DNS) is in a blocked range. Shared by the
+ * upfront guard below and the connect-time pinning dispatcher (scene-egress-
+ * dispatcher.ts), so both apply the exact same block list.
+ */
+export function isBlockedResolvedAddress(address: string, family: number): boolean {
+  return family === 6 ? isBlockedIpv6(address) : isBlockedIpv4(address)
 }
 
 function isBlockedHostLiteral(host: string): boolean {
@@ -76,7 +89,10 @@ export async function assertPublicSceneUrl(rawUrl: string): Promise<void> {
     throw new Error(`Blocked scene request: unsupported protocol "${url.protocol}"`)
   }
 
-  const host = url.hostname
+  // Strip a trailing dot: `new URL()` keeps the FQDN root label ("localhost." /
+  // "metadata.google.internal."), which would slip past the exact/suffix literal
+  // matches below while still resolving to the same (blocked) host.
+  const host = url.hostname.replace(/\.+$/, '')
   if (isBlockedHostLiteral(host)) {
     throw new Error(`Blocked scene request to non-public host: ${host}`)
   }
@@ -87,8 +103,7 @@ export async function assertPublicSceneUrl(rawUrl: string): Promise<void> {
   try {
     const results = await lookup(host, { all: true })
     for (const { address, family } of results) {
-      const blocked = family === 6 ? isBlockedIpv6(address) : isBlockedIpv4(address)
-      if (blocked) {
+      if (isBlockedResolvedAddress(address, family)) {
         throw new Error(`Blocked scene request: ${host} resolves to non-public address ${address}`)
       }
     }

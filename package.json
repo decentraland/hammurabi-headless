@@ -76,6 +76,7 @@
     "mitt": "^3.0.1",
     "protobufjs": "^7.6.5",
     "quickjs-emscripten-core": "^0.32.0",
+    "undici": "^6.27.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

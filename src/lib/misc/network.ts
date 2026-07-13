@@ -6,7 +6,15 @@ const logger = createLogger('🌐 net')
 const DEFAULT_TIMEOUT_MS = 15000
 const DEFAULT_RETRIES = 2
 
-export type RobustFetchOptions = { timeoutMs?: number; retries?: number; label?: string }
+export type RobustFetchOptions = {
+  timeoutMs?: number
+  retries?: number
+  label?: string
+  // undici Dispatcher (typed as unknown to avoid a hard undici type dependency
+  // here). Used to pin the connect-time resolution for scene-controlled egress
+  // (see scene-egress-dispatcher.ts).
+  dispatcher?: unknown
+}
 
 /**
  * Release a fetch Response body that will NOT be read.
@@ -75,6 +83,44 @@ export async function readBodyCapped(response: Response, maxBytes: number): Prom
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
 }
 
+/**
+ * Reads a Response body as bytes, enforcing a byte ceiling. Binary sibling of
+ * readBodyCapped, for scene-callable asset reads (readFile / main.crdt) whose
+ * size is attacker-influenceable.
+ */
+export async function readBodyCappedBytes(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await drainResponse(response)
+    throw new Error(`response body exceeds ${maxBytes} bytes`)
+  }
+
+  if (!response.body) return new Uint8Array(0)
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        throw new Error(`response body exceeds ${maxBytes} bytes`)
+      }
+      chunks.push(value)
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
 // fetch with a per-attempt timeout, retry-with-backoff on network errors and
 // 5xx/429 (2 attempts by default), and a single log line per failure naming the
 // url, duration and cause. When every attempt fails it logs a final "gave up"
@@ -100,7 +146,9 @@ export async function robustFetch(url: string, init: RequestInit = {}, opts: Rob
     const timer = setTimeout(() => controller.abort(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs)
     const t0 = Date.now()
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal })
+      // `dispatcher` is an undici fetch extension not present in the DOM RequestInit
+      // type, hence the cast.
+      const res = await fetch(url, { ...init, signal: controller.signal, dispatcher: opts.dispatcher } as any)
       if ((res.status >= 500 || res.status === 429) && attempt < retries) {
         logger.error(`${label} ${res.status} ${url} (attempt ${attempt}/${retries}) — retrying`)
         // Release the discarded response so undici returns the socket to the pool

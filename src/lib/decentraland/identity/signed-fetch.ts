@@ -65,11 +65,16 @@ export function signedFetch(
     chainProvider
   )
 
+  // In BOTH paths the signed identity/metadata headers win over caller-supplied
+  // headers: the caller headers on a scene signedFetch are fully scene-controlled
+  // (req.init.headers), so letting them override x-identity-auth-chain-* /
+  // x-identity-timestamp / x-identity-metadata would let a scene spoof the signed
+  // metadata claim (sceneId/parcel/realm) against a backend that trusts it.
   const headers = options
     ? // Privileged path: auth headers + extraHeaders win over caller headers.
       { ...init?.headers, ...signedHeaders, ...options.extraHeaders }
-    : // Default (guest) path: unchanged ordering.
-      { ...signedHeaders, ...init?.headers }
+    : // Guest path: signed headers likewise take precedence over caller headers.
+      { ...init?.headers, ...signedHeaders }
 
   const actualInit = { ...init, headers } as FlatFetchInit
 
