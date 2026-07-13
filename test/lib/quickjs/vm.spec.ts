@@ -439,6 +439,36 @@ describe('ensure that VM works', () => {
       expect(logs).toEqual(['its a promise', 'awaiting promises work', 1, 'end'])
     }))
 
+  it('recovers a Uint8Array nested at the marshal depth boundary (512)', async () =>
+    // Regression: the reinjectBinaries depth guard used `>= MAX_MARSHAL_DEPTH`,
+    // which bailed at exactly depth 512 — but the VM-side extractor extracts a
+    // typed array regardless of depth, so a placeholder CAN exist at depth 512.
+    // That left it unreplaced and dropped the bytes. Depth 512 must round-trip.
+    withQuickJsVm(async (opts) => {
+      const logs: any[] = []
+      opts.provide({
+        log(...args) {
+          logs.push(...args)
+        },
+        error(...args) {
+          logs.push(...args)
+        },
+        require() {
+          throw 'Not implemented'
+        }
+      })
+
+      opts.eval(`
+        let v = new Uint8Array([7, 8, 9])
+        for (let i = 0; i < 512; i++) v = { n: v }
+        console.log(v)
+      `)
+
+      let leaf = logs[0]
+      for (let i = 0; i < 512; i++) leaf = leaf.n
+      expect(leaf).toEqual(new Uint8Array([7, 8, 9]))
+    }))
+
   it('missing onServerUpdate', async () =>
     withQuickJsVm(async (opts) => {
       const logs: any[] = []

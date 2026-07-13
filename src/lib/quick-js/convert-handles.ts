@@ -118,6 +118,10 @@ export function drainPendingJobs(vm: QuickJSContext) {
 type MarshalHelpers = {
   extractBinaries: QuickJSHandle
   wrapBytes: QuickJSHandle
+  // Returns the JSON-serialized length of a value (or -1 if it can't be
+  // stringified) WITHOUT returning the payload — lets the host bound the plain
+  // vm.dump path before materializing a huge value.
+  measureSize: QuickJSHandle
   nonceKey: string
 }
 
@@ -139,7 +143,15 @@ export function installMarshalHelpers(vm: QuickJSContext) {
   const wrapBytes = vm.unwrapResult(
     vm.evalCode('(() => { const U8 = Uint8Array; return (ab) => new U8(ab) })()', 'hostWrapBytes.js')
   )
-  marshalHelpers.set(vm, { extractBinaries, wrapBytes, nonceKey })
+  // Capture JSON.stringify at install time (untampered primordial). Returns just
+  // a length so a size probe never materializes the payload on the host.
+  const measureSize = vm.unwrapResult(
+    vm.evalCode(
+      '(() => { const S = JSON.stringify; return (v) => { try { const s = S(v); return typeof s === "string" ? s.length : 0 } catch (e) { return -1 } } })()',
+      'hostMeasureSize.js'
+    )
+  )
+  marshalHelpers.set(vm, { extractBinaries, wrapBytes, measureSize, nonceKey })
 }
 
 /** Disposes the cached helper handles. Must run before `vm.dispose()`. */
@@ -149,6 +161,7 @@ export function disposeMarshalHelpers(vm: QuickJSContext) {
   marshalHelpers.delete(vm)
   safeDispose(helpers.extractBinaries)
   safeDispose(helpers.wrapBytes)
+  safeDispose(helpers.measureSize)
 }
 
 type PromiseTracking = {
@@ -244,6 +257,30 @@ export function dumpAndDispose(vm: QuickJSContext, val: QuickJSHandle) {
         }
       }
     }
+    // Bound the plain-dump path. Unlike the binary path (capped at
+    // MAX_COERCED_BYTES), vm.dump has no ceiling, so a scene logging or returning
+    // a huge string/object would materialize ~2x its serialized size on the host
+    // every turn. Probe the serialized size inside the VM (bounded by the VM's
+    // own memory cap + deadline; the probe returns a number, never the payload)
+    // and reject over-cap values before dumping them. Numbers/booleans/etc. are
+    // inherently small, so only object/string values pay for the probe.
+    const valType = vm.typeof(val)
+    if (valType === 'object' || valType === 'string') {
+      const helpers = marshalHelpers.get(vm)
+      if (helpers) {
+        const sizeResult = vm.callFunction(helpers.measureSize, vm.undefined, val)
+        if ('error' in sizeResult && sizeResult.error) {
+          // Probe failed (e.g. the value can't be stringified): fall through to
+          // plain dump, preserving today's behavior for exotic values.
+          sizeResult.error.dispose()
+        } else {
+          const size = vm.unwrapResult(sizeResult).consume((h) => vm.getNumber(h))
+          if (size > MAX_COERCED_BYTES) {
+            throw new Error(`value too large to marshal out of the VM (${size} bytes)`)
+          }
+        }
+      }
+    }
     return vm.dump(val)
   } finally {
     // vm.dump() disposes the handle itself when the value is a promise
@@ -280,17 +317,25 @@ function readExtractedBinaries(vm: QuickJSContext, extracted: QuickJSHandle, non
 }
 
 /** Replaces `{ [nonceKey]: n }` placeholders in the dumped tree with the real bytes. */
-function reinjectBinaries(node: any, buffers: Uint8Array[], nonceKey: string): any {
+function reinjectBinaries(node: any, buffers: Uint8Array[], nonceKey: string, depth: number = 0): any {
   if (node === null || typeof node !== 'object') return node
+  // Bound recursion so a deep dumped tree can't overflow the host stack. Use
+  // `> MAX_MARSHAL_DEPTH`, NOT `>=`: the VM-side extractor extracts a typed array
+  // regardless of depth (its typed-array check runs before its own depth guard),
+  // so a placeholder CAN appear at tree-depth exactly MAX_MARSHAL_DEPTH — bailing
+  // at `>=` would leave that placeholder unreplaced and drop the bytes. Beyond
+  // MAX_MARSHAL_DEPTH the extractor stopped descending, so no placeholder exists
+  // there and stopping is safe (and keeps recursion depth bounded at ~512).
+  if (depth > MAX_MARSHAL_DEPTH) return node
   if (typeof node[nonceKey] === 'number' && Object.keys(node).length === 1) {
     return buffers[node[nonceKey]] ?? new Uint8Array(0)
   }
   if (Array.isArray(node)) {
-    for (let i = 0; i < node.length; i++) node[i] = reinjectBinaries(node[i], buffers, nonceKey)
+    for (let i = 0; i < node.length; i++) node[i] = reinjectBinaries(node[i], buffers, nonceKey, depth + 1)
     return node
   }
   for (const key of Object.keys(node)) {
-    node[key] = reinjectBinaries(node[key], buffers, nonceKey)
+    node[key] = reinjectBinaries(node[key], buffers, nonceKey, depth + 1)
   }
   return node
 }
@@ -298,12 +343,16 @@ function reinjectBinaries(node: any, buffers: Uint8Array[], nonceKey: string): a
 /**
  * This function converts a native JS type into a QuickJSHandle to be passed onto the VM
  */
-export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
+export function nativeToVmType(vm: QuickJSContext, value: any, depth: number = 0): QuickJSHandle {
   if (typeof value === 'number') return vm.newNumber(value)
   if (typeof value === 'string') return vm.newString(value)
   if (typeof value === 'boolean') return value ? vm.true : vm.false
   if (value === undefined) return vm.undefined
   if (value === null) return vm.null
+  // Bound structural recursion (arrays/objects below) so a pathologically deep
+  // value can't overflow the host stack. Values here are host-controlled, so this
+  // is defense-in-depth; deeper levels are truncated to undefined.
+  if (depth >= MAX_MARSHAL_DEPTH) return vm.undefined
   if (value instanceof Uint8Array) {
     const helpers = marshalHelpers.get(vm)
     if (helpers) {
@@ -391,7 +440,7 @@ export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
     // return `array` without disposing.
     try {
       for (let i = 0; i < value.length; i++) {
-        nativeToVmType(vm, value[i]).consume(($) => vm.setProp(array, i, $))
+        nativeToVmType(vm, value[i], depth + 1).consume(($) => vm.setProp(array, i, $))
       }
     } catch (e) {
       array.dispose()
@@ -404,7 +453,7 @@ export function nativeToVmType(vm: QuickJSContext, value: any): QuickJSHandle {
     // Same handle-leak guard as the array path above.
     try {
       for (const key of Object.getOwnPropertyNames(value)) {
-        nativeToVmType(vm, value[key]).consume(($) => vm.setProp(obj, key, $))
+        nativeToVmType(vm, value[key], depth + 1).consume(($) => vm.setProp(obj, key, $))
       }
     } catch (e) {
       obj.dispose()
@@ -423,13 +472,25 @@ export function coerceMaybeU8Array(data: MaybeUint8Array): Uint8Array {
   // an unbounded host allocation here.
   if (!data || typeof data !== 'object') return new Uint8Array(0)
   const keys = Object.keys(data)
-  // Enforce the cap BEFORE allocating the output buffer and filling it.
-  if (keys.length > MAX_COERCED_BYTES) {
-    throw new Error(`CRDT payload too large (${keys.length} bytes)`)
+  let maxIndex = -1
+  for (const k of keys) {
+    const idx = Number(k)
+    if (Number.isInteger(idx) && idx >= 0 && idx > maxIndex) maxIndex = idx
   }
-  const out = new Uint8Array(keys.length)
-  for (let i = 0; i < keys.length; i++) {
-    out[i] = (data as any)[keys[i]]
+  const size = maxIndex + 1
+  // A genuine Uint8Array always serializes to a DENSE object (keys 0..n-1, every
+  // index present). Require density: `size === keys.length` holds iff the keys are
+  // exactly the indices 0..n-1. Reject anything else (gaps or non-index keys) as
+  // an empty buffer rather than zero-filling — zero-filling a sparse object would
+  // let a tiny 2-key object (e.g. {0:0, 16777215:0}) drive a multi-MB allocation.
+  if (size !== keys.length) return new Uint8Array(0)
+  if (size > MAX_COERCED_BYTES) {
+    throw new Error(`CRDT payload too large (${size} bytes)`)
+  }
+  // Index by numeric key (equals iteration position for a dense object).
+  const out = new Uint8Array(size)
+  for (const k of keys) {
+    out[Number(k)] = Number((data as any)[k])
   }
   return out
 }

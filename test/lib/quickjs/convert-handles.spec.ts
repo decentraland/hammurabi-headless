@@ -20,4 +20,22 @@ describe('coerceMaybeU8Array', () => {
       expect(coerceMaybeU8Array(undefined as any)).toEqual(new Uint8Array(0))
     })
   })
+
+  describe('when given a non-dense object', () => {
+    it('returns empty for a sparse object (a real Uint8Array always serializes dense)', () => {
+      // Rejecting (rather than zero-filling) prevents a tiny sparse object from
+      // forcing a large allocation, e.g. { 0: 0, 16777215: 0 }.
+      expect(coerceMaybeU8Array({ 0: 1, 2: 3 } as any)).toEqual(new Uint8Array(0))
+    })
+
+    it('returns empty when a non-index key is present', () => {
+      expect(coerceMaybeU8Array({ 0: 1, 1: 2, foo: 3 } as any)).toEqual(new Uint8Array(0))
+    })
+  })
+
+  describe('when given a dense object with keys in any order', () => {
+    it('reconstructs the bytes by numeric index', () => {
+      expect(coerceMaybeU8Array({ 2: 3, 0: 1, 1: 2 } as any)).toEqual(new Uint8Array([1, 2, 3]))
+    })
+  })
 })
