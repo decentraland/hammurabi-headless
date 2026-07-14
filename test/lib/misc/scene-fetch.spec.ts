@@ -308,4 +308,71 @@ describe('when a scene uses the global fetch', () => {
       await expect(cappedFetch(`${baseUrl}/c`)).rejects.toThrow(/too many concurrent/)
     })
   })
+
+  describe('and a POST is redirected with a 302', () => {
+    let secondHop: { method?: string; contentType?: string; body: string }
+
+    beforeEach(() => {
+      secondHop = { body: '' }
+      handler = (req, res) => {
+        if (req.url === '/submit') {
+          res.writeHead(302, { Location: `${baseUrl}/done` })
+          res.end()
+          return
+        }
+        secondHop.method = req.method
+        secondHop.contentType = req.headers['content-type']
+        const chunks: Buffer[] = []
+        req.on('data', (chunk) => chunks.push(chunk))
+        req.on('end', () => {
+          secondHop.body = Buffer.concat(chunks).toString()
+          res.writeHead(200)
+          res.end('ok')
+        })
+      }
+    })
+
+    it('should follow it as a bodyless GET (dropping the body and content headers)', async () => {
+      await sceneFetch(`${baseUrl}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ a: 1 })
+      })
+
+      expect(secondHop).toEqual({ method: 'GET', contentType: undefined, body: '' })
+    })
+  })
+
+  describe('and a POST is redirected with a 307', () => {
+    let secondHop: { method?: string; body: string }
+
+    beforeEach(() => {
+      secondHop = { body: '' }
+      handler = (req, res) => {
+        if (req.url === '/submit') {
+          res.writeHead(307, { Location: `${baseUrl}/done` })
+          res.end()
+          return
+        }
+        secondHop.method = req.method
+        const chunks: Buffer[] = []
+        req.on('data', (chunk) => chunks.push(chunk))
+        req.on('end', () => {
+          secondHop.body = Buffer.concat(chunks).toString()
+          res.writeHead(200)
+          res.end('ok')
+        })
+      }
+    })
+
+    it('should preserve the method and body', async () => {
+      await sceneFetch(`${baseUrl}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ a: 1 })
+      })
+
+      expect(secondHop).toEqual({ method: 'POST', body: JSON.stringify({ a: 1 }) })
+    })
+  })
 })

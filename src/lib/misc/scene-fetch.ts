@@ -70,6 +70,17 @@ function normalizeHeaders(headers: Record<string, unknown> | undefined): Record<
   return out
 }
 
+// Request headers that describe a body; dropped when a redirect nulls the body.
+const BODY_HEADERS = new Set(['content-type', 'content-length', 'content-encoding', 'content-language'])
+
+function stripBodyHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    if (!BODY_HEADERS.has(key.toLowerCase())) out[key] = value
+  }
+  return out
+}
+
 function buildHeaders(source: Headers): SceneResponseHeaders {
   // Snapshot into a lowercased map so lookups are case-insensitive (as Headers
   // is) and don't retain the underlying Response.
@@ -102,8 +113,11 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
       throw new Error('fetch: url must be a string')
     }
 
-    const method = typeof init?.method === 'string' ? init.method : 'GET'
-    const headers = normalizeHeaders(init?.headers)
+    // Mutable across hops: a 301/302/303 redirect can rewrite the method to GET
+    // and drop the body per the Fetch spec (see the follow branch below).
+    let method = typeof init?.method === 'string' ? init.method : 'GET'
+    let headers = normalizeHeaders(init?.headers)
+    let body = init?.body
     const redirectMode = init?.redirect ?? 'follow'
     const originalOrigin = new URL(url).origin
 
@@ -123,7 +137,7 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
         {
           method,
           headers: sameOrigin ? headers : {},
-          body: init?.body,
+          body,
           redirect: 'manual'
         },
         // Single attempt: match standard `fetch` (no auto-retry) and, crucially,
@@ -140,6 +154,17 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
         await drainResponse(response)
         if (hop >= MAX_FETCH_REDIRECTS) {
           throw new Error('fetch: too many redirects')
+        }
+        // Fetch spec: a 301/302 on a POST, or a 303 on any non-GET/HEAD method,
+        // becomes a bodyless GET (drop the body and its content-* headers); 307/308
+        // preserve the method and body.
+        if (
+          ((response.status === 301 || response.status === 302) && method === 'POST') ||
+          (response.status === 303 && method !== 'GET' && method !== 'HEAD')
+        ) {
+          method = 'GET'
+          body = undefined
+          headers = stripBodyHeaders(headers)
         }
         currentUrl = new URL(location, currentUrl).toString()
         redirected = true
