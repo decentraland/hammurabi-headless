@@ -416,4 +416,37 @@ describe('when a scene uses the global fetch', () => {
       expect(Array.from(bytes)).toEqual([0, 1, 2, 253, 254, 255])
     })
   })
+
+  describe('and a lowercase-method POST is redirected with a 302', () => {
+    let secondHop: { method?: string; body: string }
+
+    beforeEach(() => {
+      secondHop = { body: '' }
+      handler = (req, res) => {
+        if (req.url === '/submit') {
+          res.writeHead(302, { Location: `${baseUrl}/done` })
+          res.end()
+          return
+        }
+        secondHop.method = req.method
+        const chunks: Buffer[] = []
+        req.on('data', (chunk) => chunks.push(chunk))
+        req.on('end', () => {
+          secondHop.body = Buffer.concat(chunks).toString()
+          res.writeHead(200)
+          res.end('ok')
+        })
+      }
+    })
+
+    it('should still convert to a bodyless GET (case-insensitive method check)', async () => {
+      await sceneFetch(`${baseUrl}/submit`, {
+        method: 'post',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ a: 1 })
+      })
+
+      expect(secondHop).toEqual({ method: 'GET', body: '' })
+    })
+  })
 })

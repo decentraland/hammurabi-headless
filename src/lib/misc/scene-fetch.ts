@@ -169,10 +169,13 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
         }
         // Fetch spec: a 301/302 on a POST, or a 303 on any non-GET/HEAD method,
         // becomes a bodyless GET (drop the body and its content-* headers); 307/308
-        // preserve the method and body.
+        // preserve the method and body. Compare case-insensitively — the scene may
+        // pass a lowercase method (undici uppercases it on the wire, so the request
+        // still works, but the rewrite must not be skipped).
+        const upperMethod = method.toUpperCase()
         if (
-          ((response.status === 301 || response.status === 302) && method === 'POST') ||
-          (response.status === 303 && method !== 'GET' && method !== 'HEAD')
+          ((response.status === 301 || response.status === 302) && upperMethod === 'POST') ||
+          (response.status === 303 && upperMethod !== 'GET' && upperMethod !== 'HEAD')
         ) {
           method = 'GET'
           body = undefined

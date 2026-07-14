@@ -561,10 +561,13 @@ function setupSceneWebSocket(
       }
     })
 
-    vm.newFunction('send', (dataHandle) => {
+    // Named __send; the shim's WebSocket.prototype.send normalizes ArrayBuffer/
+    // ArrayBufferView to a Uint8Array first (a raw ArrayBuffer can't be marshalled
+    // host-side), so `ws.send(binaryEvent.data)` round-trips.
+    vm.newFunction('__send', (dataHandle) => {
       const data = dataHandle ? dataHandle.consume(($) => dumpAndDispose(vm, $)) : undefined
       socket.send(data)
-    }).consume((fn) => vm.setProp(instance, 'send', fn))
+    }).consume((fn) => vm.setProp(instance, '__send', fn))
 
     vm.newFunction('close', (codeHandle, reasonHandle) => {
       const code = codeHandle ? codeHandle.consume(($) => dumpAndDispose(vm, $)) : undefined
@@ -629,6 +632,11 @@ function setupSceneWebSocket(
       '  var i = arr.indexOf(listener);' +
       '  if (i !== -1) arr.splice(i, 1);' +
       '};' +
+      'WebSocket.prototype.send = function (data) {' +
+      '  if (data instanceof ArrayBuffer) { data = new Uint8Array(data); }' +
+      '  else if (ArrayBuffer.isView(data) && !(data instanceof Uint8Array)) { data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength); }' +
+      '  return this.__send(data);' +
+      '};' +
       'WebSocket.prototype.__dispatch = function (type, event) {' +
       // Binary frames arrive as a Uint8Array; expose them as an ArrayBuffer (what
       // binaryType "arraybuffer" promises) since a raw ArrayBuffer can't be marshalled.
@@ -636,7 +644,9 @@ function setupSceneWebSocket(
       '  var handler = this["on" + type];' +
       '  if (typeof handler === "function") { try { handler.call(this, event); } catch (e) {} }' +
       '  var arr = this.__listeners && this.__listeners[type];' +
-      '  if (arr) { var list = arr.slice(); for (var i = 0; i < list.length; i++) { try { list[i].call(this, event); } catch (e) {} } }' +
+      // Snapshot to avoid iteration corruption, but skip a listener removed mid-dispatch
+      // by an earlier one (WHATWG removed-flag semantics).
+      '  if (arr) { var list = arr.slice(); for (var i = 0; i < list.length; i++) { if (arr.indexOf(list[i]) === -1) continue; try { list[i].call(this, event); } catch (e) {} } }' +
       '};' +
       'globalThis.WebSocket = WebSocket;' +
       'delete globalThis.__hammurabiCreateWebSocket;' +

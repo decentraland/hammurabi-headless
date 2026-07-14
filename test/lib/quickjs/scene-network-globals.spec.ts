@@ -206,6 +206,92 @@ describe('when a scene uses the global WebSocket', () => {
 
     expect(logs).toEqual(['msg', 'ping', 'message', 'closed'])
   })
+
+  it('should not invoke a listener removed mid-dispatch by an earlier listener', async () => {
+    const logs: any[] = []
+    const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
+
+    await withQuickJsVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        webSocket
+      })
+
+      opts.eval(`
+        const ws = new WebSocket(${JSON.stringify(url)})
+        function second() { console.log('second') }
+        function first() { console.log('first'); ws.removeEventListener('message', second) }
+        ws.addEventListener('open', () => ws.send('ping'))
+        ws.addEventListener('message', first)
+        ws.addEventListener('message', second)
+        ws.addEventListener('message', () => ws.close())
+        ws.addEventListener('close', () => console.log('closed'))
+      `)
+
+      await waitFor(() => logs.includes('closed'))
+    })
+
+    // 'second' was removed by 'first' during the same event, so it must not fire.
+    expect(logs).toEqual(['first', 'closed'])
+  })
+})
+
+describe('when a scene echoes a binary WebSocket frame', () => {
+  let wss: WebSocketServer
+  let url: string
+  let echoedBack: number[] | string | undefined
+
+  beforeEach(async () => {
+    echoedBack = undefined
+    wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise<void>((resolve) => wss.on('listening', () => resolve()))
+    wss.on('connection', (socket) => {
+      socket.send(Buffer.from([9, 8, 7]), { binary: true })
+      socket.on('message', (data, isBinary) => {
+        echoedBack = isBinary && Buffer.isBuffer(data) ? Array.from(data) : `text:${data.toString()}`
+      })
+    })
+    const { port } = wss.address() as AddressInfo
+    url = `ws://127.0.0.1:${port}`
+  })
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => wss.close(() => resolve()))
+  })
+
+  it('should deliver an ArrayBuffer and send it back as a binary frame', async () => {
+    const logs: any[] = []
+    const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
+
+    await withQuickJsVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        webSocket
+      })
+
+      opts.eval(`
+        const ws = new WebSocket(${JSON.stringify(url)})
+        ws.binaryType = 'arraybuffer'
+        ws.onmessage = (e) => { console.log('isAB', e.data instanceof ArrayBuffer); ws.send(e.data); ws.close() }
+        ws.onclose = () => console.log('closed')
+      `)
+
+      await waitFor(() => logs.includes('closed'))
+    })
+
+    // The server must have received the echo back as a genuine binary frame.
+    await waitFor(() => echoedBack !== undefined)
+    expect(logs).toEqual(['isAB', true, 'closed'])
+    expect(echoedBack).toEqual([9, 8, 7])
+  })
 })
 
 describe('when a scene uses fetch against a real server', () => {
