@@ -13,16 +13,25 @@ import { withQuickJsVm } from '.'
 import { loadModuleForPort } from '../common-runtime/modules'
 import { RpcSceneRuntimeOptions } from '../common-runtime/types'
 import { getStartupData } from '../common-runtime/startup'
+import { createSceneFetch } from '../misc/scene-fetch'
+import { createSceneWebSocketFactory } from '../misc/scene-websocket'
 
 // this function starts the scene runtime as explained in ADR-133
 export async function startQuickJsSceneRuntime(port: RpcClientPort, options: RpcSceneRuntimeOptions) {
   const { mainFile, mainFileName } = await getStartupData(port)
+  // The scene's unprivileged network globals (ADR-133): an unsigned, SSRF-guarded
+  // `fetch` and a `WebSocket` constructor. Both use the real SSRF guard by default.
+  const sceneFetch = createSceneFetch()
+  const sceneWebSocket = createSceneWebSocketFactory()
+
   await withQuickJsVm(async (opts) => {
     opts.provide({
       ...options,
       require(moduleName) {
         return loadModuleForPort(port, moduleName)
       },
+      fetch: sceneFetch,
+      webSocket: sceneWebSocket,
     })
 
     const decoder = new TextDecoder()

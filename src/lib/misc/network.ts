@@ -45,14 +45,14 @@ export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
  * which broke JSON.parse on BOM-prefixed bodies that `response.json()` used to
  * accept (common from Windows/.NET backends).
  */
-export async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+export async function readBodyCappedBytes(response: Response, maxBytes: number): Promise<Buffer> {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maxBytes) {
     await drainResponse(response)
     throw new Error(`response body exceeds ${maxBytes} bytes`)
   }
 
-  if (!response.body) return ''
+  if (!response.body) return Buffer.alloc(0)
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
@@ -71,7 +71,11 @@ export async function readBodyCapped(response: Response, maxBytes: number): Prom
     // complete drain).
     await reader.cancel().catch(() => undefined)
   }
-  const text = Buffer.concat(chunks).toString('utf-8')
+  return Buffer.concat(chunks)
+}
+
+export async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+  const text = (await readBodyCappedBytes(response, maxBytes)).toString('utf-8')
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
 }
 

@@ -114,6 +114,13 @@ describe('assertPublicSceneUrl', () => {
       it('should reject it', async () => {
         await expect(assertPublicSceneUrl('https://sneaky.example.com/x')).rejects.toThrow(/non-public/i)
       })
+
+      it('should not disclose the resolved private address to the caller', async () => {
+        const error = await assertPublicSceneUrl('https://sneaky.example.com/x').catch((err) => err as Error)
+
+        expect(error.message).toMatch(/non-public/i)
+        expect(error.message).not.toContain('10.1.2.3')
+      })
     })
   })
 })
