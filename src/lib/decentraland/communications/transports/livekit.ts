@@ -2,7 +2,7 @@ import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comm
 import { ConnectionState, DisconnectReason, Room, RoomEvent } from '@livekit/rtc-node'
 
 import mitt from 'mitt'
-import { CommsTransportEvents, MinimumCommunicationsTransport, SendHints, commsLogger } from '../types'
+import { CommsTransportEvents, LIVEKIT_MAX_RELIABLE_PACKET_BYTES, MinimumCommunicationsTransport, SendHints, commsLogger } from '../types'
 import { Scene } from '@babylonjs/core'
 
 export type LivekitConfig = {
@@ -16,7 +16,11 @@ export type VoiceSpatialParams = {
   orientation: [number, number, number]
 }
 
-const MAXIMUM_NETWORK_MSG_LENGTH = 30_000
+// Enforced on the fully-encoded packet: LiveKit rejects/degrades reliable data
+// packets over its ~16 KiB SCTP limit (see LIVEKIT_MAX_RELIABLE_PACKET_BYTES). The
+// previous value (30_000) was ~2x over that ceiling, so large messages were silently
+// failing at the LiveKit layer.
+const MAXIMUM_NETWORK_MSG_LENGTH = LIVEKIT_MAX_RELIABLE_PACKET_BYTES
 
 export class LivekitAdapter implements MinimumCommunicationsTransport {
   public readonly events = mitt<CommsTransportEvents>()
