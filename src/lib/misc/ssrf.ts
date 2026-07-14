@@ -89,7 +89,11 @@ export async function assertPublicSceneUrl(rawUrl: string): Promise<void> {
     for (const { address, family } of results) {
       const blocked = family === 6 ? isBlockedIpv6(address) : isBlockedIpv4(address)
       if (blocked) {
-        throw new Error(`Blocked scene request: ${host} resolves to non-public address ${address}`)
+        // Log the resolved address host-side only; the thrown message (surfaced to
+        // scene code via fetch rejection / WS onerror) stays generic so a scene
+        // can't harvest internal DNS→IP mappings from the block.
+        console.warn(`SSRF guard: ${host} resolves to non-public address ${address}`)
+        throw new Error(`Blocked scene request to non-public host: ${host}`)
       }
     }
   } catch (err: any) {

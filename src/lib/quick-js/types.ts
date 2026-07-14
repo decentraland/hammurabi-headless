@@ -1,10 +1,14 @@
+import type { SceneFetchInit, SceneResponse } from '../misc/scene-fetch'
+import type { HostWebSocketFactory } from '../misc/scene-websocket'
 
 /**
  * The following object specifies the global functions added to all scene runtimes
  * as defined in https://adr.decentraland.org/adr/ADR-133.
- * 
- * For now, we only map log, error and require. At this stage, fetch and WebSocket
- * are purposely left out of scope.
+ *
+ * `log`, `error` and `require` are always provided. `fetch` and `webSocket` are
+ * optional: when supplied, the corresponding global (`fetch` / `WebSocket`) is
+ * installed in the VM. Runtimes/tests that don't need network access simply omit
+ * them.
  **/
 export type ProvideOptions = {
   // console.log
@@ -13,6 +17,10 @@ export type ProvideOptions = {
   error(...args: any[]): void
   // global Common.js-like require
   require(module: string): any
+  // global `fetch` — unprivileged (unsigned), SSRF-guarded, body-capped
+  fetch?(url: string, init?: SceneFetchInit): Promise<SceneResponse>
+  // backing factory for the global `WebSocket` constructor (host-side connection)
+  webSocket?: HostWebSocketFactory
 }
 
 /**
