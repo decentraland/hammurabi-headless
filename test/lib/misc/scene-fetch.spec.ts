@@ -375,4 +375,45 @@ describe('when a scene uses the global fetch', () => {
       expect(secondHop).toEqual({ method: 'POST', body: JSON.stringify({ a: 1 }) })
     })
   })
+
+  describe('and the caller iterates the response headers', () => {
+    let response: Awaited<ReturnType<typeof sceneFetch>>
+
+    beforeEach(async () => {
+      handler = (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'X-Custom': 'v' })
+        res.end('{}')
+      }
+      response = await sceneFetch(`${baseUrl}/h`)
+    })
+
+    it('should expose entries() as reconstructable key/value pairs', () => {
+      expect(Object.fromEntries(response.headers.entries())).toMatchObject({
+        'content-type': 'application/json',
+        'x-custom': 'v'
+      })
+    })
+
+    it('should expose keys() and values()', () => {
+      expect(response.headers.keys()).toEqual(expect.arrayContaining(['content-type', 'x-custom']))
+      expect(response.headers.values()).toEqual(expect.arrayContaining(['application/json', 'v']))
+    })
+  })
+
+  describe('and the response is binary', () => {
+    beforeEach(() => {
+      handler = (_req, res) => {
+        res.writeHead(200)
+        res.end(Buffer.from([0, 1, 2, 253, 254, 255]))
+      }
+    })
+
+    it('should expose the body as raw bytes', async () => {
+      const response = await sceneFetch(`${baseUrl}/bin`)
+      const bytes = await response.bytes()
+
+      expect(bytes).toBeInstanceOf(Uint8Array)
+      expect(Array.from(bytes)).toEqual([0, 1, 2, 253, 254, 255])
+    })
+  })
 })

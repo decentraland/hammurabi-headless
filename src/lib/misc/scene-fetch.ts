@@ -1,4 +1,4 @@
-import { robustFetch, readBodyCapped, drainResponse, DEFAULT_MAX_BODY_BYTES } from './network'
+import { robustFetch, readBodyCappedBytes, drainResponse, DEFAULT_MAX_BODY_BYTES } from './network'
 import { assertPublicSceneUrl } from './ssrf'
 
 // Max redirects the global `fetch` will follow. Each hop is re-checked by the
@@ -33,6 +33,13 @@ export type SceneFetchInit = {
 export type SceneResponseHeaders = {
   get(name: string): string | null
   has(name: string): boolean
+  // Iteration is exposed as array-returning methods (not a callback `forEach` or a
+  // real iterator): a VM function passed as an argument can't be called back across
+  // the boundary, but arrays marshal fine, so `Object.fromEntries(headers.entries())`
+  // and `for (const [k, v] of headers.entries())` both work.
+  entries(): [string, string][]
+  keys(): string[]
+  values(): string[]
 }
 
 /**
@@ -49,6 +56,7 @@ export type SceneResponse = {
   headers: SceneResponseHeaders
   json(): Promise<unknown>
   text(): Promise<string>
+  bytes(): Promise<Uint8Array>
 }
 
 export type SceneFetchDeps = {
@@ -88,7 +96,10 @@ function buildHeaders(source: Headers): SceneResponseHeaders {
   source.forEach((value, key) => map.set(key.toLowerCase(), value))
   return {
     get: (name: string) => map.get(String(name).toLowerCase()) ?? null,
-    has: (name: string) => map.has(String(name).toLowerCase())
+    has: (name: string) => map.has(String(name).toLowerCase()),
+    entries: () => Array.from(map.entries()),
+    keys: () => Array.from(map.keys()),
+    values: () => Array.from(map.values())
   }
 }
 
@@ -108,7 +119,7 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
   // settles (see the sceneFetch wrapper at the end).
   let inFlight = 0
 
-  async function doFetch(url: unknown, init: SceneFetchInit = {}): Promise<SceneResponse> {
+  async function doFetch(url: unknown, init: SceneFetchInit = {}, signal?: AbortSignal): Promise<SceneResponse> {
     if (typeof url !== 'string') {
       throw new Error('fetch: url must be a string')
     }
@@ -138,7 +149,8 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
           method,
           headers: sameOrigin ? headers : {},
           body,
-          redirect: 'manual'
+          redirect: 'manual',
+          signal
         },
         // Single attempt: match standard `fetch` (no auto-retry) and, crucially,
         // never silently re-send a side-effecting POST (e.g. a webhook) on a 5xx.
@@ -177,8 +189,11 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
       }
 
       const headersHandle = buildHeaders(response.headers)
-      // Read the (capped) body once; json()/text() serve from this string.
-      const bodyText = await readBodyCapped(response, maxBodyBytes)
+      // Read the (capped) body once as bytes; text()/json()/bytes() all derive from
+      // it, so binary responses stay intact and text isn't re-fetched.
+      const bodyBytes = await readBodyCappedBytes(response, maxBodyBytes)
+      const decoded = bodyBytes.toString('utf-8')
+      const bodyText = decoded.charCodeAt(0) === 0xfeff ? decoded.slice(1) : decoded
 
       return {
         ok: response.ok,
@@ -192,12 +207,15 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
         },
         async json() {
           return JSON.parse(bodyText)
+        },
+        async bytes() {
+          return new Uint8Array(bodyBytes)
         }
       }
     }
   }
 
-  return function sceneFetch(url: unknown, init: SceneFetchInit = {}): Promise<SceneResponse> {
+  return function sceneFetch(url: unknown, init: SceneFetchInit = {}, signal?: AbortSignal): Promise<SceneResponse> {
     if (typeof url !== 'string') {
       return Promise.reject(new Error('fetch: url must be a string'))
     }
@@ -207,7 +225,7 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
       return Promise.reject(new Error('fetch: too many concurrent requests'))
     }
     inFlight++
-    return doFetch(url, init).finally(() => {
+    return doFetch(url, init, signal).finally(() => {
       inFlight--
     })
   }

@@ -1,6 +1,8 @@
+import http from 'http'
 import { AddressInfo } from 'net'
 import { WebSocketServer } from 'ws'
 import { withQuickJsVm } from '../../../src/lib/quick-js/index'
+import { createSceneFetch } from '../../../src/lib/misc/scene-fetch'
 import { createSceneWebSocketFactory } from '../../../src/lib/misc/scene-websocket'
 import type { HostWebSocketFactory } from '../../../src/lib/misc/scene-websocket'
 import type { SceneResponse } from '../../../src/lib/misc/scene-fetch'
@@ -29,12 +31,21 @@ describe('when a scene uses the global fetch', () => {
       statusText: 'OK',
       url,
       redirected: false,
-      headers: { get: () => 'application/json', has: () => true, forEach: () => undefined },
+      headers: {
+        get: () => 'application/json',
+        has: () => true,
+        entries: () => [['content-type', 'application/json']] as [string, string][],
+        keys: () => ['content-type'],
+        values: () => ['application/json']
+      },
       async json() {
         return { hello: 'world' }
       },
       async text() {
         return '{"hello":"world"}'
+      },
+      async bytes() {
+        return new Uint8Array([1, 2, 3])
       }
     })
   })
@@ -167,6 +178,155 @@ describe('when a scene uses the global WebSocket', () => {
     })
 
     expect(logs).toEqual(['instanceof', true, 'instConst', true, true, 'closing', true, 'closed'])
+  })
+
+  it('should deliver events to addEventListener listeners (with event.type)', async () => {
+    const logs: any[] = []
+    const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
+
+    await withQuickJsVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        webSocket
+      })
+
+      opts.eval(`
+        const ws = new WebSocket(${JSON.stringify(url)})
+        ws.addEventListener('open', () => ws.send('ping'))
+        ws.addEventListener('message', (e) => { console.log('msg', e.data, e.type); ws.close() })
+        ws.addEventListener('close', () => console.log('closed'))
+      `)
+
+      await waitFor(() => logs.includes('closed'))
+    })
+
+    expect(logs).toEqual(['msg', 'ping', 'message', 'closed'])
+  })
+})
+
+describe('when a scene uses fetch against a real server', () => {
+  let server: http.Server
+  let baseUrl: string
+  let handler: (req: http.IncomingMessage, res: http.ServerResponse) => void
+  let fetchImpl: ReturnType<typeof createSceneFetch>
+
+  beforeEach(async () => {
+    handler = (_req, res) => {
+      res.writeHead(200)
+      res.end('ok')
+    }
+    server = http.createServer((req, res) => handler(req, res))
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    baseUrl = `http://127.0.0.1:${port}`
+    // Real host fetch with a permissive guard (loopback would be blocked otherwise).
+    fetchImpl = createSceneFetch({ assertPublicUrl: async () => undefined })
+  })
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  })
+
+  it('should expose the body as an ArrayBuffer via response.arrayBuffer()', async () => {
+    const logs: any[] = []
+    handler = (_req, res) => {
+      res.writeHead(200)
+      res.end(Buffer.from([10, 20, 30]))
+    }
+
+    await withQuickJsVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        fetch: fetchImpl
+      })
+
+      opts.eval(`
+        module.exports.onStart = async function () {
+          const res = await fetch(${JSON.stringify(`${baseUrl}/bin`)})
+          const buf = await res.arrayBuffer()
+          console.log('isAB', buf instanceof ArrayBuffer, 'bytes', Array.from(new Uint8Array(buf)).join(','))
+        }
+      `)
+
+      await opts.onStart()
+    })
+
+    expect(logs).toEqual(['isAB', true, 'bytes', '10,20,30'])
+  })
+
+  it('should reject with an AbortError when the signal is already aborted', async () => {
+    const logs: any[] = []
+
+    await withQuickJsVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        fetch: fetchImpl
+      })
+
+      opts.eval(`
+        module.exports.onStart = async function () {
+          const controller = new AbortController()
+          controller.abort()
+          try {
+            await fetch(${JSON.stringify(`${baseUrl}/x`)}, { signal: controller.signal })
+            console.log('resolved')
+          } catch (e) {
+            console.log('rejected', e && e.name)
+          }
+        }
+      `)
+
+      await opts.onStart()
+    })
+
+    expect(logs).toEqual(['rejected', 'AbortError'])
+  })
+
+  it('should abort an in-flight request when the signal fires', async () => {
+    const logs: any[] = []
+    // A server that accepts the request but never responds, so abort is the only exit.
+    handler = () => undefined
+
+    await withQuickJsVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        fetch: fetchImpl
+      })
+
+      opts.eval(`
+        module.exports.onStart = async function () {
+          const controller = new AbortController()
+          const promise = fetch(${JSON.stringify(`${baseUrl}/hang`)}, { signal: controller.signal })
+          controller.abort()
+          try {
+            await promise
+            console.log('resolved')
+          } catch (e) {
+            console.log('rejected', e && e.name)
+          }
+        }
+      `)
+
+      await opts.onStart()
+    })
+
+    expect(logs).toEqual(['rejected', 'AbortError'])
   })
 })
 

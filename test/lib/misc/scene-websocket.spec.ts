@@ -281,6 +281,46 @@ describe('when a scene opens a WebSocket', () => {
       expect(events).toEqual(['close'])
     })
   })
+
+  describe('and the scene reads bufferedAmount', () => {
+    beforeEach(() => {
+      wss.on('connection', () => undefined)
+    })
+
+    it('should be a number', async () => {
+      const socket = factory(url)
+      await new Promise<void>((resolve, reject) => {
+        socket.on('open', () => resolve())
+        socket.on('error', (message) => reject(new Error(message)))
+      })
+
+      expect(typeof socket.bufferedAmount).toBe('number')
+
+      socket.close()
+    })
+  })
+
+  describe('and binaryType is arraybuffer and the server sends a binary frame', () => {
+    beforeEach(() => {
+      wss.on('connection', (socket) => socket.send(Buffer.from([1, 2, 3]), { binary: true }))
+    })
+
+    it('should deliver the frame as bytes rather than a string', async () => {
+      const socket = factory(url)
+      socket.binaryType = 'arraybuffer'
+
+      const received = await new Promise<string | Uint8Array>((resolve, reject) => {
+        socket.on('message', (data) => {
+          socket.close()
+          resolve(data)
+        })
+        socket.on('error', (message) => reject(new Error(message)))
+      })
+
+      expect(received).toBeInstanceOf(Uint8Array)
+      expect(Array.from(received as Uint8Array)).toEqual([1, 2, 3])
+    })
+  })
 })
 
 describe('when normalizing an incoming ws frame', () => {

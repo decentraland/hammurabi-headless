@@ -30,8 +30,12 @@ export const WS_CLOSED = 3
 export interface HostWebSocket {
   readonly url: string
   readonly readyState: number
+  readonly bufferedAmount: number
+  // 'blob' (default) delivers binary frames as UTF-8 strings (Blob is unsupported);
+  // 'arraybuffer' delivers them as bytes. Text frames are always strings.
+  binaryType: string
   on(event: 'open', listener: () => void): void
-  on(event: 'message', listener: (data: string) => void): void
+  on(event: 'message', listener: (data: string | Uint8Array) => void): void
   on(event: 'error', listener: (message: string) => void): void
   on(event: 'close', listener: (code: number, reason: string) => void): void
   send(data: unknown): void
@@ -70,6 +74,14 @@ export function rawDataToString(data: WS.RawData): string {
   return Buffer.from(data as ArrayBuffer).toString('utf-8')
 }
 
+/** Normalize a ws frame to a Uint8Array (for binaryType 'arraybuffer' delivery). */
+export function rawDataToBytes(data: WS.RawData): Uint8Array {
+  if (typeof data === 'string') return new Uint8Array(Buffer.from(data, 'utf-8'))
+  if (Buffer.isBuffer(data)) return new Uint8Array(data)
+  if (Array.isArray(data)) return new Uint8Array(Buffer.concat(data))
+  return new Uint8Array(data as ArrayBuffer)
+}
+
 /**
  * Reject close args that `ws` would choke on. `ws.close(badCode)` flips its state
  * to CLOSING and *then* throws, wedging the socket (no frame sent, un-re-closable),
@@ -95,13 +107,14 @@ function toGuardableUrl(wsUrl: string): string {
 
 type Listeners = {
   open: Array<() => void>
-  message: Array<(data: string) => void>
+  message: Array<(data: string | Uint8Array) => void>
   error: Array<(message: string) => void>
   close: Array<(code: number, reason: string) => void>
 }
 
 class SceneWebSocketConnection implements HostWebSocket {
   readonly url: string
+  binaryType = 'blob'
   private state: number = WS_CONNECTING
   private socket: WS | null = null
   private closeRequested: { code?: number; reason?: string } | null = null
@@ -135,8 +148,12 @@ class SceneWebSocketConnection implements HostWebSocket {
     return this.state
   }
 
+  get bufferedAmount(): number {
+    return this.socket?.bufferedAmount ?? 0
+  }
+
   private emit(event: 'open'): void
-  private emit(event: 'message', data: string): void
+  private emit(event: 'message', data: string | Uint8Array): void
   private emit(event: 'error', message: string): void
   private emit(event: 'close', code: number, reason: string): void
   private emit(event: keyof Listeners, ...args: any[]): void {
@@ -189,8 +206,14 @@ class SceneWebSocketConnection implements HostWebSocket {
       this.state = WS_OPEN
       this.emit('open')
     })
-    socket.on('message', (data: WS.RawData) => {
-      this.emit('message', rawDataToString(data))
+    socket.on('message', (data: WS.RawData, isBinary: boolean) => {
+      // Text frames are always strings; binary frames become bytes only when the
+      // scene opted into binaryType 'arraybuffer' (else fall back to a UTF-8 string).
+      if (isBinary && this.binaryType === 'arraybuffer') {
+        this.emit('message', rawDataToBytes(data))
+      } else {
+        this.emit('message', rawDataToString(data))
+      }
     })
     socket.on('error', (err: Error) => this.emit('error', errorMessage(err)))
     socket.on('close', (code: number, reason: Buffer) => {

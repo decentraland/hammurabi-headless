@@ -282,14 +282,37 @@ export async function withQuickJsVm<T>(
         }).consume((fn) => vm.setProp(vm.global, 'require', fn))
 
         // Global `fetch` (ADR-133): unprivileged, SSRF-guarded, body-capped.
-        // Installed only when the runtime supplies a host fetch. The host returns a
-        // Promise; nativeToVmType turns it into a VM promise the scene can await.
+        // Installed only when the runtime supplies a host fetch. The host exposes
+        // __hostFetch/__hostAbortFetch; the shim wraps them into a WHATWG-shaped
+        // `fetch` (Response with arrayBuffer(), AbortSignal cancellation).
         if (opts.fetch) {
           const hostFetch = opts.fetch
-          vm.newFunction('fetch', (...args) => {
+          // Correlates a scene AbortSignal (VM side) to the host AbortController for
+          // its in-flight request; entries are removed when the request settles.
+          const fetchControllers = new Map<number, AbortController>()
+
+          vm.newFunction('__hostFetch', (...args) => {
             const localArgs = args.map(($) => $.consume(($) => dumpAndDispose(vm, $)))
-            return nativeToVmType(vm, hostFetch(localArgs[0], localArgs[1]))
-          }).consume((fn) => vm.setProp(vm.global, 'fetch', fn))
+            const [url, init, token] = localArgs
+            const controller = new AbortController()
+            if (typeof token === 'number') fetchControllers.set(token, controller)
+            const promise = hostFetch(url, init, controller.signal).finally(() => {
+              if (typeof token === 'number') fetchControllers.delete(token)
+            })
+            return nativeToVmType(vm, promise)
+          }).consume((fn) => vm.setProp(vm.global, '__hostFetch', fn))
+
+          vm.newFunction('__hostAbortFetch', (tokenHandle) => {
+            const token = tokenHandle ? tokenHandle.consume(($) => dumpAndDispose(vm, $)) : undefined
+            if (typeof token === 'number') fetchControllers.get(token)?.abort()
+          }).consume((fn) => vm.setProp(vm.global, '__hostAbortFetch', fn))
+
+          const fetchShim = vm.evalCode(SCENE_FETCH_SHIM)
+          if (fetchShim.error) {
+            const err = dumpAndDispose(vm, fetchShim.error)
+            throw err instanceof Error ? err : new Error(String(err))
+          }
+          fetchShim.value.dispose()
         }
 
         // Global `WebSocket` (ADR-133): backed by a host connection, with events
@@ -385,6 +408,60 @@ export async function withQuickJsVm<T>(
   return { result, leaking }
 }
 
+// VM-side wrapper for the global `fetch`. Wraps the host __hostFetch into a
+// WHATWG-shaped Response (adds arrayBuffer() via bytes().buffer, which can't be
+// marshalled directly host→VM), and threads AbortSignal cancellation to the host
+// via a per-request token. Provides a minimal AbortController/AbortSignal when the
+// engine lacks them.
+const SCENE_FETCH_SHIM =
+  ';(function () {' +
+  'var hostFetch = globalThis.__hostFetch;' +
+  'var hostAbort = globalThis.__hostAbortFetch;' +
+  'var nextToken = 1;' +
+  'if (typeof globalThis.AbortController === "undefined") {' +
+  '  var AbortSignal = function () { this.aborted = false; this.reason = undefined; this._listeners = []; };' +
+  '  AbortSignal.prototype.addEventListener = function (type, fn) { if (type === "abort" && typeof fn === "function") this._listeners.push(fn); };' +
+  '  AbortSignal.prototype.removeEventListener = function (type, fn) { var i = this._listeners.indexOf(fn); if (i !== -1) this._listeners.splice(i, 1); };' +
+  '  AbortSignal.prototype.dispatchEvent = function () { return true; };' +
+  '  var AbortController = function () { this.signal = new AbortSignal(); };' +
+  '  AbortController.prototype.abort = function (reason) {' +
+  '    var s = this.signal; if (s.aborted) return; s.aborted = true; s.reason = reason;' +
+  '    if (typeof s.onabort === "function") { try { s.onabort({ type: "abort" }); } catch (e) {} }' +
+  '    var list = s._listeners.slice(); for (var i = 0; i < list.length; i++) { try { list[i]({ type: "abort" }); } catch (e) {} }' +
+  '  };' +
+  '  globalThis.AbortController = AbortController; globalThis.AbortSignal = AbortSignal;' +
+  '}' +
+  'function abortError() { var e = new Error("The operation was aborted"); e.name = "AbortError"; return e; }' +
+  'function wrapResponse(raw) {' +
+  '  return {' +
+  '    ok: raw.ok, status: raw.status, statusText: raw.statusText, url: raw.url, redirected: raw.redirected,' +
+  '    headers: raw.headers,' +
+  '    text: function () { return raw.text(); },' +
+  '    json: function () { return raw.json(); },' +
+  '    bytes: function () { return raw.bytes(); },' +
+  '    arrayBuffer: function () { return raw.bytes().then(function (u8) { return u8.buffer; }); }' +
+  '  };' +
+  '}' +
+  'globalThis.fetch = function (url, init) {' +
+  '  init = init || {};' +
+  '  var signal = init.signal;' +
+  '  if (signal && signal.aborted) return Promise.reject(abortError());' +
+  '  var token = nextToken++;' +
+  '  var onAbort;' +
+  '  if (signal) { onAbort = function () { hostAbort(token); }; signal.addEventListener("abort", onAbort); }' +
+  '  var cleanInit = { method: init.method, headers: init.headers, body: init.body, redirect: init.redirect };' +
+  '  return hostFetch(url, cleanInit, token).then(function (raw) {' +
+  '    if (signal && onAbort) signal.removeEventListener("abort", onAbort);' +
+  '    return wrapResponse(raw);' +
+  '  }, function (err) {' +
+  '    if (signal && onAbort) signal.removeEventListener("abort", onAbort);' +
+  '    if (signal && signal.aborted) throw abortError();' +
+  '    throw err;' +
+  '  });' +
+  '};' +
+  'delete globalThis.__hostFetch; delete globalThis.__hostAbortFetch;' +
+  '})();'
+
 /**
  * Install the scene-facing global `WebSocket` constructor, backed by host
  * connections from `factory`. Push events (open/message/error/close) are bridged
@@ -407,29 +484,32 @@ function setupSceneWebSocket(
   // simultaneously-open count, not the lifetime total. Generous for real scenes.
   const MAX_OPEN_SOCKETS = 32
 
-  // Call the scene's `on<event>` handler (when it is a function) with `arg`.
-  function dispatch(instance: QuickJSHandle, handlerName: string, arg: unknown): void {
+  // Deliver an event via the VM-side `__dispatch` (installed by the shim), which
+  // fans out to BOTH the `on<type>` handler and any addEventListener listeners.
+  function dispatch(instance: QuickJSHandle, type: string, event: unknown): void {
     if (tornDown || !vm.alive) return
     startSyncTurn()
-    let handler: QuickJSHandle | undefined
+    let dispatchFn: QuickJSHandle | undefined
     try {
-      handler = vm.getProp(instance, handlerName)
-      if (vm.typeof(handler) === 'function') {
-        const argHandle = nativeToVmType(vm, arg)
+      dispatchFn = vm.getProp(instance, '__dispatch')
+      if (vm.typeof(dispatchFn) === 'function') {
+        const typeHandle = nativeToVmType(vm, type)
+        const eventHandle = nativeToVmType(vm, event)
         try {
-          const call = vm.callFunction(handler, instance, argHandle)
+          const call = vm.callFunction(dispatchFn, instance, typeHandle, eventHandle)
           // Dispose whichever handle came back — a scene handler that throws must
           // not leak its error handle (a live handle aborts JS_FreeRuntime).
           if (call.error) call.error.dispose()
           else call.value.dispose()
         } finally {
-          argHandle.dispose()
+          typeHandle.dispose()
+          eventHandle.dispose()
         }
       }
     } catch (err) {
       console.error('QuickJS WebSocket dispatch failed:', err)
     } finally {
-      handler?.dispose()
+      dispatchFn?.dispose()
       try {
         if (!tornDown && vm.alive) drainPendingJobs(vm)
       } catch (err) {
@@ -464,6 +544,22 @@ function setupSceneWebSocket(
     const instance = vm.newObject()
     nativeToVmType(vm, WS_CONNECTING).consume(($) => vm.setProp(instance, 'readyState', $))
     nativeToVmType(vm, url).consume(($) => vm.setProp(instance, 'url', $))
+    // Live WHATWG `bufferedAmount` (readonly) reading host state each access, so a
+    // scene can self-regulate before it hits the outbound-buffer cap in send().
+    vm.defineProp(instance, 'bufferedAmount', {
+      enumerable: true,
+      get: () => nativeToVmType(vm, socket.bufferedAmount)
+    })
+    // WHATWG binaryType: the scene sets 'arraybuffer' to receive binary frames as an
+    // ArrayBuffer (converted from bytes in __dispatch); default 'blob' → strings.
+    vm.defineProp(instance, 'binaryType', {
+      enumerable: true,
+      get: () => nativeToVmType(vm, socket.binaryType),
+      set: (valueHandle) => {
+        const value = dumpAndDispose(vm, valueHandle)
+        if (value === 'arraybuffer' || value === 'blob') socket.binaryType = value
+      }
+    })
 
     vm.newFunction('send', (dataHandle) => {
       const data = dataHandle ? dataHandle.consume(($) => dumpAndDispose(vm, $)) : undefined
@@ -488,13 +584,13 @@ function setupSceneWebSocket(
 
     socket.on('open', () => {
       setReadyState(held, WS_OPEN)
-      dispatch(held, 'onopen', {})
+      dispatch(held, 'open', { type: 'open' })
     })
-    socket.on('message', (data) => dispatch(held, 'onmessage', { data }))
-    socket.on('error', (message) => dispatch(held, 'onerror', { message, type: 'error' }))
+    socket.on('message', (data) => dispatch(held, 'message', { type: 'message', data }))
+    socket.on('error', (message) => dispatch(held, 'error', { type: 'error', message }))
     socket.on('close', (code, reason) => {
       setReadyState(held, WS_CLOSED)
-      dispatch(held, 'onclose', { code, reason })
+      dispatch(held, 'close', { type: 'close', code, reason, wasClean: code === 1000 })
       // delete returns false if closeAll already reclaimed it — avoids a double free.
       if (live.delete(entry)) safeDispose(held)
     })
@@ -519,6 +615,29 @@ function setupSceneWebSocket(
       'WebSocket.OPEN = WebSocket.prototype.OPEN = 1;' +
       'WebSocket.CLOSING = WebSocket.prototype.CLOSING = 2;' +
       'WebSocket.CLOSED = WebSocket.prototype.CLOSED = 3;' +
+      // WHATWG EventTarget surface: addEventListener/removeEventListener alongside
+      // the on<type> properties. The host calls __dispatch, which fans out to both.
+      'WebSocket.prototype.addEventListener = function (type, listener) {' +
+      '  if (typeof listener !== "function") return;' +
+      '  var map = this.__listeners || (this.__listeners = {});' +
+      '  var arr = map[type] || (map[type] = []);' +
+      '  if (arr.indexOf(listener) === -1) arr.push(listener);' +
+      '};' +
+      'WebSocket.prototype.removeEventListener = function (type, listener) {' +
+      '  var arr = this.__listeners && this.__listeners[type];' +
+      '  if (!arr) return;' +
+      '  var i = arr.indexOf(listener);' +
+      '  if (i !== -1) arr.splice(i, 1);' +
+      '};' +
+      'WebSocket.prototype.__dispatch = function (type, event) {' +
+      // Binary frames arrive as a Uint8Array; expose them as an ArrayBuffer (what
+      // binaryType "arraybuffer" promises) since a raw ArrayBuffer can't be marshalled.
+      '  if (type === "message" && event && event.data instanceof Uint8Array) { event.data = event.data.buffer; }' +
+      '  var handler = this["on" + type];' +
+      '  if (typeof handler === "function") { try { handler.call(this, event); } catch (e) {} }' +
+      '  var arr = this.__listeners && this.__listeners[type];' +
+      '  if (arr) { var list = arr.slice(); for (var i = 0; i < list.length; i++) { try { list[i].call(this, event); } catch (e) {} } }' +
+      '};' +
       'globalThis.WebSocket = WebSocket;' +
       'delete globalThis.__hammurabiCreateWebSocket;' +
       '})();'

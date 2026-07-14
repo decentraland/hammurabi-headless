@@ -17,8 +17,10 @@ export type ProvideOptions = {
   error(...args: any[]): void
   // global Common.js-like require
   require(module: string): any
-  // global `fetch` — unprivileged (unsigned), SSRF-guarded, body-capped
-  fetch?(url: string, init?: SceneFetchInit): Promise<SceneResponse>
+  // host fetch backing the scene's global `fetch` — unprivileged (unsigned),
+  // SSRF-guarded, body-capped; the optional signal lets the VM abort an in-flight
+  // request. Returns a raw response the VM shim wraps into a WHATWG-shaped Response.
+  fetch?(url: string, init?: SceneFetchInit, signal?: AbortSignal): Promise<SceneResponse>
   // backing factory for the global `WebSocket` constructor (host-side connection)
   webSocket?: HostWebSocketFactory
 }
