@@ -70,6 +70,7 @@ describe('when a scene uses the global fetch', () => {
       `)
 
       await opts.onStart()
+      await waitFor(() => logs.length >= 4)
     })
 
     expect(logs).toEqual(['status', 200, 'hello', 'world'])
@@ -392,6 +393,7 @@ describe('when a scene uses fetch against a real server', () => {
       `)
 
       await opts.onStart()
+      await waitFor(() => logs.length >= 4)
     })
 
     expect(logs).toEqual(['isAB', true, 'bytes', '10,20,30'])
@@ -424,6 +426,7 @@ describe('when a scene uses fetch against a real server', () => {
       `)
 
       await opts.onStart()
+      await waitFor(() => logs.length >= 2)
     })
 
     expect(logs).toEqual(['rejected', 'AbortError'])
@@ -459,6 +462,10 @@ describe('when a scene uses fetch against a real server', () => {
       `)
 
       await opts.onStart()
+      // console.log crosses to the host asynchronously (applyIgnored), so wait for
+      // the log to arrive before disposing the isolate rather than asserting on the
+      // race between log delivery and onStart resolution.
+      await waitFor(() => logs.length >= 2)
     })
 
     expect(logs).toEqual(['rejected', 'AbortError'])
