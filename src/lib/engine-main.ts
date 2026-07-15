@@ -18,6 +18,8 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
+import { registerShutdownHook, runGracefulShutdown, EXIT_CODES } from './misc/shutdown'
+import { limits } from './misc/limits'
 import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
@@ -25,7 +27,8 @@ import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
-const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = 10
+// (HAMMURABI_MS_PER_FRAME_PROCESSING_SCENE_MESSAGES)
+const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = limits.msPerFrameProcessingSceneMessages
 
 import { DclEnvironment } from './decentraland/environment'
 export { DclEnvironment }
@@ -67,8 +70,14 @@ let initialized = false
 type EngineSession = {
   babylonScene?: BABYLON.Scene
   transport?: { disconnect(): Promise<void> }
+  sceneContext?: SceneContext
 }
 let activeSession: EngineSession | undefined
+
+// The graceful-shutdown hook reads the CURRENT session (via `activeSession`), which
+// resetEngine() clears — so after a hot reload it never disposes a stale/disposed
+// scene or misses the live one.
+let shutdownHookRegistered = false
 
 function disposeSession(session: EngineSession) {
   // Tear down comms: the DISCONNECTION handler ignores client-initiated closes,
@@ -306,6 +315,20 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
     ctx.attachLivekitTransport(sceneTransport)
   })
 
+  // Record this session's scene so the (single) shutdown hook tears down cleanly:
+  // disposing the scene closes its RPC transport, so the scene's update loop exits
+  // between turns and the isolate disposes IDLE (disposing/exiting mid-turn
+  // SIGSEGVs the process). Reading through `activeSession` means resetEngine()
+  // clearing it makes the hook track the current session (or no-op post-reset).
+  session.sceneContext = loadedSceneContext
+  if (!shutdownHookRegistered) {
+    shutdownHookRegistered = true
+    registerShutdownHook(async () => {
+      try { activeSession?.sceneContext?.dispose() } catch { /* best-effort */ }
+      try { await activeSession?.transport?.disconnect() } catch { /* best-effort */ }
+    })
+  }
+
   // A headless server is useless without comms. If the transport is lost
   // unexpectedly (i.e. not a clean local disconnect), exit so the supervising
   // process restarts us with a fresh connection and token. LiveKit already
@@ -316,8 +339,10 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
     if (event.clientInitiated) return
     commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
     if (restartOnCommsLoss) {
-      commsLogger.error('Exiting so the server can be restarted with a fresh connection')
-      process.exit(1)
+      commsLogger.error('Shutting down so the supervisor can restart us with a fresh connection')
+      // Graceful (dispose scene → isolate goes idle → clean exit); a bare
+      // process.exit() here would SIGSEGV whenever a scene turn is mid-flight.
+      void runGracefulShutdown(EXIT_CODES.COMMS_LOST)
     }
   })
 

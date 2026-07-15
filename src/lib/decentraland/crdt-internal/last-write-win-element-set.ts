@@ -4,6 +4,7 @@ import { Entity } from "../types"
 import { ComponentDeclaration, ComponentType, LastWriteWinElementSetComponentDefinition, SerDe } from "./components"
 import { ProcessMessageResultType } from "./conflict-resolution"
 import { dataCompare } from "./dataCompare"
+import { limits } from "../../misc/limits"
 
 export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, number>): number {
   const newTimestamp = (timestamps.get(entity) || 0) + 1
@@ -44,7 +45,7 @@ function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
 // entities, re-enabling the echo amplification the map exists to prevent at
 // exactly the scale where it matters. Eviction only ever costs a redundant
 // corrective message, never correctness.
-const MAX_ECHO_DEDUPE_ENTRIES = 8192
+const MAX_ECHO_DEDUPE_ENTRIES = limits.maxEchoDedupeEntries // HAMMURABI_MAX_ECHO_DEDUPE_ENTRIES
 
 export function createUpdateLwwFromCrdt<T>(
   componentId: number,

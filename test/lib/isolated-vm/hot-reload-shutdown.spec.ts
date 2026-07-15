@@ -1,7 +1,7 @@
 import { createRpcClient, createRpcServer } from '@dcl/rpc'
 import { MemoryTransport } from '@dcl/rpc/dist/transports/Memory'
 import { connectContextToRpcServer } from '../../../src/lib/babylon/scene/connect-context-rpc'
-import { startQuickJsSceneRuntime } from '../../../src/lib/quick-js/rpc-scene-runtime'
+import { startIsolatedVmSceneRuntime } from '../../../src/lib/isolated-vm/rpc-scene-runtime'
 import { defaultUpdateLoop, isTransportClosedError } from '../../../src/lib/common-runtime/game-loop'
 import type { SceneContext } from '../../../src/lib/babylon/scene/scene-context'
 
@@ -9,8 +9,8 @@ import type { SceneContext } from '../../../src/lib/babylon/scene/scene-context'
 // loop (defaultUpdateLoop): closing the scene's RPC transport — what
 // SceneContext.dispose() does on hot reload — must end the runtime CLEANLY,
 // with the abandoned in-flight RPC classified as a shutdown rather than
-// surfacing as the spurious error this fix removed. Before the fix the old VM
-// hung on the dead RPC until the 60s async-turn timeout killed it.
+// surfacing as a spurious scene error. This lives in common-runtime/game-loop.ts
+// + SceneContext and is engine-agnostic.
 
 const encoder = new TextEncoder()
 
@@ -55,7 +55,7 @@ async function startRuntime(source: string, contextOverrides: Record<string, unk
   const logs: any[] = []
   const errors: any[] = []
 
-  const runtime = startQuickJsSceneRuntime(port, {
+  const runtime = startIsolatedVmSceneRuntime(port, {
     log: (...args: any[]) => logs.push(...args),
     error: (...args: any[]) => errors.push(...args),
     updateLoop: defaultUpdateLoop

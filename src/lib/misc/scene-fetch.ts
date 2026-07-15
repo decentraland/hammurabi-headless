@@ -1,16 +1,17 @@
 import { robustFetch, readBodyCappedBytes, drainResponse, DEFAULT_MAX_BODY_BYTES } from './network'
 import { assertPublicSceneUrl } from './ssrf'
+import { limits } from './limits'
 
 // Max redirects the global `fetch` will follow. Each hop is re-checked by the
 // SSRF guard, mirroring `~system/SignedFetch`, so a public host can't 3xx a
 // scene request onto a private address the guard would otherwise have blocked.
-const MAX_FETCH_REDIRECTS = 5
+const MAX_FETCH_REDIRECTS = limits.maxFetchRedirects // HAMMURABI_MAX_FETCH_REDIRECTS
 
 // Cap concurrent in-flight requests per scene. Each request holds a host socket +
 // DNS lookup (libuv threadpool) + a VM deferred, none of which the VM heap ceiling
 // bounds, so an ungated `fetch()` loop could exhaust host FDs/memory and amplify
-// outbound traffic. Mirrors MAX_OPEN_SOCKETS for WebSocket. Generous for real scenes.
-const DEFAULT_MAX_CONCURRENT_FETCHES = 32
+// outbound traffic. Mirrors MAX_OPEN_SOCKETS for WebSocket. (HAMMURABI_MAX_CONCURRENT_FETCHES)
+const DEFAULT_MAX_CONCURRENT_FETCHES = limits.maxConcurrentFetches
 
 /**
  * Subset of the WHATWG `RequestInit` a scene may pass. Values arrive already

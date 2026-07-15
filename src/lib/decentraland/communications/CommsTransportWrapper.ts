@@ -1,6 +1,7 @@
 import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, TransportMessageEvent, commsLogger } from './types'
+import { limits } from '../../misc/limits'
 
 export enum RoomConnectionStatus {
   NONE,
@@ -37,9 +38,15 @@ export type CommsEvents = Pick<CommsTransportEvents, 'DISCONNECTION' | 'PEER_CON
 // Inbound packets come from untrusted remote peers and are decoded in host code.
 // Drop anything larger than this before decoding, and rate-limit per peer so a
 // single peer can't flood the CRDT/profile pipeline.
-const MAX_INBOUND_PACKET_BYTES = 128 * 1024
-const INBOUND_RATE_WINDOW_MS = 1000
-const MAX_MESSAGES_PER_WINDOW = 300 // generous: allows ~30Hz movement + other traffic
+const MAX_INBOUND_PACKET_BYTES = limits.maxInboundPacketBytes // HAMMURABI_MAX_INBOUND_PACKET_BYTES
+const INBOUND_RATE_WINDOW_MS = limits.inboundRateWindowMs // HAMMURABI_INBOUND_RATE_WINDOW_MS
+const MAX_MESSAGES_PER_WINDOW = limits.maxMessagesPerWindow // HAMMURABI_MAX_MESSAGES_PER_WINDOW (allows ~30Hz movement + other traffic)
+// Hard cap on the per-peer rate map. It is normally pruned on PEER_DISCONNECTED,
+// but a `message` event can arrive AFTER a peer's disconnect (LiveKit does not
+// strictly order DataReceived vs. ParticipantDisconnected), re-creating an entry
+// that is then never pruned. Bound it independently so sustained churn can't grow
+// the map without limit; entries are tiny and the oldest is evicted first.
+const MAX_RATE_ENTRIES = limits.maxRateEntries // HAMMURABI_MAX_RATE_ENTRIES
 
 export class CommsTransportWrapper {
   readonly events = mitt<CommsEvents>()
@@ -66,6 +73,12 @@ export class CommsTransportWrapper {
     const now = Date.now()
     const entry = this.inboundRate.get(address)
     if (!entry || now - entry.windowStart >= INBOUND_RATE_WINDOW_MS) {
+      // Evict the oldest entry (Map preserves insertion order) if a leaked/straggler
+      // set has pushed the map past its cap, so it can't grow without bound.
+      if (!entry && this.inboundRate.size >= MAX_RATE_ENTRIES) {
+        const oldest = this.inboundRate.keys().next().value
+        if (oldest !== undefined) this.inboundRate.delete(oldest)
+      }
       this.inboundRate.set(address, { windowStart: now, count: 1 })
       return false
     }
@@ -192,6 +205,18 @@ export class CommsTransportWrapper {
       return
     }
 
+    // The decode above is guarded, but the dispatch is not: a downstream listener
+    // throwing on a validly-decoded-but-hostile field (or an unexpected
+    // participant shape) would otherwise become an uncaught exception driven by a
+    // remote peer. Drop the packet and log (throttled) instead.
+    try {
+      this.dispatchMessage(address, message)
+    } catch (error: any) {
+      commsLogger.error(`Failed to dispatch packet from ${address}: ${error?.message ?? error}`)
+    }
+  }
+
+  private dispatchMessage(address: string, message: NonNullable<proto.Packet['message']>) {
     switch (message.$case) {
       case 'position': {
         this.transport.setVoicePosition(address, message.position)

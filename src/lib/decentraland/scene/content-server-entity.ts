@@ -38,13 +38,23 @@ export type LoadableScene = Readonly<{
   entity: ContentServerEntity
 }>
 
+// A content hash is an IPFS CID (CIDv0 `Qm…` base58 / CIDv1 `bafy…` base32) — always
+// alphanumeric. Reject anything else: the hash is concatenated into the fetch URL as
+// a path segment (`baseUrl + hash`), so a deployer-controlled hash containing `/`,
+// `..`, `?`, `@`, etc. would let WHATWG URL normalization traverse to an arbitrary
+// path on the realm origin (e.g. `../../../etc/passwd`). This guards every consumer
+// at the single resolution point.
+function isValidContentHash(hash: string): boolean {
+  return /^[A-Za-z0-9]+$/.test(hash)
+}
+
 export function resolveFile(entity: Pick<ContentServerEntity, 'content'>, src: string): string | null {
   // filenames are lower cased as per https://adr.decentraland.org/adr/ADR-80
   const normalized = src.toLowerCase()
 
   // and we iterate over the entity content mappings to resolve the file hash
   for (const { file, hash } of entity.content) {
-    if (file.toLowerCase() == normalized) return hash
+    if (file.toLowerCase() == normalized) return isValidContentHash(hash) ? hash : null
   }
 
   return null

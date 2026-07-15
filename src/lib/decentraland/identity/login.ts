@@ -100,8 +100,18 @@ export async function createGuestIdentity(): Promise<ExplorerIdentity> {
 }
 
 export async function loginFromPrivateKey(privateKey: string): Promise<StoreableIdentity> {
-  const privateKeyBytes = hexToBytes(privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey)
-  const publicKey = secp256k1.getPublicKey(privateKeyBytes, false).slice(1)
+  // Parse the key inside a guard so a malformed value never reaches an error
+  // message/stack: eth-connect's hexToBytes throws `Cannot read hex string:"<key>"`
+  // for any non-hex character (a typo of a real key), which the CLI would then log
+  // verbatim — leaking the operator's private key to stdout/log aggregators.
+  let privateKeyBytes: Uint8Array
+  let publicKey: Uint8Array
+  try {
+    privateKeyBytes = hexToBytes(privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey)
+    publicKey = secp256k1.getPublicKey(privateKeyBytes, false).slice(1)
+  } catch {
+    throw new Error('Invalid private key: expected a 32-byte hex string')
+  }
   const address = computeAddress(publicKey)
 
   const account: IdentityType = {
