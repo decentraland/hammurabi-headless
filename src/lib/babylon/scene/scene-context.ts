@@ -55,7 +55,7 @@ import { limits } from '../../misc/limits'
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
 // Untrusted-input bounds. Scene CRDT is fully attacker-controlled and is applied
-// in HOST code, outside the QuickJS VM's memory/interrupt limits — so these caps
+// in HOST code, outside the isolate's memory/execution limits — so these caps
 // are what keep a hostile scene from exhausting the worker's heap. Drops are
 // silent by design: logging per drop would let a scene amplify into log spam.
 const MAX_LIVE_ENTITIES = limits.maxLiveEntities // concurrent host BabylonEntity objects per scene (HAMMURABI_MAX_LIVE_ENTITIES)
@@ -82,7 +82,7 @@ export class SceneContext implements EngineApiInterface {
   // this future is resolved when the scene is disposed
   readonly stopped = future<void>()
   // RPC transports owned by this scene (registered by the runtime connector,
-  // e.g. the QuickJS memory transport). Unlike the shared comms transport
+  // e.g. the isolated-vm memory transport). Unlike the shared comms transport
   // below, these die with the scene: dispose() closes them, which flips the
   // scene runtime's port to 'closed' and ends its update loop. Owning this
   // here (not at each connector call site) means every runtime flavor gets
