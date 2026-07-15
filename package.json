@@ -39,7 +39,7 @@
   },
   "engines": {
     "npm": ">=8.0.0",
-    "node": ">=18.0.0"
+    "node": ">=26.0.0"
   },
   "publishConfig": {
     "access": "public",
@@ -70,7 +70,7 @@
     "@livekit/rtc-node": "^0.13.18",
     "ethereum-cryptography": "^2.0.0",
     "fp-future": "^1.0.1",
-    "isolated-vm": "^6.1.2",
+    "isolated-vm": "^7.0.0",
     "livekit-client": "^2.15.3",
     "livekit-server-sdk": "^2.13.2",
     "mitt": "^3.0.1",
