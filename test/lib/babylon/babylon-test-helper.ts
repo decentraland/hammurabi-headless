@@ -9,7 +9,7 @@ import { createSceneTickSystem } from '../../../src/lib/babylon/scene/update-sch
 import { LoadableScene } from '../../../src/lib/decentraland/scene/content-server-entity'
 import { addSystems } from '../../../src/lib/decentraland/system'
 import { Entity } from '../../../src/lib/decentraland/types'
-import { coerceMaybeU8Array } from '../../../src/lib/quick-js/convert-handles'
+import { coerceMaybeU8Array } from '../../../src/lib/common-runtime/marshal-utils'
 
 export type SceneTestEnvironment = {
   engine: BABYLON.NullEngine

@@ -67,15 +67,14 @@
     "@dcl/protocol": "^1.0.0-27167791416.commit-a470b13",
     "@dcl/rpc": "^1.1.3-20230519185613.commit-95da0ce",
     "@dcl/schemas": "^7.1.0",
-    "@jitl/quickjs-ng-wasmfile-release-sync": "^0.32.0",
     "@livekit/rtc-node": "^0.13.18",
     "ethereum-cryptography": "^2.0.0",
     "fp-future": "^1.0.1",
+    "isolated-vm": "^6.1.2",
     "livekit-client": "^2.15.3",
     "livekit-server-sdk": "^2.13.2",
     "mitt": "^3.0.1",
     "protobufjs": "^7.6.5",
-    "quickjs-emscripten-core": "^0.32.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

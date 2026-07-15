@@ -1,11 +1,11 @@
 /**
  * The set of standard ES2020 globals that a scene runtime is expected to expose.
- * QuickJS provides all of these natively inside its sandbox, so scene code has a
- * complete standard library WITHOUT any access to host (Node) globals such as
- * `process`, `require`, or the host `Function`/`eval`.
+ * The V8 isolate provides all of these natively inside its sandbox, so scene code
+ * has a complete standard library WITHOUT any access to host (Node) globals such
+ * as `process`, `require`, or a host-realm `Function`/`eval`.
  *
- * Kept as a checked list so `test/lib/runtime/quick-js-globals.spec.ts` can
- * assert the QuickJS context really does provide them.
+ * Kept as a checked list so `test/lib/isolated-vm/isolated-vm-globals.spec.ts` can
+ * assert the isolate really does provide them.
  */
 export const allowListES2020: Array<keyof typeof globalThis> = [
   'Array',

@@ -20,21 +20,22 @@ import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '..
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
+import { limits } from '../../misc/limits'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { StaticEntities } from './logic/static-entities'
 
 // Per-call caps on scene→LiveKit publishing (CommunicationsController.sendBinary).
 // The request is fully scene-controlled; without caps a scene could flood the room.
-const MAX_SEND_PEERS = 256
-const MAX_SEND_MESSAGES = 512
-const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network message limit
+const MAX_SEND_PEERS = limits.maxSendPeers // HAMMURABI_MAX_SEND_PEERS
+const MAX_SEND_MESSAGES = limits.maxSendMessages // HAMMURABI_MAX_SEND_MESSAGES
+const MAX_COMMS_MESSAGE_BYTES = limits.maxCommsMessageBytes // HAMMURABI_MAX_COMMS_MESSAGE_BYTES (matches the transport's network message limit)
 
 // Max redirects a scene SignedFetch will follow. Each hop is re-validated by the
 // SSRF guard so a public host can't 3xx-redirect the request onto a private
 // address (metadata endpoint, loopback admin) — the single-shot guard alone was
 // bypassable because the underlying fetch follows redirects transparently.
-const MAX_SIGNED_FETCH_REDIRECTS = 5
+const MAX_SIGNED_FETCH_REDIRECTS = limits.maxSignedFetchRedirects // HAMMURABI_MAX_SIGNED_FETCH_REDIRECTS
 
 // The world-storage-service. Requests to these hosts are signed with the
 // world-scoped storage delegation (when present) instead of the guest identity.
@@ -271,7 +272,11 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
             if (!(data instanceof Uint8Array) || data.length > MAX_COMMS_MESSAGE_BYTES) continue
             void context.transport.sendParcelSceneMessage(
               { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
-              peerData.address
+              // Cap the destination-identities list too: it's forwarded verbatim to
+              // LiveKit, so an unbounded per-message address array is host CPU/heap
+              // (serialize) + control-plane bytes with no real fan-out (the SFU
+              // drops unknown identities).
+              (peerData.address ?? []).slice(0, MAX_SEND_PEERS)
             )
           }
           if (processed >= MAX_SEND_MESSAGES) break

@@ -12,7 +12,8 @@ import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
 import { playerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
-import { robustFetch, drainResponse } from "../../misc/network"
+import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
+import { limits } from "../../misc/limits"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -39,8 +40,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   let deletionSequence = 0
   // Bound the tombstone map: peers churn through versioned entity ids over a long
   // session, and this grows once per departed peer. Oldest entries are evicted.
-  const MAX_DELETED_ENTITIES = 4096
+  const MAX_DELETED_ENTITIES = limits.maxAvatarTombstones // HAMMURABI_MAX_AVATAR_TOMBSTONES
   let currentTick = 0
+
+  // Throttle the "pool exhausted" warning. findPlayerEntityByAddress runs per
+  // inbound packet, so once the 224-slot remote-player pool is full an unallocated
+  // peer would otherwise log once per dropped packet — up to the per-peer inbound
+  // rate, aggregated across peers. On blocking stderr that is an event-loop-stall
+  // vector; log at most once per second regardless of how many packets are dropped.
+  let lastPoolExhaustedLogAt = 0
 
   // One tracker per live subscription: its highest emitted deletion sequence.
   const subscriptionTrackers = new Set<{ emittedSeq: number }>()
@@ -78,7 +86,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // lying peer whose real profile version is lower than announced can't make us
   // refetch), and rate-limit fetches per peer regardless of announced version.
   const profileFetchState = new Map<string, { attemptedVersion: number; lastFetchAt: number }>()
-  const PROFILE_FETCH_COOLDOWN_MS = 10_000
+  const PROFILE_FETCH_COOLDOWN_MS = limits.profileFetchCooldownMs // HAMMURABI_PROFILE_FETCH_COOLDOWN_MS
 
   function normalizeAddress(address: string) {
     return address.toLowerCase()
@@ -98,7 +106,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
         throw new Error(`Failed to fetch profile: ${response.status}`)
       }
 
-      const data: any = await response.json()
+      // Cap the (peer-influenced) profile body before buffering/parsing, matching
+      // the repo's other fetches; a compromised registry can't drive unbounded host
+      // memory here.
+      const data: any = JSON.parse(await readBodyCapped(response, DEFAULT_MAX_BODY_BYTES))
       return data[0]?.avatars?.[0]
     } catch (error) {
       console.error('Failed to fetch profile:', error)
@@ -248,7 +259,11 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // Allocate a new entity for this remote player
     entity = playerEntityManager.allocateEntityForPlayer(normalizedAddress, false)
     if (entity === null) {
-      console.warn(`Failed to allocate entity for player ${normalizedAddress}`)
+      const now = Date.now()
+      if (now - lastPoolExhaustedLogAt > 1000) {
+        lastPoolExhaustedLogAt = now
+        console.warn('Remote player entity pool exhausted; dropping packets from unallocated peers')
+      }
       return null
     }
 

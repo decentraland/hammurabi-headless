@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { main, resetEngine } from './lib/engine-main'
+import { runGracefulShutdown, EXIT_CODES } from './lib/misc/shutdown'
 import type { DclEnvironment } from './lib/decentraland/environment'
 
 // Parse arguments
@@ -60,7 +61,7 @@ Examples:
     // only to fail later with a misleading "No scene found".
     if (!/^-?\d+,-?\d+$/.test(position)) {
       console.error('❌ Invalid position format. Use --position=x,y (e.g., --position=80,80)')
-      process.exit(1)
+      process.exit(EXIT_CODES.CONFIG)
     }
   } else if (arg.startsWith('--scene-id=')) {
     sceneId = argValue!
@@ -71,7 +72,7 @@ Examples:
       environment = argValue
     } else {
       console.error('❌ Invalid --env value. Use --env=zone or --env=org')
-      process.exit(1)
+      process.exit(EXIT_CODES.CONFIG)
     }
   } else if (arg === '--production') {
     developmentMode = false
@@ -108,6 +109,20 @@ process.on('unhandledRejection', (reason: any) => {
     console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
   }
 })
+
+// Supervised (production) shutdown: a parent server signals us to stop. Tear down
+// gracefully — dispose the scene so its isolate reaches idle and the process exits
+// cleanly — instead of the OS killing us mid-turn (which would leave the LiveKit
+// participant dangling until the SFU times it out). Dev mode keeps the default
+// signal behavior so Ctrl+C exits immediately.
+if (!developmentMode) {
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, () => {
+      console.log(`↩️  Received ${signal}, shutting down gracefully…`)
+      void runGracefulShutdown(0, signal)
+    })
+  }
+}
 
 // Simple restart mechanism
 let isRestarting = false
@@ -173,6 +188,6 @@ start().catch(() => {
   // event loop alive, so without an explicit exit a supervisor would see a
   // healthy-looking process that will never serve.
   if (!developmentMode) {
-    process.exit(1)
+    process.exit(EXIT_CODES.STARTUP)
   }
 })

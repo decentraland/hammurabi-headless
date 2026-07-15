@@ -28,26 +28,63 @@ function isBlockedIpv4(ip: string): boolean {
   return false
 }
 
+// Fully expand a (possibly ::-compressed, possibly IPv4-tailed) IPv6 literal to
+// its 8 16-bit hextets. Returns null if it is not a well-formed 8-group address.
+function expandIpv6Hextets(v: string): number[] | null {
+  let s = v
+  // Fold a trailing dotted-IPv4 (e.g. ::ffff:1.2.3.4) into two hextets first.
+  const dotted = s.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (dotted) {
+    const b = [dotted[1], dotted[2], dotted[3], dotted[4]].map(Number)
+    if (b.some((n) => n > 255)) return null
+    s = s.slice(0, dotted.index) + ((b[0] << 8) | b[1]).toString(16) + ':' + ((b[2] << 8) | b[3]).toString(16)
+  }
+  const halves = s.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] === '' ? [] : halves[0].split(':')
+  const tail = halves.length === 2 ? (halves[1] === '' ? [] : halves[1].split(':')) : null
+  let groups: string[]
+  if (tail === null) {
+    groups = head
+  } else {
+    const fill = 8 - head.length - tail.length
+    if (fill < 0) return null
+    groups = [...head, ...new Array(fill).fill('0'), ...tail]
+  }
+  if (groups.length !== 8) return null
+  const nums = groups.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN))
+  if (nums.some((n) => Number.isNaN(n))) return null
+  return nums
+}
+
 function isBlockedIpv6(ip: string): boolean {
   const v = ip.toLowerCase().replace(/^\[/, '').replace(/\]$/, '')
   if (v === '::1' || v === '::') return true // loopback / unspecified
   if (v.startsWith('fe80')) return true // link-local
   if (v.startsWith('fc') || v.startsWith('fd')) return true // unique-local fc00::/7
 
-  // IPv4-mapped / -compatible in DOTTED form, e.g. ::ffff:169.254.169.254 or ::1.2.3.4
-  const dotted = v.match(/(\d+\.\d+\.\d+\.\d+)$/)
-  if (dotted) return isBlockedIpv4(dotted[1])
-
-  // IPv4-mapped in HEX form. `new URL()` normalizes ::ffff:169.254.169.254 to
-  // ::ffff:a9fe:a9fe, so the dotted match above never sees it — decode the last
-  // 32 bits back to IPv4 and apply the same block list. Without this the SSRF
-  // guard is bypassable (metadata endpoint, loopback, private ranges).
-  const mappedHex = v.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
-  if (mappedHex) {
-    const hi = parseInt(mappedHex[1], 16)
-    const lo = parseInt(mappedHex[2], 16)
-    const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
-    return isBlockedIpv4(ipv4)
+  // IPv6 forms that carry an IPv4 address inside the literal. `new URL()`
+  // normalizes these to hex, so a naive `::ffff:1.2.3.4` string match misses them;
+  // expand the address and apply the IPv4 block list to the embedded IPv4. Covers
+  // IPv4-mapped (::ffff:/96), IPv4-compatible (::/96, deprecated), NAT64
+  // (64:ff9b::/96), and 6to4 (2002::/16) — without this a loopback / cloud-metadata
+  // / private IPv4 tunnels past the guard through any of these prefixes.
+  const h = expandIpv6Hextets(v)
+  if (h) {
+    const low32 = `${(h[6] >> 8) & 0xff}.${h[6] & 0xff}.${(h[7] >> 8) & 0xff}.${h[7] & 0xff}`
+    // 6to4: 2002:AABB:CCDD::/48 embeds the IPv4 AA.BB.CC.DD in hextets 1-2.
+    if (h[0] === 0x2002) {
+      const ipv4 = `${(h[1] >> 8) & 0xff}.${h[1] & 0xff}.${(h[2] >> 8) & 0xff}.${h[2] & 0xff}`
+      if (isBlockedIpv4(ipv4)) return true
+    }
+    // NAT64 well-known prefix embeds the IPv4 in the low 32 bits.
+    if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+      if (isBlockedIpv4(low32)) return true
+    }
+    // IPv4-mapped / -compatible: first five hextets zero, sixth 0xffff or 0.
+    if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && (h[5] === 0xffff || h[5] === 0)) {
+      if (isBlockedIpv4(low32)) return true
+    }
   }
   return false
 }

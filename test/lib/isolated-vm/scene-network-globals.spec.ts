@@ -1,7 +1,7 @@
 import http from 'http'
 import { AddressInfo } from 'net'
 import { WebSocketServer } from 'ws'
-import { withQuickJsVm } from '../../../src/lib/quick-js/index'
+import { withIsolatedVm } from '../../../src/lib/isolated-vm/index'
 import { createSceneFetch } from '../../../src/lib/misc/scene-fetch'
 import { createSceneWebSocketFactory } from '../../../src/lib/misc/scene-websocket'
 import type { HostWebSocketFactory } from '../../../src/lib/misc/scene-websocket'
@@ -51,7 +51,7 @@ describe('when a scene uses the global fetch', () => {
   })
 
   it('should resolve a Response and await its json() body', async () => {
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -98,7 +98,7 @@ describe('when a scene uses the global WebSocket', () => {
     const logs: any[] = []
     const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -127,7 +127,7 @@ describe('when a scene uses the global WebSocket', () => {
     const logs: any[] = []
     const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -153,7 +153,7 @@ describe('when a scene uses the global WebSocket', () => {
     const logs: any[] = []
     const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -184,7 +184,7 @@ describe('when a scene uses the global WebSocket', () => {
     const logs: any[] = []
     const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -211,7 +211,7 @@ describe('when a scene uses the global WebSocket', () => {
     const logs: any[] = []
     const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -237,6 +237,55 @@ describe('when a scene uses the global WebSocket', () => {
 
     // 'second' was removed by 'first' during the same event, so it must not fire.
     expect(logs).toEqual(['first', 'closed'])
+  })
+
+  it('should reject an invalid close() code in the scene without touching the host socket', async () => {
+    const logs: any[] = []
+    const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
+
+    await withIsolatedVm(async (opts) => {
+      opts.provide({
+        log: (...args) => logs.push(...args),
+        error: (...args) => logs.push('ERR', ...args),
+        require: () => {
+          throw new Error('not implemented')
+        },
+        webSocket
+      })
+
+      opts.eval(`
+        const ws = new WebSocket(${JSON.stringify(url)})
+        ws.onopen = () => {
+          // 1234 is neither 1000 nor within 3000..4999 -> InvalidAccessError.
+          try {
+            ws.close(1234)
+            console.log('code-no-throw')
+          } catch (e) {
+            // Must throw IN the scene AND leave the socket open (readyState still 1),
+            // otherwise the scene would think it closed while the host socket lives on.
+            console.log('code', e.name, ws.readyState === WebSocket.OPEN)
+          }
+          // A reason over 123 UTF-8 bytes -> SyntaxError (also must not advance state).
+          try {
+            ws.close(1000, 'x'.repeat(124))
+            console.log('reason-no-throw')
+          } catch (e) {
+            console.log('reason', e.name, ws.readyState === WebSocket.OPEN)
+          }
+          // A valid code closes for real.
+          ws.close(3000)
+        }
+        ws.onclose = () => console.log('closed')
+      `)
+
+      await waitFor(() => logs.includes('closed'))
+    })
+
+    expect(logs).toEqual([
+      'code', 'InvalidAccessError', true,
+      'reason', 'SyntaxError', true,
+      'closed'
+    ])
   })
 })
 
@@ -267,7 +316,7 @@ describe('when a scene echoes a binary WebSocket frame', () => {
     const logs: any[] = []
     const webSocket = createSceneWebSocketFactory({ assertPublicUrl: async () => undefined })
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -324,7 +373,7 @@ describe('when a scene uses fetch against a real server', () => {
       res.end(Buffer.from([10, 20, 30]))
     }
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -351,7 +400,7 @@ describe('when a scene uses fetch against a real server', () => {
   it('should reject with an AbortError when the signal is already aborted', async () => {
     const logs: any[] = []
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -385,7 +434,7 @@ describe('when a scene uses fetch against a real server', () => {
     // A server that accepts the request but never responds, so abort is the only exit.
     handler = () => undefined
 
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -433,7 +482,7 @@ describe('when a scene opens more WebSockets than allowed', () => {
   })
 
   it('should throw once the concurrent-socket cap is reached', async () => {
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: (...args) => logs.push('ERR', ...args),
@@ -470,11 +519,9 @@ describe('when a scene leaves a WebSocket open at teardown', () => {
   let serverSawClose: Promise<void>
   let logs: any[]
   let webSocket: HostWebSocketFactory
-  let errorSpy: jest.SpyInstance
 
   beforeEach(async () => {
     logs = []
-    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
     wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => wss.on('listening', () => resolve()))
     serverSawClose = new Promise<void>((resolve) => {
@@ -486,12 +533,11 @@ describe('when a scene leaves a WebSocket open at teardown', () => {
   })
 
   afterEach(async () => {
-    errorSpy.mockRestore()
     await new Promise<void>((resolve) => wss.close(() => resolve()))
   })
 
-  it('should close the socket at teardown and free its handles without a leak', async () => {
-    await withQuickJsVm(async (opts) => {
+  it('should close the socket at teardown so the server observes the close', async () => {
+    await withIsolatedVm(async (opts) => {
       opts.provide({
         log: (...args) => logs.push(...args),
         error: () => undefined,
@@ -510,27 +556,21 @@ describe('when a scene leaves a WebSocket open at teardown', () => {
       await waitFor(() => logs.includes('opened'))
     })
 
-    // Teardown must have closed the socket (server observes it) ...
+    // Teardown must have closed the socket, and the server observes it.
     await serverSawClose
-    // ... and disposed the retained instance handle (a leak logs a JS_FreeRuntime abort).
-    const leaked = errorSpy.mock.calls.some((call) => /leaked handles/i.test(String(call[0] ?? '')))
-    expect(leaked).toBe(false)
   })
 })
 
 // Hot reload disposes the old VM (SceneContext.dispose → transport close → update
-// loop ends → withQuickJsVm finally → closeAll) and spawns a fresh one. Two
-// sequential VM lifecycles reproduce that: if cycle 1's teardown leaked a handle it
-// would abort JS_FreeRuntime and poison the process-cached WASM module, so cycle 2
-// (a fresh VM) would fail. Cycle 2 working proves reload safety.
+// loop ends → withIsolatedVm finally → closeAll) and spawns a fresh one. Two
+// sequential VM lifecycles reproduce that: cycle 1 tears down while a socket is
+// still open, and cycle 2 (a brand-new VM) must still work end to end.
 describe('when the scene runtime is torn down and restarted (hot reload)', () => {
   let wss: WebSocketServer
   let url: string
   let webSocket: HostWebSocketFactory
-  let errorSpy: jest.SpyInstance
 
   beforeEach(async () => {
-    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
     wss = new WebSocketServer({ port: 0, host: '127.0.0.1' })
     await new Promise<void>((resolve) => wss.on('listening', () => resolve()))
     wss.on('connection', (socket) => {
@@ -542,7 +582,6 @@ describe('when the scene runtime is torn down and restarted (hot reload)', () =>
   })
 
   afterEach(async () => {
-    errorSpy.mockRestore()
     await new Promise<void>((resolve) => wss.close(() => resolve()))
   })
 
@@ -559,7 +598,7 @@ describe('when the scene runtime is torn down and restarted (hot reload)', () =>
 
     // Cycle 1: open a socket and tear down WITHOUT closing it (the risky case).
     const logs1: any[] = []
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       provide(opts, logs1)
       opts.eval(`
         const ws = new WebSocket(${JSON.stringify(url)})
@@ -568,9 +607,9 @@ describe('when the scene runtime is torn down and restarted (hot reload)', () =>
       await waitFor(() => logs1.includes('opened'))
     })
 
-    // Cycle 2: a brand-new VM must still work end to end (module not poisoned).
+    // Cycle 2: a brand-new VM must still work end to end.
     const logs2: any[] = []
-    await withQuickJsVm(async (opts) => {
+    await withIsolatedVm(async (opts) => {
       provide(opts, logs2)
       opts.eval(`
         const ws = new WebSocket(${JSON.stringify(url)})
@@ -582,7 +621,5 @@ describe('when the scene runtime is torn down and restarted (hot reload)', () =>
     })
 
     expect(logs2).toEqual(['echo', 'ping', 'done'])
-    const leaked = errorSpy.mock.calls.some((call) => /leaked handles/i.test(String(call[0] ?? '')))
-    expect(leaked).toBe(false)
   })
 })

@@ -9,6 +9,18 @@ import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoo
 import { BabylonEntity } from "../BabylonEntity";
 import { pickMeshesForMask } from "./colliders";
 import { ColliderLayer } from "@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen";
+import { limits } from "../../../misc/limits";
+
+const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
+// Per-frame ceiling on total ray↔mesh intersection tests across ALL of a scene's
+// raycasts. processRaycasts runs in lateUpdate(), which has NO frame quota, and the
+// cost is O(pending raycasts × collider meshes) — both bounded only by the 100k
+// entity cap. Untrusted component data (many `continuous:true` raycasts, and/or a
+// GLB with tens of thousands of collider meshes) would otherwise stall the shared
+// host render loop for hundreds of ms to seconds per frame. When the budget is
+// exhausted the remaining raycasts are left pending and processed on later frames
+// (continuous ones re-run anyway; one-shot ones simply resolve a frame or two later).
+const MAX_RAYCAST_INTERSECTIONS_PER_FRAME = limits.maxRaycastIntersectionsPerFrame // HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
 
 /**
  * The processRaycasts function iterates over a copy of the pendingRaycastOperations
@@ -22,9 +34,27 @@ export function processRaycasts(scene: SceneContext) {
   const RaycastResult = scene.components[raycastResultComponent.componentId]
   const Raycast = scene.components[raycastComponent.componentId]
 
+  // Collect the intersectable meshes once per collision mask per frame instead of
+  // re-walking the whole scene subtree for every raycast.
+  const meshesByMask = new Map<number, BABYLON.AbstractMesh[]>()
+  const meshesForMask = (mask: number): BABYLON.AbstractMesh[] => {
+    let meshes = meshesByMask.get(mask)
+    if (!meshes) {
+      meshes = Array.from(pickMeshesForMask(scene.rootNode, mask))
+      meshesByMask.set(mask, meshes)
+    }
+    return meshes
+  }
+  let intersectionBudget = MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+
   // clone the set into an array to mutate the set while iterating
   const iter = Array.from(scene.pendingRaycastOperations)
   for (const entityId of iter) {
+    // Stop once this frame's intersection budget is spent; the still-pending
+    // raycasts run on subsequent frames (leaving them in the set is correct — a
+    // one-shot raycast is only removed below after it actually ran).
+    if (intersectionBudget <= 0) break
+
     const raycast = Raycast.getOrNull(entityId)
 
     if (raycast) {
@@ -33,8 +63,8 @@ export function processRaycasts(scene: SceneContext) {
         const ray = computeRayDirection(scene, raycast, entity.appliedComponents.raycast.ray, entity)
 
         // get a list of all possible meshes to project this ray to
-        const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
-        const intersectableMeshes = Array.from(pickMeshesForMask(scene.rootNode, raycast.collisionMask ?? DEFAULT_RAYCAST_MASK))
+        const intersectableMeshes = meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK)
+        intersectionBudget -= intersectableMeshes.length
 
         // then perform the actual raycast
         const results = ray.intersectsMeshes(intersectableMeshes, false)

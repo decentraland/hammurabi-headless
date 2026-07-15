@@ -96,7 +96,10 @@ export class PlayerEntityManager {
       return newEntity
     }
     
-    console.warn('No available entity slots for remote players')
+    // Pool exhausted. Do NOT log here: allocateEntityForPlayer is called per inbound
+    // packet, so a full pool (224 slots) would emit one line per dropped packet —
+    // up to the per-peer inbound rate, per peer — which for blocking stderr is an
+    // event-loop-stall vector. The caller logs this (throttled) instead.
     return null
   }
   

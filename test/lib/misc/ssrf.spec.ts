@@ -88,9 +88,39 @@ describe('assertPublicSceneUrl', () => {
     })
   })
 
+  describe('when the host is an IPv6 form that embeds an IPv4 address', () => {
+    // NAT64 (64:ff9b::/96), 6to4 (2002::/16), and the deprecated IPv4-compatible
+    // (::/96) prefixes each carry an IPv4 inside the literal; new URL() normalizes
+    // them to hex, so they bypassed the earlier ::ffff:-only check.
+    it('should reject NAT64 wrapping loopback / metadata', async () => {
+      await expect(assertPublicSceneUrl('http://[64:ff9b::7f00:1]/')).rejects.toThrow(/non-public/i)
+      await expect(assertPublicSceneUrl('http://[64:ff9b::a9fe:a9fe]/latest/meta-data/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should reject 6to4 wrapping loopback', async () => {
+      await expect(assertPublicSceneUrl('http://[2002:7f00:1::]/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should reject the IPv4-compatible form wrapping loopback', async () => {
+      await expect(assertPublicSceneUrl('http://[::7f00:1]/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should still allow these prefixes when they embed a PUBLIC IPv4', async () => {
+      // 8.8.8.8 embedded via 6to4 and NAT64 is a real public destination.
+      await expect(assertPublicSceneUrl('http://[2002:0808:0808::]/')).resolves.toBeUndefined()
+      await expect(assertPublicSceneUrl('http://[64:ff9b::0808:0808]/')).resolves.toBeUndefined()
+      expect(lookupMock).not.toHaveBeenCalled()
+    })
+  })
+
   describe('when the host is a public IP literal', () => {
     it('should allow it without a DNS lookup', async () => {
       await expect(assertPublicSceneUrl('https://8.8.8.8/path')).resolves.toBeUndefined()
+      expect(lookupMock).not.toHaveBeenCalled()
+    })
+
+    it('should allow a genuine public IPv6 address', async () => {
+      await expect(assertPublicSceneUrl('https://[2606:4700:4700::1111]/')).resolves.toBeUndefined()
       expect(lookupMock).not.toHaveBeenCalled()
     })
   })

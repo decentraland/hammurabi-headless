@@ -6,7 +6,7 @@ import { connectSceneContextUsingNodeJs } from './nodejs-runtime'
 import { loadedScenesByEntityId } from '../../decentraland/state'
 import { VirtualScene } from '../../decentraland/virtual-scene'
 import { json } from '../../misc/json'
-import { robustFetch } from '../../misc/network'
+import { robustFetch, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from '../../misc/network'
 import { Entity } from '@dcl/schemas'
 import { initHotReload } from './hot-reload'
 import { sleep } from '../../misc/promises'
@@ -108,7 +108,7 @@ export async function getLoadableSceneFromUrl(
   baseUrl: string,
   entity?: any
 ): Promise<LoadableScene> {
-  const resolvedEntity = entity ?? (await (await robustFetch(`${baseUrl}${entityId}`, {}, { label: 'entity' })).json())
+  const resolvedEntity = entity ?? JSON.parse(await readBodyCapped(await robustFetch(`${baseUrl}${entityId}`, {}, { label: 'entity' }), DEFAULT_MAX_BODY_BYTES))
 
   return {
     urn: entityId,
@@ -125,7 +125,7 @@ export async function getLoadableSceneFromUrl(
 export async function fetchSceneJson(baseUrl: string) {
   const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'
   const result = await robustFetch(`${normalizedBaseUrl}scene.json`, {}, { label: 'scene.json' })
-  return await result.json()
+  return JSON.parse(await readBodyCapped(result, DEFAULT_MAX_BODY_BYTES))
 }
 
 /**
@@ -147,7 +147,7 @@ export async function getLoadableSceneFromLocalContext(baseUrl: string) {
     body: JSON.stringify({ pointers })
   }, { label: 'entities/active' })
 
-  const entity = (await entitiesResponse.json() as any)[0]
+  const entity = (JSON.parse(await readBodyCapped(entitiesResponse, DEFAULT_MAX_BODY_BYTES)) as any)[0]
 
   return {
     baseUrl: baseUrl + '/content/contents/',
@@ -271,7 +271,10 @@ export async function loadSceneContextFromWorld(
 
   const scenesUrl = `${options.realmBaseUrl}/scenes`
   const scenesRes = await robustFetch(scenesUrl, {}, { label: 'world/scenes' })
-  const scenesBody = await scenesRes.json() as { scenes?: WorldSceneEntry[] }
+  // Cap before buffering/parsing (the body inlines deployer-controlled metadata),
+  // matching the /about + active-entities fetches; an uncapped `.json()` would OOM
+  // the worker → crash loop on a hostile/huge /scenes response.
+  const scenesBody = JSON.parse(await readBodyCapped(scenesRes, DEFAULT_MAX_BODY_BYTES)) as { scenes?: WorldSceneEntry[] }
   const scenes = scenesBody.scenes ?? []
 
   if (scenes.length === 0) {

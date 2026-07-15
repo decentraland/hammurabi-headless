@@ -1,6 +1,7 @@
 import { RuntimeAbstraction } from "./types"
+import { limits } from "../misc/limits"
 
-const MIN_FRAME_TIME = 24
+const MIN_FRAME_TIME = limits.minFrameTimeMs // HAMMURABI_MIN_FRAME_TIME_MS
 
 // Extract an error message that survives the VM round-trip: host-side rejections
 // arrive as Error instances, errors bubbled through scene code as marshalled
