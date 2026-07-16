@@ -22,6 +22,12 @@ import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, play
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
 import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/realm/resolution'
+import { Authenticator } from '@dcl/crypto'
+import { getSignedHeaders } from './decentraland/identity/signed-fetch'
+import { parseParcelPosition } from './decentraland/positions'
+import { ParcelEncoder } from '@dcl/pulse-client'
+import { CommsTransportWrapper } from './decentraland/communications/CommsTransportWrapper'
+import { PulseAdapter, DEFAULT_PARCEL_GRID } from './decentraland/communications/transports/pulse'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
@@ -113,6 +119,37 @@ export function resetEngine() {
 
   // Reset the initialization flag
   initialized = false
+}
+
+/** Comms protocol selected at startup. `pulse` is the default (WKC listener). */
+type CommsProtocol = 'pulse' | 'livekit'
+
+type CommsListenerConfig = {
+  protocol: CommsProtocol
+  host: string
+  port: number
+  realm: string
+}
+
+/**
+ * Read the comms-listener configuration from the environment ONCE, here at the
+ * boundary (no scattered `process.env` reads). Protocol is an ALLOWLIST (defaults
+ * to `pulse`); the port is bounds-checked. Pulse host/port/realm default to the
+ * .zone server.
+ */
+function readCommsListenerConfig(): CommsListenerConfig {
+  const protocol: CommsProtocol = process.env.HAMMURABI_COMMS_PROTOCOL === 'livekit' ? 'livekit' : 'pulse'
+
+  const envHost = process.env.PULSE_HOST
+  const host = envHost && envHost.length > 0 ? envHost : 'pulse-server.decentraland.zone'
+
+  const parsedPort = Number(process.env.PULSE_PORT)
+  const port = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 7777
+
+  const envRealm = process.env.PULSE_REALM
+  const realm = envRealm && envRealm.length > 0 ? envRealm : 'main'
+
+  return { protocol, host, port, realm }
 }
 
 export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> {
@@ -290,14 +327,55 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   const loadedSceneContext = await ctx.deref()
   const sceneId = loadedSceneContext.loadableScene.urn
 
-  // Enable scene comms with Node.js compatible LiveKit
-  const sceneTransport = await createSceneComms(realm, identityAtom, scene, {
-    isGenesisScene: isGenesisCity,
-    sceneId,
-    isWorld,
-    isLocalhost,
-    commsAdapter: options.commsAdapter
-  })
+  // A headless server is useless without comms. If the connection is lost
+  // unexpectedly (i.e. not a clean local disconnect), exit so the supervising
+  // process restarts us with a fresh connection and token.
+  const restartOnCommsLoss = options.restartOnCommsLoss ?? true
+
+  const commsConfig = readCommsListenerConfig()
+
+  // Both paths yield a CommsTransportWrapper, so the avatar system and every
+  // RFC-4 message type are reused unchanged (Option A).
+  let sceneTransport: CommsTransportWrapper
+  if (commsConfig.protocol === 'pulse') {
+    // Signed-fetch `auth_chain` for the scene-listener handshake. The Pulse server
+    // re-derives the payload as `connect:/:<ts>:<md>`, so the method MUST be
+    // `connect` and the path `/`.
+    const authChain = JSON.stringify(
+      getSignedHeaders('connect', '/', {}, (payload) => Authenticator.signPayload(identity.authChain, payload))
+    )
+
+    // parcelIndices derived from the scene's parcels ("x,y" strings).
+    const parcels = loadedSceneContext.metadata.scene?.parcels ?? []
+    const encoder = new ParcelEncoder(DEFAULT_PARCEL_GRID)
+    const parcelIndices = Array.from(
+      new Set(
+        parcels.map((parcel) => {
+          const vec = parseParcelPosition(parcel)
+          return encoder.encode(vec.x, vec.y)
+        })
+      )
+    )
+
+    const adapter = new PulseAdapter({
+      host: commsConfig.host,
+      port: commsConfig.port,
+      realm: commsConfig.realm,
+      parcelIndices,
+      authChain,
+      grid: DEFAULT_PARCEL_GRID
+    })
+    sceneTransport = new CommsTransportWrapper(adapter, sceneId)
+  } else {
+    // Enable scene comms with Node.js compatible LiveKit
+    sceneTransport = await createSceneComms(realm, identityAtom, scene, {
+      isGenesisScene: isGenesisCity,
+      sceneId,
+      isWorld,
+      isLocalhost,
+      commsAdapter: options.commsAdapter
+    })
+  }
 
   session.transport = sceneTransport
   assertSessionCurrent(session)
@@ -306,12 +384,9 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
     ctx.attachLivekitTransport(sceneTransport)
   })
 
-  // A headless server is useless without comms. If the transport is lost
-  // unexpectedly (i.e. not a clean local disconnect), exit so the supervising
-  // process restarts us with a fresh connection and token. LiveKit already
-  // retries internally before emitting this, so reconnecting in-process would
-  // just repeat what it already gave up on.
-  const restartOnCommsLoss = options.restartOnCommsLoss ?? true
+  // Attach the restart-on-loss handler before connecting pulse, so a failed
+  // initial handshake (surfaced as DISCONNECTION by the wrapper) is caught too.
+  // LiveKit already retries internally before emitting this.
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
     commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
@@ -320,6 +395,11 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
       process.exit(1)
     }
   })
+
+  if (commsConfig.protocol === 'pulse') {
+    await sceneTransport.connect()
+    assertSessionCurrent(session)
+  }
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)
   assertSessionCurrent(session)

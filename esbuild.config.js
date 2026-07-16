@@ -41,6 +41,11 @@ const buildWorkerBundle = {
     // Native modules that can't be bundled
     '@livekit/rtc-node',
     '@livekit/rtc-node-*',
+    // Pulse scene-listener client and its native ENet FFI (koffi). koffi loads a
+    // .node addon at runtime, so it MUST stay external — bundling would break the
+    // native module resolution. @dcl/pulse-client is kept external alongside it.
+    '@dcl/pulse-client',
+    'koffi',
     // QuickJS engine: the quickjs-ng variant loads its .wasm from its own package
     // dir at runtime, so keep it external (required from node_modules) rather than
     // inlined — bundling would break the wasm path resolution.
@@ -70,6 +75,15 @@ const buildWorkerBundle = {
 
         // Exclude LiveKit native modules
         build.onResolve({ filter: /@livekit\/rtc-node/ }, () => {
+          return { external: true }
+        })
+
+        // Exclude the pulse client and its native ENet FFI (koffi is a native
+        // addon and must never be bundled).
+        build.onResolve({ filter: /^@dcl\/pulse-client(\/.*)?$/ }, () => {
+          return { external: true }
+        })
+        build.onResolve({ filter: /^koffi(\/.*)?$/ }, () => {
           return { external: true }
         })
       }
