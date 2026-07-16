@@ -374,8 +374,15 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       const realm = await currentRealm.deref()
 
       const metadata = {
-        origin: 'hammurabi-server//',
-        signer: 'dcl:scene-guest',
+        origin: 'hammurabi-server://',
+        // `signer` is a self-declared ROLE label in the signed metadata, not a key —
+        // the actual signer address is recovered from `identity.authChain` below (still
+        // the unprivileged scene identity). It must be `decentraland-kernel-scene`, the
+        // value the reference kernel uses for scene-originated signed fetches: DCL
+        // services (e.g. comms-gatekeeper's scene-admin/scene-bans routes) whitelist
+        // scene requests by `metadata.signer === 'decentraland-kernel-scene'` and reject
+        // anything else with 400 "Invalid metadata content".
+        signer: 'decentraland-kernel-scene',
         isGuest: true,
         realm: { serverName: realm.aboutResponse.configurations?.realmName, hostname: realm.baseUrl },
         realmName: realm.aboutResponse.configurations?.realmName,

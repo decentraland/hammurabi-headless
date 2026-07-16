@@ -99,9 +99,9 @@ describe('scene RPC capabilities', () => {
       expect(signedFetchMock.mock.calls[0][1]).not.toBe(AUTHORITATIVE_AUTH_CHAIN)
     })
 
-    it('should mark the request metadata as a guest signer', () => {
+    it('should label the request metadata with the kernel-scene signer role while staying a guest', () => {
       const metadata = signedFetchMock.mock.calls[0][3]
-      expect(metadata).toMatchObject({ isGuest: true, signer: 'dcl:scene-guest' })
+      expect(metadata).toMatchObject({ isGuest: true, signer: 'decentraland-kernel-scene' })
     })
   })
 
