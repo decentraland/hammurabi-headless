@@ -61,7 +61,7 @@
   "dependencies": {
     "@babylonjs/core": "6.4.1",
     "@babylonjs/gui": "6.4.1",
-    "@babylonjs/loaders": "6.4.1",
+    "@babylonjs/loaders": "9.17.0",
     "@babylonjs/materials": "6.4.1",
     "@dcl/crypto": "3.7.0",
     "@dcl/hammurabi-server": "^1.5.1",
