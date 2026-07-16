@@ -61,6 +61,41 @@ const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 const MAX_LIVE_ENTITIES = limits.maxLiveEntities // concurrent host BabylonEntity objects per scene (HAMMURABI_MAX_LIVE_ENTITIES)
 const MAX_DELETED_TOMBSTONES = limits.maxDeletedTombstones // retained delete tombstones per scene (HAMMURABI_MAX_DELETED_TOMBSTONES)
 const MAX_CRDT_PAYLOAD_BYTES = limits.maxCrdtPayloadBytes // per crdtSendToRenderer call (HAMMURABI_MAX_CRDT_PAYLOAD_BYTES)
+
+// DEBUG-only entity-provenance tracer (opt-in). Scans CRDT crossing the
+// scene<->host boundary and logs component ops on RESERVED entities (<512) and
+// any DELETE_ENTITY, so a scene component appearing on an avatar/reserved slot
+// (or a scene-range entity being deleted by the host) is caught red-handed.
+// Matches the HAMMURABI_XHR_DEBUG convention: only 1/true/yes/on enable it, so
+// HAMMURABI_DEBUG_ENTITY_PROVENANCE=0 / =false read as "off".
+const DEBUG_ENTITY_PROVENANCE = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.HAMMURABI_DEBUG_ENTITY_PROVENANCE ?? '').toLowerCase()
+)
+// Exported for tests. Scene entities are always >= RESERVED_STATIC_ENTITIES (512);
+// avatar/reserved entities live in 32..255. A scene component op on a reserved
+// entity, or a DELETE_ENTITY targeting a scene-range entity, is anomalous and the
+// signal we want to surface. Logging only — never mutates state.
+export function debugScanCrdt(dir: string, buffers: Uint8Array[]) {
+  for (const buf of buffers) {
+    if (!buf || !buf.byteLength) continue
+    for (const m of readAllMessages(new ReadWriteByteBuffer(buf))) {
+      const eid = (m as { entityId: number }).entityId
+      const num = eid & 0xffff
+      const ver = (eid >>> 16) & 0xffff
+      const isCompOp =
+        m.type === CrdtMessageType.PUT_COMPONENT ||
+        m.type === CrdtMessageType.DELETE_COMPONENT ||
+        m.type === CrdtMessageType.APPEND_VALUE
+      if (isCompOp && num < 512) {
+        const componentId = (m as { componentId?: number }).componentId
+        console.log(`[ENTITY-PROVENANCE] ${dir} compOp type=${m.type} comp=${componentId} entity=${num}v${ver} (id=${eid}) RESERVED`)
+      }
+      if (m.type === CrdtMessageType.DELETE_ENTITY) {
+        console.log(`[ENTITY-PROVENANCE] ${dir} DELETE_ENTITY entity=${num}v${ver} (id=${eid})${num >= 512 ? ' SCENE-RANGE!' : ''}`)
+      }
+    }
+  }
+}
 const MAX_INCOMING_QUEUE = limits.maxIncomingQueue // queued CRDT buffers awaiting processing (HAMMURABI_MAX_INCOMING_QUEUE)
 // Inbound ADR-104 scene-bus messages from remote peers, awaiting the scene to
 // drain them via CommunicationsController.sendBinary. A scene that never uses the
@@ -643,7 +678,15 @@ export class SceneContext implements EngineApiInterface {
   }
 
   async crdtSendToRenderer(payload: CrdtSendToRendererRequest): Promise<CrdtSendToResponse> {
-    return this._crdtSendToRenderer(payload.data)
+    // DEBUG (opt-in via HAMMURABI_DEBUG_ENTITY_PROVENANCE): trace the entity
+    // provenance of scene components. Catches the smoking gun for the flagtag
+    // "Component ctf-player-flag-hold-time for <id> not found" case — a scene
+    // component op landing on a RESERVED/avatar entity (<512), or a DELETE_ENTITY
+    // wiping a SCENE-range (>=512) entity. Off by default; zero cost when unset.
+    if (DEBUG_ENTITY_PROVENANCE) debugScanCrdt('scene→host', [payload.data])
+    const res = await this._crdtSendToRenderer(payload.data)
+    if (DEBUG_ENTITY_PROVENANCE) debugScanCrdt('host→scene', res.data)
+    return res
   }
 
   get transport(): CommsTransportWrapper | undefined {
