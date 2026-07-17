@@ -105,6 +105,10 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       rotationZ: rotation.z,
       rotationW: rotation.w
     }
+    if (process.env.PULSE_DEBUG) {
+      const p = player.position
+      commsLogger.log(`📍 recv ${address} pos=(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) seq=${player.sequence}`)
+    }
     const packet: proto.Packet = { message: { $case: 'position', position }, protocolVersion: 0 }
     this.events.emit('message', { address, data: proto.Packet.encode(packet).finish() })
   }
