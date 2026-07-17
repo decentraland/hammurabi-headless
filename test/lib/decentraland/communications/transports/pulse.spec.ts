@@ -1,6 +1,6 @@
 import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import type { Player, SceneListener } from '@dcl/pulse-client'
-import { PulseAdapter, DEFAULT_PARCEL_GRID } from '../../../../../src/lib/decentraland/communications/transports/pulse'
+import { PulseAdapter } from '../../../../../src/lib/decentraland/communications/transports/pulse'
 
 // Drives a fake SceneListener through the PulseAdapter (injected via the constructor's
 // connect dependency — no module mocking) and asserts the MinimumCommunicationsTransport
@@ -44,9 +44,8 @@ const makeAdapter = async () => {
       host: 'localhost',
       port: 7777,
       realm: 'main',
-      parcelIndices: [0],
-      authChain: '{}',
-      grid: DEFAULT_PARCEL_GRID
+      parcels: [{ x: 0, z: 0 }],
+      authChain: '{}'
     },
     connectFn
   )

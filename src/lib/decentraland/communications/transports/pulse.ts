@@ -1,25 +1,16 @@
 import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
 import mitt from 'mitt'
 import { connect } from '@dcl/pulse-client'
-import type { ParcelGridConfig, Player, SceneListener } from '@dcl/pulse-client'
+import type { ParcelCoord, Player, SceneListener } from '@dcl/pulse-client'
 import { CommsTransportEvents, MinimumCommunicationsTransport, SendHints, commsLogger } from '../types'
 
 export type PulseConfig = {
   host: string
   port: number
   realm: string
-  parcelIndices: number[]
+  /** Scene footprint as raw parcel coordinates; pulse-client composes it into disjoint ParcelRects. */
+  parcels: ParcelCoord[]
   authChain: string
-  grid: ParcelGridConfig
-}
-
-/** Default DCL parcel-grid config (matches the .zone Pulse server). */
-export const DEFAULT_PARCEL_GRID: ParcelGridConfig = {
-  minX: -152,
-  minZ: -152,
-  maxParcel: 163,
-  padding: 2,
-  parcelSize: 16
 }
 
 const IDENTITY_ROTATION = { x: 0, y: 0, z: 0, w: 1 }
@@ -50,9 +41,8 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       host: this.config.host,
       port: this.config.port,
       realm: this.config.realm,
-      parcelIndices: this.config.parcelIndices,
-      authChain: this.config.authChain,
-      grid: this.config.grid
+      parcels: this.config.parcels,
+      authChain: this.config.authChain
     })
     this.connected = true
 

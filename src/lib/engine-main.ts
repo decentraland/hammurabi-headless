@@ -25,9 +25,8 @@ import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/
 import { Authenticator } from '@dcl/crypto'
 import { getSignedHeaders } from './decentraland/identity/signed-fetch'
 import { parseParcelPosition } from './decentraland/positions'
-import { ParcelEncoder } from '@dcl/pulse-client'
 import { CommsTransportWrapper } from './decentraland/communications/CommsTransportWrapper'
-import { PulseAdapter, DEFAULT_PARCEL_GRID } from './decentraland/communications/transports/pulse'
+import { PulseAdapter } from './decentraland/communications/transports/pulse'
 import { selectCommsProtocol } from './decentraland/communications/protocol-selection'
 
 // per-frame budget for processing messages from scenes. headless there is no
@@ -354,25 +353,20 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
       getSignedHeaders('connect', '/', {}, (payload) => Authenticator.signPayload(identity.authChain, payload))
     )
 
-    // parcelIndices derived from the scene's parcels ("x,y" strings).
-    const parcels = loadedSceneContext.metadata.scene?.parcels ?? []
-    const encoder = new ParcelEncoder(DEFAULT_PARCEL_GRID)
-    const parcelIndices = Array.from(
-      new Set(
-        parcels.map((parcel) => {
-          const vec = parseParcelPosition(parcel)
-          return encoder.encode(vec.x, vec.y)
-        })
-      )
-    )
+    // The scene footprint as raw parcel coordinates (scene.json "x,z" strings -> {x, z}; the DCL
+    // parcel Z lives in Vector2.y). pulse-client composes these into disjoint ParcelRects for the
+    // handshake, so hammurabi no longer computes grid indices.
+    const parcels = (loadedSceneContext.metadata.scene?.parcels ?? []).map((parcel) => {
+      const vec = parseParcelPosition(parcel)
+      return { x: vec.x, z: vec.y }
+    })
 
     const adapter = new PulseAdapter({
       host: commsConfig.host,
       port: commsConfig.port,
       realm: commsConfig.realm,
-      parcelIndices,
-      authChain,
-      grid: DEFAULT_PARCEL_GRID
+      parcels,
+      authChain
     })
     sceneTransport = new CommsTransportWrapper(adapter, sceneId)
   } else {
