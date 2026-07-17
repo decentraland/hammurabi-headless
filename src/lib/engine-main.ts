@@ -28,6 +28,7 @@ import { parseParcelPosition } from './decentraland/positions'
 import { ParcelEncoder } from '@dcl/pulse-client'
 import { CommsTransportWrapper } from './decentraland/communications/CommsTransportWrapper'
 import { PulseAdapter, DEFAULT_PARCEL_GRID } from './decentraland/communications/transports/pulse'
+import { selectCommsProtocol } from './decentraland/communications/protocol-selection'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
@@ -121,11 +122,9 @@ export function resetEngine() {
   initialized = false
 }
 
-/** Comms protocol selected at startup. `pulse` is the default (WKC listener). */
-type CommsProtocol = 'pulse' | 'livekit'
-
 type CommsListenerConfig = {
-  protocol: CommsProtocol
+  /** Raw HAMMURABI_COMMS_PROTOCOL value; the decision lives in {@link selectCommsProtocol}. */
+  envProtocol: string | undefined
   host: string
   port: number
   realm: string
@@ -133,12 +132,12 @@ type CommsListenerConfig = {
 
 /**
  * Read the comms-listener configuration from the environment ONCE, here at the
- * boundary (no scattered `process.env` reads). Protocol is an ALLOWLIST (defaults
- * to `pulse`); the port is bounds-checked. Pulse host/port/realm default to the
- * .zone server.
+ * boundary (no scattered `process.env` reads). The protocol value is passed raw to
+ * {@link selectCommsProtocol} (livekit default, pulse opt-in); the port is
+ * bounds-checked. Pulse host/port/realm default to the .zone server.
  */
 function readCommsListenerConfig(): CommsListenerConfig {
-  const protocol: CommsProtocol = process.env.HAMMURABI_COMMS_PROTOCOL === 'livekit' ? 'livekit' : 'pulse'
+  const envProtocol = process.env.HAMMURABI_COMMS_PROTOCOL
 
   const envHost = process.env.PULSE_HOST
   const host = envHost && envHost.length > 0 ? envHost : 'pulse-server.decentraland.zone'
@@ -149,7 +148,7 @@ function readCommsListenerConfig(): CommsListenerConfig {
   const envRealm = process.env.PULSE_REALM
   const realm = envRealm && envRealm.length > 0 ? envRealm : 'main'
 
-  return { protocol, host, port, realm }
+  return { envProtocol, host, port, realm }
 }
 
 export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> {
@@ -334,10 +333,20 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
 
   const commsConfig = readCommsListenerConfig()
 
+  // Livekit is the default everywhere; pulse is an explicit env opt-in that beats even an
+  // orchestrator-minted adapter (sdk-multiplayer-server always passes PROCESS_COMMS_ADAPTER).
+  const { protocol, ignoredAdapter } = selectCommsProtocol({
+    commsAdapter: options.commsAdapter,
+    envProtocol: commsConfig.envProtocol
+  })
+  if (ignoredAdapter) {
+    commsLogger.log('HAMMURABI_COMMS_PROTOCOL=pulse is set: ignoring the orchestrator-provided comms adapter')
+  }
+
   // Both paths yield a CommsTransportWrapper, so the avatar system and every
   // RFC-4 message type are reused unchanged (Option A).
   let sceneTransport: CommsTransportWrapper
-  if (commsConfig.protocol === 'pulse') {
+  if (protocol === 'pulse') {
     // Signed-fetch `auth_chain` for the scene-listener handshake. The Pulse server
     // re-derives the payload as `connect:/:<ts>:<md>`, so the method MUST be
     // `connect` and the path `/`.
@@ -389,14 +398,14 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   // LiveKit already retries internally before emitting this.
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
-    commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
+    commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})${event.error ? `: ${event.error.message}` : ''}`)
     if (restartOnCommsLoss) {
       commsLogger.error('Exiting so the server can be restarted with a fresh connection')
       process.exit(1)
     }
   })
 
-  if (commsConfig.protocol === 'pulse') {
+  if (protocol === 'pulse') {
     await sceneTransport.connect()
     assertSessionCurrent(session)
   }
