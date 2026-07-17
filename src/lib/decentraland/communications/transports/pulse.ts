@@ -38,10 +38,15 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
   // carries a subjectId) can resolve an address it is never given directly.
   private readonly subjectAddresses = new Map<string, string>()
 
-  constructor(private readonly config: PulseConfig) {}
+  // The connect dependency is injectable (tests pass a fake resolving a stub listener),
+  // mirroring pulse-client's own ConnectDependencies pattern — no jest.mock needed.
+  constructor(
+    private readonly config: PulseConfig,
+    private readonly connectFn: typeof connect = connect
+  ) {}
 
   async connect(): Promise<void> {
-    this.listener = await connect({
+    this.listener = await this.connectFn({
       host: this.config.host,
       port: this.config.port,
       realm: this.config.realm,

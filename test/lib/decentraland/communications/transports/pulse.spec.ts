@@ -1,16 +1,13 @@
-// NOTE: this project's jest transformer (esbuild) does not hoist `jest.mock`,
-// so the mock must be registered before the modules are required.
-jest.mock('@dcl/pulse-client', () => ({ connect: jest.fn() }))
+import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen'
+import type { Player, SceneListener } from '@dcl/pulse-client'
+import { PulseAdapter, DEFAULT_PARCEL_GRID } from '../../../../../src/lib/decentraland/communications/transports/pulse'
 
-const proto = require('@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comms.gen')
-const { connect } = require('@dcl/pulse-client')
-const { PulseAdapter, DEFAULT_PARCEL_GRID } = require('../../../../../src/lib/decentraland/communications/transports/pulse')
-
-// Drives a fake SceneListener through the PulseAdapter and asserts the
-// MinimumCommunicationsTransport contract: RFC-4 re-encoding, peer lifecycle,
-// and the terminal-signal semantics (`disconnected` is terminal; `error` is not —
-// pulse-client emits non-fatal errors for survivable conditions like a malformed
-// packet, and guarantees `disconnected` fires on every loop exit).
+// Drives a fake SceneListener through the PulseAdapter (injected via the constructor's
+// connect dependency — no module mocking) and asserts the MinimumCommunicationsTransport
+// contract: RFC-4 re-encoding, peer lifecycle, and the terminal-signal semantics
+// (`disconnected` is terminal; `error` is not — pulse-client emits non-fatal errors for
+// survivable conditions like a malformed packet, and guarantees `disconnected` fires on
+// every loop exit).
 
 type Handler = (...args: any[]) => void
 
@@ -30,7 +27,7 @@ class FakeListener {
   }
 }
 
-const basePlayer = {
+const basePlayer: Player = {
   subjectId: '7',
   address: '0x00000000000000000000000000000000000000aa',
   parcelIndex: 0,
@@ -41,20 +38,21 @@ const basePlayer = {
 
 const makeAdapter = async () => {
   const listener = new FakeListener()
-  ;(connect as jest.Mock).mockResolvedValue(listener)
-  const adapter = new PulseAdapter({
-    host: 'localhost',
-    port: 7777,
-    realm: 'main',
-    parcelIndices: [0],
-    authChain: '{}',
-    grid: DEFAULT_PARCEL_GRID
-  })
+  const connectFn = jest.fn().mockResolvedValue(listener as unknown as SceneListener)
+  const adapter = new PulseAdapter(
+    {
+      host: 'localhost',
+      port: 7777,
+      realm: 'main',
+      parcelIndices: [0],
+      authChain: '{}',
+      grid: DEFAULT_PARCEL_GRID
+    },
+    connectFn
+  )
   await adapter.connect()
-  return { adapter, listener }
+  return { adapter, listener, connectFn }
 }
-
-afterEach(() => jest.clearAllMocks())
 
 describe('PulseAdapter message re-encoding', () => {
   it('re-encodes playerJoined as PEER_CONNECTED plus a decodable RFC-4 position Packet', async () => {
