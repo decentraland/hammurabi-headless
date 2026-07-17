@@ -29,6 +29,11 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
 
   private listener?: SceneListener
   private disposed = false
+  private connected = false
+  // The pulse-client contract: `disconnected` fires exactly once on every terminal loop
+  // exit, while `error` is non-fatal (e.g. one malformed packet, an abandoned resync).
+  // This flag keeps DISCONNECTION single-fire regardless.
+  private terminated = false
   // subjectId -> address, seeded from joined/updated so playerLeft (which only
   // carries a subjectId) can resolve an address it is never given directly.
   private readonly subjectAddresses = new Map<string, string>()
@@ -44,15 +49,24 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       authChain: this.config.authChain,
       grid: this.config.grid
     })
+    this.connected = true
 
     this.listener.on('playerJoined', (player) => {
+      if (this.disposed) return
       const address = this.track(player)
       this.events.emit('PEER_CONNECTED', { address })
       this.emitPosition(player, address)
     })
-    this.listener.on('playerUpdated', (player) => this.emitPosition(player, this.track(player)))
-    this.listener.on('playerTeleported', (player) => this.emitPosition(player, this.track(player)))
+    this.listener.on('playerUpdated', (player) => {
+      if (this.disposed) return
+      this.emitPosition(player, this.track(player))
+    })
+    this.listener.on('playerTeleported', (player) => {
+      if (this.disposed) return
+      this.emitPosition(player, this.track(player))
+    })
     this.listener.on('playerLeft', (subjectId) => {
+      if (this.disposed) return
       const address = this.subjectAddresses.get(subjectId) ?? subjectId
       this.subjectAddresses.delete(subjectId)
       this.events.emit('PEER_DISCONNECTED', { address })
@@ -61,10 +75,15 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       commsLogger.error(`Pulse listener error: ${error.message}`)
       this.events.emit('error', error)
     })
-    this.listener.on('disconnected', (reason) => {
-      if (this.disposed) return
-      this.events.emit('DISCONNECTION', { kicked: false, error: reason ? new Error(reason) : undefined })
-    })
+    this.listener.on('disconnected', (reason) => this.terminate(reason ? new Error(reason) : undefined))
+  }
+
+  /** Terminal loop exit: flip the connection state and surface DISCONNECTION exactly once. */
+  private terminate(error: Error | undefined): void {
+    this.connected = false
+    if (this.disposed || this.terminated) return
+    this.terminated = true
+    this.events.emit('DISCONNECTION', { kicked: false, error })
   }
 
   // Receive-only observer: the scene listener never publishes peer traffic.
@@ -75,13 +94,14 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
   async disconnect(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    this.connected = false
     this.listener?.close()
     this.listener = undefined
     this.subjectAddresses.clear()
   }
 
   getRoomInfo(): { roomName: string; isConnected: boolean } | undefined {
-    return { roomName: this.config.realm, isConnected: !!this.listener && !this.disposed }
+    return { roomName: this.config.realm, isConnected: this.connected }
   }
 
   private track(player: Player): string {
