@@ -21,6 +21,7 @@ import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signe
 import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { limits } from '../../misc/limits'
+import { limitLogger } from '../../misc/limit-logger'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { StaticEntities } from './logic/static-entities'
@@ -262,14 +263,26 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         // Count every ENTRY examined (including oversized ones we skip) against the
         // cap so a scene can't force unbounded host iteration with oversized spam.
         let processed = 0
+        if (req.peerData.length > MAX_SEND_PEERS) limitLogger.hit('maxSendPeers', `${req.peerData.length} peers`)
         for (const peerData of req.peerData.slice(0, MAX_SEND_PEERS)) {
           for (const data of peerData.data) {
-            if (processed >= MAX_SEND_MESSAGES) break
+            if (processed >= MAX_SEND_MESSAGES) {
+              limitLogger.hit('maxSendMessages')
+              break
+            }
             processed++
             // Guard the type as well as the size: a non-Uint8Array here (e.g. a
             // byte-keyed plain object) has undefined length, which would pass the
             // cap check and then publish an empty payload.
-            if (!(data instanceof Uint8Array) || data.length > MAX_COMMS_MESSAGE_BYTES) continue
+            if (!(data instanceof Uint8Array)) continue
+            if (data.length > MAX_COMMS_MESSAGE_BYTES) {
+              limitLogger.hit('maxCommsMessageBytes', `${data.length} bytes`)
+              continue
+            }
+            // Same key as the peer-entries cap above (same constant bounds both);
+            // the detail string distinguishes which of the two was truncated.
+            const addressCount = peerData.address?.length ?? 0
+            if (addressCount > MAX_SEND_PEERS) limitLogger.hit('maxSendPeers', `${addressCount} destination addresses`)
             void context.transport.sendParcelSceneMessage(
               { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
               // Cap the destination-identities list too: it's forwarded verbatim to
@@ -457,6 +470,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           if (!isRedirect || !location) break
 
           if (hop >= MAX_SIGNED_FETCH_REDIRECTS) {
+            limitLogger.hit('maxSignedFetchRedirects', currentUrl)
             throw new Error('Blocked scene request: too many redirects')
           }
           // Resolve relative Location values against the current URL.

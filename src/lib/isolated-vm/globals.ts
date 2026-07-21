@@ -1,6 +1,12 @@
 import ivm from 'isolated-vm'
 import { ProvideOptions } from './types'
 import { limits } from '../misc/limits'
+import { limitLogger, reportLimitHitChecked } from '../misc/limit-logger'
+
+// The valid limit keys, resolved once. The isolate reports cap hits by key over a
+// Reference; validating against this set means a bad/spoofed key can never grow
+// the throttle map (defense in depth — the Reference is closured away from scene code).
+const KNOWN_LIMIT_KEYS: ReadonlySet<string> = new Set(Object.keys(limits))
 
 // Upper bound on the total binary bytes in a single host-call argument, enforced
 // IN THE ISOLATE before the structured copy runs (isolated-vm copies the argument
@@ -33,6 +39,7 @@ export const matchesTimeoutError = (err: unknown): boolean =>
  */
 export function disposeOnTimeout(isolate: ivm.Isolate, err: unknown): void {
   if (!isolate.isDisposed && matchesTimeoutError(err)) {
+    limitLogger.hit('maxSyncExecutionMs', 'runaway isolate callback disposed')
     try { isolate.dispose() } catch { /* already gone */ }
   }
 }
@@ -161,6 +168,15 @@ export function provideRequire(context: ivm.Context, opts: ProvideOptions): void
       throw sanitizeHostError(err)
     }
   }))
+  // Fire-and-forget host callback the require shim uses to report an in-isolate cap
+  // hit (arg too large / too many concurrent host calls) so the operator gets a
+  // throttled log. `applyIgnored` never blocks the isolate thread; the actual log
+  // volume is bounded host-side by the throttled limitLogger, and the key is
+  // validated against KNOWN_LIMIT_KEYS.
+  context.global.setSync(
+    '__reportLimit',
+    new ivm.Reference((key: unknown, detail: unknown) => reportLimitHitChecked(limitLogger, KNOWN_LIMIT_KEYS, key, detail as string | undefined))
+  )
 
   // In-isolate caps. The argument is deep-cloned into INERT data ONCE (every
   // getter read exactly once), measured during the clone, and the CLONE — not the
@@ -185,6 +201,8 @@ export function provideRequire(context: ivm.Context, opts: ProvideOptions): void
 
     var hostMethods = globalThis.__hostModuleMethods;
     var hostCall = globalThis.__hostCall;
+    var reportLimit = globalThis.__reportLimit;
+    function report(key, detail) { try { reportLimit.applyIgnored(undefined, [key, detail], { arguments: { copy: true } }); } catch (e) {} }
     var cache = Object.create(null);
     var inFlight = 0;
     var MAX_ARG_BYTES = ${MAX_HOST_CALL_ARG_BYTES};
@@ -252,8 +270,18 @@ export function provideRequire(context: ivm.Context, opts: ProvideOptions): void
           mod[m] = function (arg) {
             var safe;
             try { safe = clone(arg, 0, { n: MAX_ARG_BYTES }, new _Map()); }
-            catch (err) { return Promise.reject(err); }
-            if (inFlight >= MAX_INFLIGHT) return Promise.reject(new Error('too many concurrent host calls'));
+            catch (err) {
+              // Attribute to the byte cap ONLY for its own error: clone also throws
+              // for depth / unsupported binary types and re-throws scene getter
+              // errors — none of those are maxHostCallArgBytes hits. The probe is
+              // guarded: err can be a scene value whose .message getter throws,
+              // and that must not escape this catch (the pre-existing contract is
+              // that mod[m] always returns a promise, never throws synchronously).
+              var msg; try { msg = err && err.message; } catch (e3) {}
+              if (msg === 'request payload too large') report('maxHostCallArgBytes', name + '.' + m);
+              return Promise.reject(err);
+            }
+            if (inFlight >= MAX_INFLIGHT) { report('maxInflightHostCalls', name + '.' + m); return Promise.reject(new Error('too many concurrent host calls')); }
             inFlight++;
             var p;
             try { p = hostCall.apply(undefined, [name, m, safe], { arguments: { copy: true }, result: { promise: true, copy: true } }); }
@@ -267,6 +295,7 @@ export function provideRequire(context: ivm.Context, opts: ProvideOptions): void
     };
     delete globalThis.__hostModuleMethods;
     delete globalThis.__hostCall;
+    delete globalThis.__reportLimit;
   })();`)
 }
 

@@ -100,7 +100,7 @@ export class AssetManager {
       throw new Error(`Error loading URL: ${absoluteLocation}`)
     }
 
-    return { content: new Uint8Array(await readBodyCappedBytes(res, MAX_ASSET_BYTES)), hash }
+    return { content: new Uint8Array(await readBodyCappedBytes(res, MAX_ASSET_BYTES, 'maxAssetBytes')), hash }
   }
 
   async loadTexture(file: string) {

@@ -55,6 +55,26 @@ codes, redirect method rewrites) are deliberately fixed. These processes are spa
 one-scene-per-process by a supervisor (`sdk-multiplayer-server`) that sets the env per
 worker; it forwards the whole `HAMMURABI_*` prefix into the fork's allowlisted env.
 
+**Limit-hit logging (`src/lib/misc/limit-logger.ts`).** When a cap is reached the
+enforcement site calls `limitLogger.hit('<Limits field>', detail?)` so an operator
+can see a scene/peer hammering a ceiling. Emission is THROTTLED — at most once per
+interval PER KEY, with a suppressed-count on the next emission — because an unthrottled
+log per hit would itself be an amplification vector (a scene tripping a cap every frame
+would flood stdout). The throttle key is restricted to `keyof Limits` so the per-key
+state map stays bounded; scene/peer-controlled context (url, size, peer id) goes in the
+free-form `detail`, never the key, and `detail` is length-capped. Isolate-side caps
+(`maxHostCallArgBytes`, `maxInflightHostCalls`) report via a `__reportLimit`
+`ivm.Reference` (fire-and-forget `applyIgnored`, captured+deleted from the isolate
+global like `console`), validated host-side against the known key set. Wire a new cap by
+adding a `limitLogger.hit(...)` at its drop/reject/truncate site. Not every knob is a
+discrete hit: frame-pacing/shutdown/raycast are cooperative yields (not logged);
+`profileFetchCooldownMs` is normal debounce (deliberately not logged);
+`fetchTimeoutMs`/`fetchRetries` already log per-failure inside `robustFetch`;
+`livekitConnectTimeoutMs`/`wsHandshakeTimeoutMs` surface as ordinary connection
+errors; `isolateMemoryLimitBytes` is a fatal V8 abort (no hook to log from); and
+`maxSyncExecutionMs` is logged only on the pump/`disposeOnTimeout` path — an
+onStart/onUpdate/eval sync-turn timeout raises its error without a limit log.
+
 ## Project Architecture
 
 This is the **Hammurabi Server** - a headless implementation of the Decentraland protocol that runs entirely in Node.js without browser dependencies.

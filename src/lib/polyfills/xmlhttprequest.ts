@@ -3,6 +3,7 @@
  * Enables Babylon.js GLTF loading in headless server
  */
 import { limits } from '../misc/limits'
+import { limitLogger } from '../misc/limit-logger'
 
 export function setupXMLHttpRequestPolyfill() {
   if (typeof (globalThis as any).XMLHttpRequest !== 'undefined') return
@@ -153,7 +154,9 @@ export function setupXMLHttpRequestPolyfill() {
           res.on('data', (chunk: Buffer) => {
             received += chunk.length
             if (received > MAX_RESPONSE_BYTES) {
-              console.error(`[XHR] #${id} ✗ response exceeded ${MAX_RESPONSE_BYTES}b cap: ${this.method} ${this.url}`)
+              // Throttled: a scene requesting many oversized assets would otherwise
+              // flood stdout with one synchronous write per hostile download.
+              limitLogger.hit('maxXhrResponseBytes', `${this.method} ${this.url}`)
               // Deterministic failure: the asset is simply too big, so abort
               // without retrying (retrying would re-download the hostile asset).
               sizeExceeded = true

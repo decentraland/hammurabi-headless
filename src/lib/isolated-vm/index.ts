@@ -3,6 +3,7 @@ import { IsolatedVmLimits, ProvideOptions, RunWithVmOptions } from './types'
 import { BOOTSTRAP_SOURCE, provideConsole, provideRequire, provideSetImmediate } from './globals'
 import { provideFetch, provideWebSocket } from './network-globals'
 import { limits as configuredLimits } from '../misc/limits'
+import { limitLogger } from '../misc/limit-logger'
 
 export * from './types'
 
@@ -77,7 +78,10 @@ export async function withIsolatedVm<T>(
       timeout: maxSyncMs
     })
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`scene async turn exceeded ${maxAsyncMs}ms`)), maxAsyncMs)
+      timer = setTimeout(() => {
+        limitLogger.hit('maxAsyncTurnMs', name)
+        reject(new Error(`scene async turn exceeded ${maxAsyncMs}ms`))
+      }, maxAsyncMs)
     })
     try {
       return await Promise.race([settle, timeout])
