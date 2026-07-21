@@ -39,13 +39,19 @@ export type LoadableScene = Readonly<{
 }>
 
 // A content hash is an IPFS CID (CIDv0 `Qm…` base58 / CIDv1 `bafy…` base32) — always
-// alphanumeric. Reject anything else: the hash is concatenated into the fetch URL as
-// a path segment (`baseUrl + hash`), so a deployer-controlled hash containing `/`,
-// `..`, `?`, `@`, etc. would let WHATWG URL normalization traverse to an arbitrary
-// path on the realm origin (e.g. `../../../etc/passwd`). This guards every consumer
-// at the single resolution point.
+// alphanumeric — OR, in sdk-commands local preview only, `'b64-' + base64(absolute
+// file path + machine id)` using the STANDARD base64 alphabet (`A-Za-z0-9+/=`; see
+// `b64HashingFunction` in @dcl/sdk-commands `logic/project-files.ts`). Reject
+// anything else: the hash is concatenated into the fetch URL as a path segment
+// (`baseUrl + hash`), so a deployer-controlled hash containing `..`, `?`, `#`, `@`,
+// `%` or `\` would let WHATWG URL normalization traverse to an arbitrary path on the
+// realm origin (e.g. `../../../etc/passwd`). The b64 alphabet can produce none of
+// those — its `/` can only DESCEND into extra path segments below the base path,
+// never ascend (that needs dots) or escape the origin — so admitting it behind the
+// mandatory `b64-` prefix preserves the guarantee while keeping production CID
+// validation untouched. This guards every consumer at the single resolution point.
 function isValidContentHash(hash: string): boolean {
-  return /^[A-Za-z0-9]+$/.test(hash)
+  return /^[A-Za-z0-9]+$/.test(hash) || /^b64-[A-Za-z0-9+/=]+$/.test(hash)
 }
 
 export function resolveFile(entity: Pick<ContentServerEntity, 'content'>, src: string): string | null {
