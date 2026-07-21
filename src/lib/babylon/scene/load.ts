@@ -143,11 +143,20 @@ export async function getLoadableSceneFromLocalContext(baseUrl: string) {
   if (pointers.length === 0) {
     throw new Error('No pointers found in scene.json')
   }
-  // Then post to /content/entities/active with the pointers
+  // Request ONE pointer only: every parcel of the scene maps to the same entity
+  // and only entities[0] is consumed below. The sdk-commands preview server
+  // answers with a full entity copy PER requested pointer (it does not dedupe
+  // like a real catalyst), so posting all parcels multiplies the response by
+  // the parcel count — a 50x50 scene (2500 parcels x ~80KB entity) returned
+  // ~200MB and blew the maxBodyBytes cap before the scene could even load.
+  // Trust `base` only when it is actually one of the parcels: an inconsistent
+  // scene.json (base outside the parcels list) would otherwise resolve nothing.
+  const base = sceneConfig.scene?.base
+  const basePointer = base && pointers.includes(base) ? base : pointers[0]
   const entitiesResponse = await robustFetch(`${baseUrl}/content/entities/active`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pointers })
+    body: JSON.stringify({ pointers: [basePointer] })
   }, { label: 'entities/active' })
 
   const entity = (JSON.parse(await readBodyCapped(entitiesResponse, DEFAULT_MAX_BODY_BYTES)) as any)[0]

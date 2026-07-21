@@ -47,8 +47,10 @@ export interface HostWebSocket {
 export type HostWebSocketFactory = (url: string, protocols?: string | string[]) => HostWebSocket
 
 export type SceneWebSocketDeps = {
-  // Injectable so tests can connect to a localhost ws server (the real guard
-  // blocks loopback). Defaults to the real guard; production never overrides it.
+  // Injectable for two callers: tests (to connect to a localhost ws server) and
+  // the scene runtime, which passes the REAL guard with the loopback relaxation
+  // applied when the realm is a localhost preview (see rpc-scene-runtime.ts).
+  // Defaults to the strict real guard.
   assertPublicUrl?: (url: string) => Promise<void>
   maxMessageBytes?: number
   maxBufferedBytes?: number

@@ -55,8 +55,10 @@ export async function readBodyCappedBytes(
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maxBytes) {
     await drainResponse(response)
-    limitLogger.hit(limitKey, `content-length ${declared} > ${maxBytes}`)
-    throw new Error(`response body exceeds ${maxBytes} bytes`)
+    // Name the URL: a bare "response body exceeds N bytes" is undiagnosable
+    // when several fetches are in flight during startup.
+    limitLogger.hit(limitKey, `content-length ${declared} > ${maxBytes} (${response.url})`)
+    throw new Error(`response body exceeds ${maxBytes} bytes (${response.url})`)
   }
 
   if (!response.body) return Buffer.alloc(0)
@@ -69,8 +71,8 @@ export async function readBodyCappedBytes(
       if (done) break
       total += value.byteLength
       if (total > maxBytes) {
-        limitLogger.hit(limitKey, `streamed > ${maxBytes} bytes`)
-        throw new Error(`response body exceeds ${maxBytes} bytes`)
+        limitLogger.hit(limitKey, `streamed > ${maxBytes} bytes (${response.url})`)
+        throw new Error(`response body exceeds ${maxBytes} bytes (${response.url})`)
       }
       chunks.push(value)
     }

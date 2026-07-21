@@ -16,13 +16,25 @@ import { RpcSceneRuntimeOptions } from '../common-runtime/types'
 import { getStartupData } from '../common-runtime/startup'
 import { createSceneFetch } from '../misc/scene-fetch'
 import { createSceneWebSocketFactory } from '../misc/scene-websocket'
+import { assertPublicSceneUrl } from '../misc/ssrf'
+import { currentRealm } from '../decentraland/state'
+import { isLocalhostRealm } from '../decentraland/realm/resolution'
 
 export async function startIsolatedVmSceneRuntime(port: RpcClientPort, options: RpcSceneRuntimeOptions) {
   const { mainFile, mainFileName } = await getStartupData(port)
   // The scene's unprivileged network globals (ADR-133): an unsigned, SSRF-guarded
-  // `fetch` and a `WebSocket` constructor. Both use the real SSRF guard by default.
-  const sceneFetch = createSceneFetch()
-  const sceneWebSocket = createSceneWebSocketFactory()
+  // `fetch` and a `WebSocket` constructor. Both use the real SSRF guard; in local
+  // preview (localhost realm) the guard admits LOOPBACK destinations only, so a
+  // scene's server code can reach the developer's own local backends the same way
+  // its client half can in the browser. Evaluated per request (not at construction)
+  // so it always reflects the actual realm, and production realms (worlds,
+  // catalysts) never relax anything.
+  const assertPublicUrl = (url: string) => {
+    const realm = currentRealm.getOrNull()
+    return assertPublicSceneUrl(url, { allowLoopback: realm !== null && isLocalhostRealm(realm.baseUrl) })
+  }
+  const sceneFetch = createSceneFetch({ assertPublicUrl })
+  const sceneWebSocket = createSceneWebSocketFactory({ assertPublicUrl })
 
   await withIsolatedVm(async (opts) => {
     opts.provide({
