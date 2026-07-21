@@ -20,6 +20,7 @@ import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '..
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
+import { isLocalhostRealm } from '../../decentraland/realm/resolution'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
@@ -426,9 +427,14 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           console.warn(`SignedFetch: cannot derive realm origin from "${realm.baseUrl}", realm-origin exemption disabled`)
         }
 
+        // In local preview (localhost realm) the guard admits loopback
+        // destinations, matching the scene's unprivileged fetch/WebSocket
+        // globals (see rpc-scene-runtime.ts). Production realms never relax.
+        const allowLoopback = isLocalhostRealm(realm.baseUrl)
+
         for (let hop = 0; ; hop++) {
           if (realmOrigin === null || new URL(currentUrl).origin !== realmOrigin) {
-            await assertPublicSceneUrl(currentUrl)
+            await assertPublicSceneUrl(currentUrl, { allowLoopback })
           }
 
           // Only forward scene-supplied headers while on the original origin. On a
@@ -485,12 +491,18 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           body: result.text || '{}'
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error'
+        // An SSRF-guard block is a policy decision, not a backend failure. It
+        // used to surface as a generic 500 "Internal Error", which sends devs
+        // chasing a phantom bug in their own service — return a 403 that names
+        // the guard instead. Everything else stays a 500.
+        const blockedByGuard = message.startsWith('Blocked scene request')
         return {
           ok: false,
-          status: 500,
-          statusText: 'Internal Error',
+          status: blockedByGuard ? 403 : 500,
+          statusText: blockedByGuard ? 'Blocked by scene-server SSRF guard' : 'Internal Error',
           headers: {},
-          body: JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' })
+          body: JSON.stringify({ error: message })
         }
       }
     },

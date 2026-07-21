@@ -28,6 +28,13 @@ function isBlockedIpv4(ip: string): boolean {
   return false
 }
 
+/** 127.0.0.0/8 — the only IPv4 range the local-preview relaxation may admit. */
+function isLoopbackIpv4(ip: string): boolean {
+  const parts = ip.split('.').map((p) => Number(p))
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return false
+  return parts[0] === 127
+}
+
 // Fully expand a (possibly ::-compressed, possibly IPv4-tailed) IPv6 literal to
 // its 8 16-bit hextets. Returns null if it is not a well-formed 8-group address.
 function expandIpv6Hextets(v: string): number[] | null {
@@ -89,19 +96,46 @@ function isBlockedIpv6(ip: string): boolean {
   return false
 }
 
-function isBlockedHostLiteral(host: string): boolean {
+function isBlockedHostLiteral(host: string, allowLoopback: boolean): boolean {
   const h = host.toLowerCase()
-  if (h === 'localhost' || h.endsWith('.localhost')) return true
+  if (h === 'localhost' || h.endsWith('.localhost')) return !allowLoopback
   if (h.endsWith('.local') || h.endsWith('.internal')) return true
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return isBlockedIpv4(h)
-  if (h.includes(':')) return isBlockedIpv6(h)
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {
+    if (allowLoopback && isLoopbackIpv4(h)) return false
+    return isBlockedIpv4(h)
+  }
+  if (h.includes(':')) {
+    const v = h.replace(/^\[/, '').replace(/\]$/, '')
+    if (allowLoopback && v === '::1') return false
+    // Exotic loopback spellings (IPv4-mapped ::ffff:127.0.0.1, 6to4/NAT64
+    // embeddings) stay blocked even with the relaxation: no dev tool needs
+    // them, and admitting only the plain literals keeps the carve-out auditable.
+    return isBlockedIpv6(h)
+  }
   return false
+}
+
+export type PublicUrlGuardOptions = {
+  /**
+   * Admit LOOPBACK destinations only: hostname `localhost`/`*.localhost`,
+   * IPv4 127.0.0.0/8, IPv6 `::1`, and names that RESOLVE to those. Enabled by
+   * callers exactly when the realm itself is a localhost preview server
+   * (sdk-commands local development), where the scene developer's own machine
+   * is the point: the same scene code running in a browser client can reach
+   * `http://localhost:*` freely, so the server side blocking it only breaks
+   * local development. Private LAN (RFC1918), CGNAT, link-local / cloud
+   * metadata (169.254.*) and `.local`/`.internal` names stay blocked even
+   * with this on. Production supervisors always run scenes with world or
+   * catalyst realm URLs, so this can never activate there.
+   */
+  allowLoopback?: boolean
 }
 
 /**
  * Throws if `rawUrl` is not a public http(s) URL a scene is allowed to reach.
  */
-export async function assertPublicSceneUrl(rawUrl: string): Promise<void> {
+export async function assertPublicSceneUrl(rawUrl: string, options: PublicUrlGuardOptions = {}): Promise<void> {
+  const allowLoopback = options.allowLoopback === true
   let url: URL
   try {
     url = new URL(rawUrl)
@@ -114,8 +148,15 @@ export async function assertPublicSceneUrl(rawUrl: string): Promise<void> {
   }
 
   const host = url.hostname
-  if (isBlockedHostLiteral(host)) {
-    throw new Error(`Blocked scene request to non-public host: ${host}`)
+  if (isBlockedHostLiteral(host, allowLoopback)) {
+    // Host-side log: without it a literal-host block is invisible in the worker
+    // terminal — the thrown message only reaches scene code, which may swallow
+    // it (an unhandled WS onerror, an uncaught fetch rejection).
+    console.warn(`SSRF guard: blocked scene request to ${host}`)
+    throw new Error(
+      `Blocked scene request to non-public host: ${host} ` +
+        `(the scene server's SSRF guard forbids loopback/private network addresses)`
+    )
   }
 
   const isIpLiteral = /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')
@@ -124,13 +165,21 @@ export async function assertPublicSceneUrl(rawUrl: string): Promise<void> {
   try {
     const results = await lookup(host, { all: true })
     for (const { address, family } of results) {
+      // With the local-preview relaxation, a name resolving to loopback (e.g.
+      // an /etc/hosts alias or localtest.me) is as legitimate as `localhost`.
+      if (allowLoopback && (family === 4 ? isLoopbackIpv4(address) : address.toLowerCase() === '::1')) {
+        continue
+      }
       const blocked = family === 6 ? isBlockedIpv6(address) : isBlockedIpv4(address)
       if (blocked) {
         // Log the resolved address host-side only; the thrown message (surfaced to
         // scene code via fetch rejection / WS onerror) stays generic so a scene
         // can't harvest internal DNS→IP mappings from the block.
         console.warn(`SSRF guard: ${host} resolves to non-public address ${address}`)
-        throw new Error(`Blocked scene request to non-public host: ${host}`)
+        throw new Error(
+          `Blocked scene request to non-public host: ${host} ` +
+            `(the scene server's SSRF guard forbids loopback/private network addresses)`
+        )
       }
     }
   } catch (err: any) {

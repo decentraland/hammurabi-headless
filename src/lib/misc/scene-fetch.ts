@@ -62,9 +62,10 @@ export type SceneResponse = {
 }
 
 export type SceneFetchDeps = {
-  // Injectable so tests can exercise the success/redirect paths against a
-  // localhost server (which the real guard blocks). Defaults to the real guard;
-  // production never overrides it.
+  // Injectable for two callers: tests (to exercise success/redirect paths against
+  // a localhost server) and the scene runtime, which passes the REAL guard with
+  // the loopback relaxation applied when the realm is a localhost preview (see
+  // rpc-scene-runtime.ts). Defaults to the strict real guard.
   assertPublicUrl?: (url: string) => Promise<void>
   maxBodyBytes?: number
   maxConcurrent?: number
