@@ -39,13 +39,19 @@ export type LoadableScene = Readonly<{
 }>
 
 // A content hash is an IPFS CID (CIDv0 `Qm…` base58 / CIDv1 `bafy…` base32) — always
-// alphanumeric. Reject anything else: the hash is concatenated into the fetch URL as
-// a path segment (`baseUrl + hash`), so a deployer-controlled hash containing `/`,
-// `..`, `?`, `@`, etc. would let WHATWG URL normalization traverse to an arbitrary
-// path on the realm origin (e.g. `../../../etc/passwd`). This guards every consumer
-// at the single resolution point.
+// alphanumeric — OR, in sdk-commands local preview only, `'b64-' + base64(absolute
+// file path + machine id)` using the STANDARD base64 alphabet (`A-Za-z0-9+/=`; see
+// `b64HashingFunction` in @dcl/sdk-commands `logic/project-files.ts`). Reject
+// anything else: the hash is concatenated into the fetch URL as a path segment
+// (`baseUrl + hash`), so a deployer-controlled hash containing `..`, `?`, `#`, `@`,
+// `%` or `\` would let WHATWG URL normalization traverse to an arbitrary path on the
+// realm origin (e.g. `../../../etc/passwd`). The b64 alphabet can produce none of
+// those — its `/` can only DESCEND into extra path segments below the base path,
+// never ascend (that needs dots) or escape the origin — so admitting it behind the
+// mandatory `b64-` prefix preserves the guarantee while keeping production CID
+// validation untouched. This guards every consumer at the single resolution point.
 function isValidContentHash(hash: string): boolean {
-  return /^[A-Za-z0-9]+$/.test(hash)
+  return /^[A-Za-z0-9]+$/.test(hash) || /^b64-[A-Za-z0-9+/=]+$/.test(hash)
 }
 
 export function resolveFile(entity: Pick<ContentServerEntity, 'content'>, src: string): string | null {
@@ -60,10 +66,26 @@ export function resolveFile(entity: Pick<ContentServerEntity, 'content'>, src: s
   return null
 }
 
+/**
+ * Encode a (validated) content hash for use as a URL path segment. A no-op for
+ * CIDs (alphanumeric), but a local-preview `b64-` hash can contain `/`
+ * (standard base64 of a path with e.g. non-ASCII characters), and sent raw
+ * that would add an extra path segment and miss the preview server's
+ * `/content/contents/:hash` route (path-to-regexp params match a single
+ * segment). Encoded, the router matches one segment and decodes the param
+ * back before resolving the file.
+ *
+ * EVERY URL built from a content hash must go through this — never concatenate
+ * a raw hash into a URL.
+ */
+export function encodeContentHashForUrl(hash: string): string {
+  return encodeURIComponent(hash)
+}
+
 export function resolveFileAbsolute(scene: LoadableScene, src: string): string | null {
   const resolved = resolveFile(scene.entity, src)
 
-  if (resolved) return scene.baseUrl + resolved
+  if (resolved) return scene.baseUrl + encodeContentHashForUrl(resolved)
 
   return null
 }
