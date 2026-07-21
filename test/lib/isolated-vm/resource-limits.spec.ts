@@ -1,4 +1,5 @@
 import { withIsolatedVm } from '../../../src/lib/isolated-vm/index'
+import { limits } from '../../../src/lib/misc/limits'
 
 // Regression coverage for the resource-exhaustion / DoS hardening: an untrusted
 // scene must not be able to amplify isolate-bounded data into unbounded HOST
@@ -169,6 +170,10 @@ describe('when a scene broadcasts one buffer aliased to several peers', () => {
 })
 
 describe('when a scene fans out more concurrent host calls than allowed', () => {
+  // Derive both the fan-out and the assertion from the configured knob (the shim
+  // interpolates the same limits singleton), so a default bump can't silently
+  // break this spec or leave the overflow assertion vacuous.
+  const FAN_OUT = limits.maxInflightHostCalls + 8
   let hostCalls: number
   let rejections: number
 
@@ -188,7 +193,7 @@ describe('when a scene fans out more concurrent host calls than allowed', () => 
         const m = require('~system/X')
         module.exports.onStart = async () => {
           let rej = 0
-          for (let i = 0; i < 40; i++) { m.slow().catch(() => { rej++ }) }
+          for (let i = 0; i < ${FAN_OUT}; i++) { m.slow().catch(() => { rej++ }) }
           await new Promise((r) => setImmediate(r))
           globalThis.__rej = rej
         }
@@ -199,7 +204,7 @@ describe('when a scene fans out more concurrent host calls than allowed', () => 
   })
 
   it('should reject the calls beyond the in-flight cap', () => {
-    expect(hostCalls).toBeLessThanOrEqual(16)
+    expect(hostCalls).toBeLessThanOrEqual(limits.maxInflightHostCalls)
     expect(rejections).toBeGreaterThan(0)
   })
 })
