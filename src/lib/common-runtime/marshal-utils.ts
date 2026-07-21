@@ -5,6 +5,7 @@
  */
 
 import { limits } from '../misc/limits'
+import { limitLogger } from '../misc/limit-logger'
 
 // Upper bound on a single binary payload coerced from a plain object. Prevents a
 // scene from driving an unbounded host allocation through the marshalling layer.
@@ -28,6 +29,7 @@ export function coerceMaybeU8Array(data: MaybeUint8Array): Uint8Array {
     // it crosses the boundary, but bound it here too so no caller can hand an
     // over-large buffer downstream.
     if (data.byteLength > MAX_COERCED_BYTES) {
+      limitLogger.hit('maxCoercedBytes', `${data.byteLength} bytes`)
       throw new Error(`CRDT payload too large (${data.byteLength} bytes)`)
     }
     return data
@@ -36,6 +38,7 @@ export function coerceMaybeU8Array(data: MaybeUint8Array): Uint8Array {
   const keys = Object.keys(data)
   // Enforce the cap BEFORE allocating the output buffer and filling it.
   if (keys.length > MAX_COERCED_BYTES) {
+    limitLogger.hit('maxCoercedBytes', `${keys.length} bytes`)
     throw new Error(`CRDT payload too large (${keys.length} bytes)`)
   }
   const out = new Uint8Array(keys.length)

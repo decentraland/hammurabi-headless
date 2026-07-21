@@ -14,6 +14,7 @@ import { playerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
 import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
 import { limits } from "../../misc/limits"
+import { limitLogger } from "../../misc/limit-logger"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -230,6 +231,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // until it reloads. Deliberately accepted: the bound matters more than a
     // cosmetic glitch that needs 4096+ departures during a single hang.
     deletedEntities.set(entity, ++deletionSequence)
+    if (deletedEntities.size > MAX_DELETED_ENTITIES) limitLogger.hit('maxAvatarTombstones')
     while (deletedEntities.size > MAX_DELETED_ENTITIES) {
       const oldest = deletedEntities.keys().next().value
       if (oldest === undefined) break

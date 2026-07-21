@@ -1,6 +1,7 @@
 import { sleep } from './promises'
 import { createLogger } from './logger'
 import { limits } from './limits'
+import { limitLogger, LimitKey } from './limit-logger'
 
 const logger = createLogger('🌐 net')
 
@@ -46,10 +47,15 @@ export const DEFAULT_MAX_BODY_BYTES = limits.maxBodyBytes // HAMMURABI_MAX_BODY_
  * which broke JSON.parse on BOM-prefixed bodies that `response.json()` used to
  * accept (common from Windows/.NET backends).
  */
-export async function readBodyCappedBytes(response: Response, maxBytes: number): Promise<Buffer> {
+export async function readBodyCappedBytes(
+  response: Response,
+  maxBytes: number,
+  limitKey: LimitKey = 'maxBodyBytes'
+): Promise<Buffer> {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maxBytes) {
     await drainResponse(response)
+    limitLogger.hit(limitKey, `content-length ${declared} > ${maxBytes}`)
     throw new Error(`response body exceeds ${maxBytes} bytes`)
   }
 
@@ -63,6 +69,7 @@ export async function readBodyCappedBytes(response: Response, maxBytes: number):
       if (done) break
       total += value.byteLength
       if (total > maxBytes) {
+        limitLogger.hit(limitKey, `streamed > ${maxBytes} bytes`)
         throw new Error(`response body exceeds ${maxBytes} bytes`)
       }
       chunks.push(value)

@@ -2,6 +2,7 @@ import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comm
 import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, TransportMessageEvent, commsLogger } from './types'
 import { limits } from '../../misc/limits'
+import { limitLogger } from '../../misc/limit-logger'
 
 export enum RoomConnectionStatus {
   NONE,
@@ -78,6 +79,7 @@ export class CommsTransportWrapper {
       if (!entry && this.inboundRate.size >= MAX_RATE_ENTRIES) {
         const oldest = this.inboundRate.keys().next().value
         if (oldest !== undefined) this.inboundRate.delete(oldest)
+        limitLogger.hit('maxRateEntries')
       }
       this.inboundRate.set(address, { windowStart: now, count: 1 })
       return false
@@ -185,11 +187,13 @@ export class CommsTransportWrapper {
     // Rate-limit FIRST so an oversized-packet flood also consumes the peer's
     // budget (and can't spam the error log below unbounded).
     if (this.isRateLimited(address)) {
+      limitLogger.hit('maxMessagesPerWindow', address)
       return
     }
-    // Bound untrusted inbound traffic before doing any decode work.
+    // Bound untrusted inbound traffic before doing any decode work. Throttled: many
+    // distinct peers each sending oversized packets would otherwise flood the log.
     if (data.length > MAX_INBOUND_PACKET_BYTES) {
-      commsLogger.error(`Dropping oversized packet from ${address}: ${data.length} bytes`)
+      limitLogger.hit('maxInboundPacketBytes', `${address}: ${data.length} bytes`)
       return
     }
 

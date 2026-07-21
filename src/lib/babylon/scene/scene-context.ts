@@ -51,13 +51,16 @@ import {
   AvatarCommunicationSystem
 } from '../../decentraland/communications/avatar-communication-system'
 import { limits } from '../../misc/limits'
+import { limitLogger } from '../../misc/limit-logger'
 
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
 // Untrusted-input bounds. Scene CRDT is fully attacker-controlled and is applied
 // in HOST code, outside the isolate's memory/execution limits — so these caps
-// are what keep a hostile scene from exhausting the worker's heap. Drops are
-// silent by design: logging per drop would let a scene amplify into log spam.
+// are what keep a hostile scene from exhausting the worker's heap. The drop itself
+// stays per-drop-silent (no cost on the hot path); a hit is reported to the
+// THROTTLED limitLogger, which emits at most once per interval so a scene can't
+// amplify the log — the operator still gets a signal that the cap is being hit.
 const MAX_LIVE_ENTITIES = limits.maxLiveEntities // concurrent host BabylonEntity objects per scene (HAMMURABI_MAX_LIVE_ENTITIES)
 const MAX_DELETED_TOMBSTONES = limits.maxDeletedTombstones // retained delete tombstones per scene (HAMMURABI_MAX_DELETED_TOMBSTONES)
 const MAX_CRDT_PAYLOAD_BYTES = limits.maxCrdtPayloadBytes // per crdtSendToRenderer call (HAMMURABI_MAX_CRDT_PAYLOAD_BYTES)
@@ -297,6 +300,7 @@ export class SceneContext implements EngineApiInterface {
     if (this.deletedEntities.size > MAX_DELETED_TOMBSTONES) {
       const oldest = this.deletedEntities.values().next().value
       if (oldest !== undefined) this.deletedEntities.delete(oldest)
+      limitLogger.hit('maxDeletedTombstones')
     }
     const entity = this.getEntityOrNull(entityId)
     if (entity) {
@@ -368,6 +372,7 @@ export class SceneContext implements EngineApiInterface {
    */
   tryGetOrCreateEntity(entityId: Entity): BabylonEntity | null {
     if (!this.entities.has(entityId) && this.entities.size >= MAX_LIVE_ENTITIES) {
+      limitLogger.hit('maxLiveEntities')
       return null
     }
     return this.getOrCreateEntity(entityId)
@@ -645,14 +650,19 @@ export class SceneContext implements EngineApiInterface {
 
   private async _crdtSendToRenderer(data: Uint8Array) {
     // Drop oversized batches and shed load when the queue is saturated so a scene
-    // cannot exhaust host memory via huge or high-frequency CRDT payloads. Silent
-    // by design (see the MAX_* constants) — do not log per drop.
+    // cannot exhaust host memory via huge or high-frequency CRDT payloads. The drop
+    // itself is still silent (no per-drop cost); the throttled limitLogger below
+    // surfaces WHICH cap is being hit at most once per interval.
     if (
       data.byteLength &&
       data.byteLength <= MAX_CRDT_PAYLOAD_BYTES &&
       this.incomingMessages.length < MAX_INCOMING_QUEUE
     ) {
       this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE })
+    } else if (data.byteLength > MAX_CRDT_PAYLOAD_BYTES) {
+      limitLogger.hit('maxCrdtPayloadBytes', `${data.byteLength} bytes`)
+    } else if (data.byteLength && this.incomingMessages.length >= MAX_INCOMING_QUEUE) {
+      limitLogger.hit('maxIncomingQueue')
     }
 
     // create a future to wait until all the messages are processed. even if there
@@ -734,6 +744,7 @@ export class SceneContext implements EngineApiInterface {
           // MessageBus), a peer could otherwise grow it without limit.
           if (this.incomingNetworkMessages.length > MAX_NETWORK_MESSAGE_QUEUE) {
             this.incomingNetworkMessages.shift()
+            limitLogger.hit('maxNetworkMessageQueue')
           }
         }
       }

@@ -5,6 +5,7 @@ import { ComponentDeclaration, ComponentType, LastWriteWinElementSetComponentDef
 import { ProcessMessageResultType } from "./conflict-resolution"
 import { dataCompare } from "./dataCompare"
 import { limits } from "../../misc/limits"
+import { limitLogger } from "../../misc/limit-logger"
 
 export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, number>): number {
   const newTimestamp = (timestamps.get(entity) || 0) + 1
@@ -155,6 +156,7 @@ export function createUpdateLwwFromCrdt<T>(
         if (echoedAtTimestamp.size >= MAX_ECHO_DEDUPE_ENTRIES) {
           const oldest = echoedAtTimestamp.keys().next().value
           if (oldest !== undefined) echoedAtTimestamp.delete(oldest)
+          limitLogger.hit('maxEchoDedupeEntries')
         }
         echoedAtTimestamp.set(entityId, timestamp)
 

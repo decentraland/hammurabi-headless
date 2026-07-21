@@ -1,6 +1,7 @@
 import WS from 'ws'
 import { assertPublicSceneUrl } from './ssrf'
 import { limits } from './limits'
+import { limitLogger } from './limit-logger'
 
 // Per-frame message ceiling. Incoming frames larger than this are rejected by
 // `ws` (maxPayload) which closes the socket; outgoing frames are checked here.
@@ -237,11 +238,13 @@ class SceneWebSocketConnection implements HostWebSocket {
     else payload = String(data)
     const byteLength = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength
     if (byteLength > this.maxMessageBytes) {
+      limitLogger.hit('maxWsMessageBytes', `${byteLength} bytes`)
       throw new Error(`WebSocket: message exceeds ${this.maxMessageBytes} bytes`)
     }
     // Backpressure: refuse to keep queueing when the peer isn't draining, so a
     // slow/stalled peer can't make the ws outbound buffer grow without bound.
     if (this.socket.bufferedAmount + byteLength > this.maxBufferedBytes) {
+      limitLogger.hit('maxWsBufferedBytes', `buffered ${this.socket.bufferedAmount} + ${byteLength}`)
       throw new Error('WebSocket: send buffer is full')
     }
     this.socket.send(payload)

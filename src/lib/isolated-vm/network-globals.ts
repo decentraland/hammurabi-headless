@@ -3,6 +3,7 @@ import { ProvideOptions } from './types'
 import { disposeOnTimeout } from './globals'
 import { HostWebSocketFactory } from '../misc/scene-websocket'
 import { limits } from '../misc/limits'
+import { limitLogger } from '../misc/limit-logger'
 
 /**
  * Install the scene-facing global `fetch` (ADR-133): unprivileged, SSRF-guarded,
@@ -99,7 +100,10 @@ export function provideWebSocket(
   const dispatch = (id: number, type: string, event: unknown): void => {
     if (tornDown || !dispatchRef || isolate.isDisposed) return
     // Always let lifecycle events (open/close) through; only drop backlogged data.
-    if (pendingDispatch >= MAX_PENDING_DISPATCH && type === 'message') return
+    if (pendingDispatch >= MAX_PENDING_DISPATCH && type === 'message') {
+      limitLogger.hit('maxWsPendingDispatch')
+      return
+    }
     pendingDispatch++
     // ASYNC `apply`, not `applySync`: a synchronous host→isolate call would block
     // the host main thread on the isolate lock, so a wedged turn continuation (or a
@@ -120,7 +124,10 @@ export function provideWebSocket(
   context.global.setSync('__wsCreate', new ivm.Reference((url: string, protocols: any) => {
     if (tornDown) throw new Error('WebSocket: runtime shutting down')
     if (typeof url !== 'string') throw new Error('WebSocket: url must be a string')
-    if (sockets.size >= MAX_OPEN_SOCKETS) throw new Error('WebSocket: too many open connections for this scene')
+    if (sockets.size >= MAX_OPEN_SOCKETS) {
+      limitLogger.hit('maxOpenSockets')
+      throw new Error('WebSocket: too many open connections for this scene')
+    }
     const id = nextId++
     const socket = factory(url, protocols as string | string[] | undefined)
     sockets.set(id, socket)

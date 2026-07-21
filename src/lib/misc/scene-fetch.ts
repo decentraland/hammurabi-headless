@@ -1,6 +1,7 @@
 import { robustFetch, readBodyCappedBytes, drainResponse, DEFAULT_MAX_BODY_BYTES } from './network'
 import { assertPublicSceneUrl } from './ssrf'
 import { limits } from './limits'
+import { limitLogger } from './limit-logger'
 
 // Max redirects the global `fetch` will follow. Each hop is re-checked by the
 // SSRF guard, mirroring `~system/SignedFetch`, so a public host can't 3xx a
@@ -166,6 +167,7 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
         // Release the redirect response's socket — we never read its body.
         await drainResponse(response)
         if (hop >= MAX_FETCH_REDIRECTS) {
+          limitLogger.hit('maxFetchRedirects', currentUrl)
           throw new Error('fetch: too many redirects')
         }
         // Fetch spec: a 301/302 on a POST, or a 303 on any non-GET/HEAD method,
@@ -226,6 +228,7 @@ export function createSceneFetch(deps: SceneFetchDeps = {}) {
     // Reject rather than queue: bounds a hostile `fetch()` loop to `maxConcurrent`
     // concurrent host requests, matching the WebSocket socket cap's fail-fast policy.
     if (inFlight >= maxConcurrent) {
+      limitLogger.hit('maxConcurrentFetches', typeof url === 'string' ? url : undefined)
       return Promise.reject(new Error('fetch: too many concurrent requests'))
     }
     inFlight++
