@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// MUST stay the first import: checks the Node version at import time and exits
+// with a clear message before anything transitively requires isolated-vm.
+import './lib/misc/node-version-check'
 import { main, resetEngine } from './lib/engine-main'
 import { runGracefulShutdown, EXIT_CODES } from './lib/misc/shutdown'
 import type { DclEnvironment } from './lib/decentraland/environment'
