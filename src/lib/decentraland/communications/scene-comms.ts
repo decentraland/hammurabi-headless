@@ -2,6 +2,8 @@ import { Atom } from "../../misc/atom"
 import { ExplorerIdentity } from "../identity/types"
 import { connectAdapter, connectLocalAdapter, connectGenesisAdapter, connectWorldsAdapter } from "./connect-adapter"
 import { connectTransport } from "./connect-transport"
+import { CommsTransportWrapper } from "./CommsTransportWrapper"
+import { createOfflineTransport } from "./transports/offline"
 import { Scene } from "@babylonjs/core"
 import { CurrentRealm } from "../state"
 
@@ -35,7 +37,22 @@ export async function createSceneComms(
   let newAdapter
   if (options?.isLocalhost) {
     // Local development
-    newAdapter = await connectLocalAdapter(realm.baseUrl)
+    try {
+      newAdapter = await connectLocalAdapter(realm.baseUrl)
+    } catch (error) {
+      // LOCAL PREVIEW ONLY: the handshake needs internet (comms gatekeeper +
+      // LiveKit cloud). When it fails, a dead server helps nobody — boot in
+      // offline single-player mode instead so the scene's isServer() code still
+      // runs, and say so loudly. Production paths (worlds, Genesis, supervisor
+      // pre-minted adapters) keep failing hard: there a comms-less
+      // authoritative server must be restarted, not silently isolated.
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(
+        `⚠️  Comms handshake failed (${message}); starting in OFFLINE single-player mode — ` +
+          `no clients will connect to this server until it is restarted with working comms.`
+      )
+      newAdapter = await connectAdapter('offline:offline', identity, options.sceneId ?? 'realm')
+    }
   } else if (options?.isWorld && options?.sceneId) {
     // Decentraland Worlds
     newAdapter = await connectWorldsAdapter(options.sceneId, realm.connectionString)
@@ -49,7 +66,12 @@ export async function createSceneComms(
 
   const desiredTransports = await newAdapter.desiredTransports.deref()
   const connectionString = desiredTransports[0]
-  const transport = connectTransport(connectionString.url, identity, scene, connectionString.sceneId)
+  // The offline adapter yields an empty url, which used to be a dead end
+  // (connectTransport throws on any non-livekit string). Give it a real no-op
+  // transport so offline realms — and the local-preview fallback above — boot.
+  const transport = connectionString.url
+    ? connectTransport(connectionString.url, identity, scene, connectionString.sceneId)
+    : new CommsTransportWrapper(createOfflineTransport(), connectionString.sceneId)
 
   transport.connect()
 
