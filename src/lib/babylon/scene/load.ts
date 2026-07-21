@@ -7,6 +7,7 @@ import { loadedScenesByEntityId } from '../../decentraland/state'
 import { VirtualScene } from '../../decentraland/virtual-scene'
 import { json } from '../../misc/json'
 import { robustFetch, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from '../../misc/network'
+import { PermanentStartupError } from '../../misc/startup-errors'
 import { Entity } from '@dcl/schemas'
 import { initHotReload } from './hot-reload'
 import { sleep } from '../../misc/promises'
@@ -16,7 +17,9 @@ import { Atom } from '../../misc/atom'
  * Creates and initializes a scene context from a loadable scene
  */
 async function createSceneContext(engineScene: BABYLON.Scene, loadableScene: LoadableScene, entityId: string, isGlobal: boolean, virtualScene?: VirtualScene): Promise<SceneContext> {
-  if ((loadableScene.entity.metadata as any).runtimeVersion !== '7') throw new Error('The scene is not compatible with the current runtime version. It may be using SDK6')
+  // Permanent: the runtime version is part of the (content-addressed) entity,
+  // so no restart of the same scene can ever succeed.
+  if ((loadableScene.entity.metadata as any).runtimeVersion !== '7') throw new PermanentStartupError('The scene is not compatible with the current runtime version. It may be using SDK6')
 
   const ctx = new SceneContext(engineScene, loadableScene, isGlobal, entityId)
 
@@ -209,7 +212,10 @@ export async function loadSceneContextFromPosition(
   const entities = await fetchEntitiesByPointers([pointer], contentServerUrl)
 
   if (entities.length === 0) {
-    throw new Error(`No scene found at position ${pointer}`)
+    // Permanent: nothing is deployed at this parcel. A later deploy produces a
+    // new entity (and a new supervised process identity), so retrying THIS
+    // configuration is doomed.
+    throw new PermanentStartupError(`No scene found at position ${pointer}`)
   }
 
   const entity = entities[0]
@@ -278,13 +284,18 @@ export async function loadSceneContextFromWorld(
   const scenes = scenesBody.scenes ?? []
 
   if (scenes.length === 0) {
-    throw new Error(`No scenes found in world ${options.worldName}`)
+    // Permanent: the world has no deployment. See the not-found case below.
+    throw new PermanentStartupError(`No scenes found in world ${options.worldName}`)
   }
 
   const targetScene = pickScene(scenes, options.sceneId)
 
   if (!targetScene) {
-    throw new Error(
+    // Permanent: the requested entity is not part of the world's CURRENT
+    // deployment — typically a supervisor spawn triggered by a client whose
+    // session predates a redeploy (its join still carries the old sceneId).
+    // Respawning with the same sceneId can never succeed.
+    throw new PermanentStartupError(
       `Scene "${options.sceneId}" not found in world "${options.worldName}"`
     )
   }

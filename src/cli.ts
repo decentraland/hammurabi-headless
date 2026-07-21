@@ -2,6 +2,7 @@
 
 import { main, resetEngine } from './lib/engine-main'
 import { runGracefulShutdown, EXIT_CODES } from './lib/misc/shutdown'
+import { isPermanentStartupError } from './lib/misc/startup-errors'
 import type { DclEnvironment } from './lib/decentraland/environment'
 
 // Parse arguments
@@ -182,12 +183,15 @@ if (developmentMode && process.stdin.setRawMode) {
 }
 
 // Start server
-start().catch(() => {
+start().catch((error) => {
   // Error already logged. In development the user can retry with 'r', but in
   // production nothing can recover: the render loop started by main() keeps the
   // event loop alive, so without an explicit exit a supervisor would see a
-  // healthy-looking process that will never serve.
+  // healthy-looking process that will never serve. Failures that no restart
+  // with the same configuration can fix (scene entity not in the world's
+  // current deployment, SDK6 scene) exit with the permanent CONFIG code so a
+  // supervisor knows not to respawn; anything else stays STARTUP (transient).
   if (!developmentMode) {
-    process.exit(EXIT_CODES.STARTUP)
+    process.exit(isPermanentStartupError(error) ? EXIT_CODES.CONFIG : EXIT_CODES.STARTUP)
   }
 })
