@@ -45,6 +45,23 @@ describe('getLoadableSceneFromLocalContext', () => {
     })
   })
 
+  describe('when scene.json declares a base parcel that is not in its parcels list', () => {
+    beforeEach(() => {
+      robustFetchMock.mockResolvedValue({ ok: true })
+      readBodyCappedMock
+        // Inconsistent scene.json: base outside the parcels list.
+        .mockResolvedValueOnce(JSON.stringify({ scene: { parcels: ['5,5', '5,6'], base: '99,99' } }))
+        .mockResolvedValueOnce(JSON.stringify([{ id: 'b64-entity', content: [], metadata: {} }]))
+    })
+
+    it('should ignore the inconsistent base and request the first parcel', async () => {
+      await getLoadableSceneFromLocalContext('http://localhost:8000')
+
+      const post = robustFetchMock.mock.calls.find((call) => String(call[0]).includes('entities/active'))
+      expect(JSON.parse(post[1].body)).toEqual({ pointers: ['5,5'] })
+    })
+  })
+
   describe('when scene.json declares no base parcel', () => {
     beforeEach(() => {
       robustFetchMock.mockResolvedValue({ ok: true })

@@ -146,7 +146,10 @@ export async function getLoadableSceneFromLocalContext(baseUrl: string) {
   // like a real catalyst), so posting all parcels multiplies the response by
   // the parcel count — a 50x50 scene (2500 parcels x ~80KB entity) returned
   // ~200MB and blew the maxBodyBytes cap before the scene could even load.
-  const basePointer = sceneConfig.scene?.base ?? pointers[0]
+  // Trust `base` only when it is actually one of the parcels: an inconsistent
+  // scene.json (base outside the parcels list) would otherwise resolve nothing.
+  const base = sceneConfig.scene?.base
+  const basePointer = base && pointers.includes(base) ? base : pointers[0]
   const entitiesResponse = await robustFetch(`${baseUrl}/content/entities/active`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -43,15 +43,20 @@ export async function createSceneComms(
       // LOCAL PREVIEW ONLY: the handshake needs internet (comms gatekeeper +
       // LiveKit cloud). When it fails, a dead server helps nobody — boot in
       // offline single-player mode instead so the scene's isServer() code still
-      // runs, and say so loudly. Production paths (worlds, Genesis, supervisor
-      // pre-minted adapters) keep failing hard: there a comms-less
-      // authoritative server must be restarted, not silently isolated.
+      // runs, and say so loudly. This early return is deliberately the ONLY
+      // place an offline transport is created: every other path (worlds,
+      // Genesis, supervisor pre-minted adapters, custom realms below) keeps
+      // failing hard, so a comms-less authoritative server outside local
+      // preview is restarted rather than left looking healthy while serving
+      // nobody.
       const message = error instanceof Error ? error.message : String(error)
       console.warn(
         `⚠️  Comms handshake failed (${message}); starting in OFFLINE single-player mode — ` +
           `no clients will connect to this server until it is restarted with working comms.`
       )
-      newAdapter = await connectAdapter('offline:offline', identity, options.sceneId ?? 'realm')
+      const transport = new CommsTransportWrapper(createOfflineTransport(), options.sceneId ?? 'realm')
+      transport.connect()
+      return transport
     }
   } else if (options?.isWorld && options?.sceneId) {
     // Decentraland Worlds
@@ -60,18 +65,23 @@ export async function createSceneComms(
     // Genesis City scenes
     newAdapter = await connectGenesisAdapter(options.sceneId)
   } else {
-    // Fallback for other realms
-    newAdapter = await connectAdapter(realm.aboutResponse.comms?.fixedAdapter ?? "offline:offline", identity, 'realm')
+    // Fallback for other realms. No offline default: a realm that advertises
+    // no comms adapter is a configuration error and must fail loudly here —
+    // defaulting to offline would boot a server that looks healthy while
+    // serving nobody.
+    const fixedAdapter = realm.aboutResponse.comms?.fixedAdapter
+    if (!fixedAdapter) {
+      throw new Error(
+        `Realm "${realm.connectionString}" advertises no comms fixedAdapter; ` +
+          `refusing to start without comms outside local preview`
+      )
+    }
+    newAdapter = await connectAdapter(fixedAdapter, identity, 'realm')
   }
 
   const desiredTransports = await newAdapter.desiredTransports.deref()
   const connectionString = desiredTransports[0]
-  // The offline adapter yields an empty url, which used to be a dead end
-  // (connectTransport throws on any non-livekit string). Give it a real no-op
-  // transport so offline realms — and the local-preview fallback above — boot.
-  const transport = connectionString.url
-    ? connectTransport(connectionString.url, identity, scene, connectionString.sceneId)
-    : new CommsTransportWrapper(createOfflineTransport(), connectionString.sceneId)
+  const transport = connectTransport(connectionString.url, identity, scene, connectionString.sceneId)
 
   transport.connect()
 
