@@ -94,7 +94,7 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxSyncExecutionMs', env: 'HAMMURABI_MAX_SYNC_EXECUTION_MS', def: 10_000, min: 100 },
   { key: 'maxAsyncTurnMs', env: 'HAMMURABI_MAX_ASYNC_TURN_MS', def: 60_000, min: 1_000 },
   { key: 'maxHostCallArgBytes', env: 'HAMMURABI_MAX_HOST_CALL_ARG_BYTES', def: 16 * MB, min: 1 * KB },
-  { key: 'maxInflightHostCalls', env: 'HAMMURABI_MAX_INFLIGHT_HOST_CALLS', def: 16, min: 1 },
+  { key: 'maxInflightHostCalls', env: 'HAMMURABI_MAX_INFLIGHT_HOST_CALLS', def: 40, min: 1 },
   { key: 'maxCoercedBytes', env: 'HAMMURABI_MAX_COERCED_BYTES', def: 16 * MB, min: 1 * KB },
   { key: 'maxOpenSockets', env: 'HAMMURABI_MAX_OPEN_SOCKETS', def: 32, min: 1 },
   { key: 'maxWsPendingDispatch', env: 'HAMMURABI_MAX_WS_PENDING_DISPATCH', def: 256, min: 1 },
