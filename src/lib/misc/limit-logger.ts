@@ -27,6 +27,13 @@ export const DEFAULT_LIMIT_LOG_INTERVAL_MS = 10_000
 /** `detail` is often scene/peer-controlled (a url, a header); truncate so one log line can't be an amplifier. */
 export const MAX_DETAIL_LEN = 200
 
+// detail is scene/peer-controlled: collapse ASCII control chars (incl. CR/LF) so a
+// crafted value cannot fake extra log lines, and redact URL userinfo so a
+// credential-bearing URL (https://user:pass@host/...) is not persisted into
+// operator logs.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]+/g
+const URL_USERINFO = /(:\/\/)[^/\s@]+@/g
+
 export interface ThrottledLimitLoggerOptions {
   /** Minimum gap between emissions for the same key. Defaults to {@link DEFAULT_LIMIT_LOG_INTERVAL_MS}. */
   intervalMs?: number
@@ -66,7 +73,12 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
       if (t - s.lastLogAt >= intervalMs) {
         const windowSec = s.lastLogAt === Number.NEGATIVE_INFINITY ? null : Math.round((t - s.lastLogAt) / 1000)
         const suffix = s.suppressed > 0 ? ` (${s.suppressed} more in ${windowSec ?? '?'}s)` : ''
-        const shownDetail = detail && detail.length > MAX_DETAIL_LEN ? detail.slice(0, MAX_DETAIL_LEN) + '…' : detail
+        let shownDetail = detail
+        if (shownDetail) {
+          // Sanitize BEFORE truncating so the cut cannot re-expose a stripped char.
+          shownDetail = shownDetail.replace(CONTROL_CHARS, ' ').replace(URL_USERINFO, '$1***@')
+          if (shownDetail.length > MAX_DETAIL_LEN) shownDetail = shownDetail.slice(0, MAX_DETAIL_LEN) + '…'
+        }
         emit(`${key} reached${shownDetail ? `: ${shownDetail}` : ''}${suffix}`)
         s.lastLogAt = t
         s.suppressed = 0

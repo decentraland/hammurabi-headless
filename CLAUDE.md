@@ -62,10 +62,14 @@ interval PER KEY, with a suppressed-count on the next emission — because an un
 log per hit would itself be an amplification vector (a scene tripping a cap every frame
 would flood stdout). The throttle key is restricted to `keyof Limits` so the per-key
 state map stays bounded; scene/peer-controlled context (url, size, peer id) goes in the
-free-form `detail`, never the key, and `detail` is length-capped. Isolate-side caps
-(`maxHostCallArgBytes`, `maxInflightHostCalls`) report via a `__reportLimit`
-`ivm.Reference` (fire-and-forget `applyIgnored`, captured+deleted from the isolate
-global like `console`), validated host-side against the known key set. Wire a new cap by
+free-form `detail`, never the key, and `detail` is length-capped and sanitized at emit
+(control chars collapsed so a crafted value can't fake extra log lines, URL userinfo
+redacted). Isolate-side caps (`maxHostCallArgBytes`, `maxInflightHostCalls`) report via
+a `__reportLimit` `ivm.Reference` (fire-and-forget `applyIgnored`, captured+deleted
+from the isolate global like `console`), validated host-side against the known key
+set, AND throttled in-shim per key per interval — host throttling bounds emission,
+not the cross-isolate callback volume, so a scene hammering a cap must not enqueue
+one host task per rejected call. Wire a new cap by
 adding a `limitLogger.hit(...)` at its drop/reject/truncate site. Not every knob is a
 discrete hit: frame-pacing/shutdown/raycast are cooperative yields (not logged);
 `profileFetchCooldownMs` is normal debounce (deliberately not logged);

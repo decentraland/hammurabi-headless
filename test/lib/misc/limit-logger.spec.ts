@@ -69,6 +69,18 @@ describe('createThrottledLimitLogger', () => {
     expect(emitted[emitted.length - 1]).toBe('maxBodyBytes reached')
   })
 
+  it('collapses control characters in the detail so a crafted value cannot fake extra log lines', () => {
+    const { log, emitted } = harness()
+    log.hit('maxConcurrentFetches', 'line1\nline2\r\nline3 end')
+    expect(emitted).toEqual(['maxConcurrentFetches reached: line1 line2 line3 end'])
+  })
+
+  it('redacts URL userinfo credentials in the detail', () => {
+    const { log, emitted } = harness()
+    log.hit('maxConcurrentFetches', 'https://user:secret@example.com/hook')
+    expect(emitted).toEqual(['maxConcurrentFetches reached: https://***@example.com/hook'])
+  })
+
   it('defaults to a 10s interval', () => {
     expect(DEFAULT_LIMIT_LOG_INTERVAL_MS).toBe(10_000)
   })

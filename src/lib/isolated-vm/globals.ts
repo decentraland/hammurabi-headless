@@ -1,7 +1,7 @@
 import ivm from 'isolated-vm'
 import { ProvideOptions } from './types'
 import { limits } from '../misc/limits'
-import { limitLogger, reportLimitHitChecked } from '../misc/limit-logger'
+import { limitLogger, reportLimitHitChecked, DEFAULT_LIMIT_LOG_INTERVAL_MS } from '../misc/limit-logger'
 
 // The valid limit keys, resolved once. The isolate reports cap hits by key over a
 // Reference; validating against this set means a bad/spoofed key can never grow
@@ -16,6 +16,9 @@ const MAX_HOST_CALL_ARG_BYTES = limits.maxHostCallArgBytes
 // Bound simultaneously-in-flight host calls from one scene so a single turn can't
 // fan out many un-awaited large copies and amplify into host OOM.
 const MAX_INFLIGHT_HOST_CALLS = limits.maxInflightHostCalls
+// In-isolate limit-report throttle window, mirroring the host logger's interval so
+// the two layers stay aligned (interpolated into the require shim as a constant).
+const REPORT_INTERVAL_MS = DEFAULT_LIMIT_LOG_INTERVAL_MS
 
 /**
  * Returns an Error carrying only `err`'s message, with the host stack stripped so
@@ -202,7 +205,26 @@ export function provideRequire(context: ivm.Context, opts: ProvideOptions): void
     var hostMethods = globalThis.__hostModuleMethods;
     var hostCall = globalThis.__hostCall;
     var reportLimit = globalThis.__reportLimit;
-    function report(key, detail) { try { reportLimit.applyIgnored(undefined, [key, detail], { arguments: { copy: true } }); } catch (e) {} }
+    // In-isolate throttle for limit reports. The host limitLogger already
+    // throttles EMISSION, but that does not bound the applyIgnored host-callback
+    // volume a hostile scene could drive by hammering a cap in a tight loop —
+    // each rejected call would still enqueue a host task. Report at most one hit
+    // per key per interval from inside the shim; suppressed hits ride along in
+    // the detail. Date.now is captured here, before scene code runs, so a scene
+    // reassigning Date cannot disable the throttle. reportState stays bounded:
+    // report() is closured (scene cannot call it) and only ever sees the two
+    // literal keys below.
+    var _reportNow = Date.now;
+    var REPORT_INTERVAL_MS = ${REPORT_INTERVAL_MS};
+    var reportState = Object.create(null);
+    function report(key, detail) {
+      var t = 0; try { t = _reportNow(); } catch (e) {}
+      var s = reportState[key] || (reportState[key] = { last: -1 / 0, n: 0 });
+      if (t - s.last < REPORT_INTERVAL_MS) { s.n++; return; }
+      var d = s.n > 0 ? detail + ' (+' + s.n + ' more)' : detail;
+      s.last = t; s.n = 0;
+      try { reportLimit.applyIgnored(undefined, [key, d], { arguments: { copy: true } }); } catch (e) {}
+    }
     var cache = Object.create(null);
     var inFlight = 0;
     var MAX_ARG_BYTES = ${MAX_HOST_CALL_ARG_BYTES};
