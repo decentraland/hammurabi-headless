@@ -1,11 +1,12 @@
 /**
- * Hard requirement: Node 24.
+ * Hard requirement: Node 22 or 24.
  *
  * The runtime depends on native addons (isolated-vm) whose prebuilt binaries
- * ship for specific Node ABIs. On any other Node major the process dies at
- * `require('isolated-vm')` with a cryptic node-gyp-build error ("No native
- * build was found ... abi=147"), or `npx` silently attempts a from-source
- * compile on the user's machine. Fail fast with an actionable message instead.
+ * ship only for specific Node ABIs — 127 (Node 22) and 137 (Node 24). On any
+ * other Node major (23, 26, ...) the process dies at `require('isolated-vm')`
+ * with a cryptic node-gyp-build error ("No native build was found ...
+ * abi=147"), or `npx` silently attempts a from-source compile on the user's
+ * machine. Fail fast with an actionable message instead.
  *
  * This module runs its check AT IMPORT TIME, so it must be the FIRST import of
  * every entry point (cli.ts, index.ts) — before any module that transitively
@@ -13,7 +14,8 @@
  * loads before the check.
  */
 
-export const REQUIRED_NODE_MAJOR = 24
+/** Node majors with a shipped isolated-vm prebuild. Update when prebuilds do. */
+export const SUPPORTED_NODE_MAJORS: readonly number[] = [22, 24]
 
 /**
  * Returns the error message to show when the running Node version is
@@ -24,10 +26,10 @@ export const REQUIRED_NODE_MAJOR = 24
  */
 export function getUnsupportedNodeMessage(nodeVersion: string): string | null {
   const major = Number(nodeVersion.split('.')[0])
-  if (major === REQUIRED_NODE_MAJOR) return null
+  if (SUPPORTED_NODE_MAJORS.includes(major)) return null
   return (
-    `❌ @dcl/hammurabi-server requires Node ${REQUIRED_NODE_MAJOR} (found v${nodeVersion}).\n` +
-    `   Switch versions and retry — e.g. "fnm use ${REQUIRED_NODE_MAJOR}" or "nvm use ${REQUIRED_NODE_MAJOR}".`
+    `❌ @dcl/hammurabi-server requires Node ${SUPPORTED_NODE_MAJORS.join(' or ')} (found v${nodeVersion}).\n` +
+    `   Switch versions and retry — e.g. "fnm use 24" or "nvm use 24".`
   )
 }
 
