@@ -234,6 +234,20 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   const isWorld = isDclEns(realmUrl)
   const isGenesisCity = !isLocalhost && !isWorld
 
+  // An sdk-commands preview server reached through a non-localhost hostname
+  // (e.g. --realm=http://192.168.x.x:8000 copied from the preview's LAN URL)
+  // would silently fall into the Genesis City branch and die much later with
+  // misleading errors ("Position parameter is required", a gatekeeper 401).
+  // Preview realms identify themselves in /about — fail right here with the
+  // actual problem instead.
+  if (!isLocalhost && aboutResponse?.configurations?.realmName === 'LocalPreview') {
+    throw new Error(
+      `Realm "${realmUrl}" is an sdk-commands preview server, but only localhost/127.0.0.1 hostnames ` +
+        `are treated as local preview. Use --realm=http://localhost:<port> instead. ` +
+        `(Realms are classified as: localhost → local preview, *.dcl.eth → world, anything else → Genesis City.)`
+    )
+  }
+
   // Create identity atom for sceneComms
   const identityAtom = Atom(identity)
 
@@ -338,6 +352,17 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
     commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
+    if (event.kicked) {
+      // A kick is LiveKit's DuplicateIdentity rule: rooms hold exactly one
+      // 'authoritative-server' participant, so another server instance for this
+      // same scene just took the room over (locally: usually a second preview
+      // of the same project). Without this message the losing instance looks
+      // healthy while silently serving nobody.
+      commsLogger.error(
+        '🥊 Another authoritative server took over this scene\'s comms room — you probably have a second ' +
+          'preview/server of this project running. This instance is no longer serving clients.'
+      )
+    }
     if (restartOnCommsLoss) {
       commsLogger.error('Shutting down so the supervisor can restart us with a fresh connection')
       // Graceful (dispose scene → isolate goes idle → clean exit); a bare
