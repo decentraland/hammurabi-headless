@@ -2,9 +2,11 @@ const esbuild = require('esbuild')
 
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production')
 
-// Build configuration for CommonJS worker bundle
+// Build configuration for CommonJS worker bundle. The entry is worker-entry.ts
+// (NOT index.ts): the worker bundle is a process entrypoint and runs the
+// Node-version preflight, while the plain package export stays import-safe.
 const buildWorkerBundle = {
-  entryPoints: ['src/index.ts'],
+  entryPoints: ['src/worker-entry.ts'],
   bundle: true,
   outfile: 'dist/worker-bundle.cjs',
   format: 'cjs',
