@@ -74,5 +74,17 @@ describe('resolveFile content-hash validation', () => {
       expect(resolveFileAbsolute(scene, 'ok.glb')).toBe('https://peer.decentraland.org/content/contents/QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR')
       expect(resolveFileAbsolute(scene, 'evil')).toBeNull()
     })
+
+    it('should percent-encode a b64 hash so /, + and = survive the preview server route as one path segment', () => {
+      // The sdk-commands preview server serves `/content/contents/:hash`
+      // (path-to-regexp): a raw `/` in the hash would add a path segment and
+      // miss the route, while the encoded form matches and is decoded back.
+      const scene: any = { baseUrl: 'http://127.0.0.1:8000/content/contents/', entity: entity([
+        { file: 'bin/index.js', hash: 'b64-abc+def/ghi=' }
+      ]) }
+      expect(resolveFileAbsolute(scene, 'bin/index.js')).toBe(
+        'http://127.0.0.1:8000/content/contents/b64-abc%2Bdef%2Fghi%3D'
+      )
+    })
   })
 })

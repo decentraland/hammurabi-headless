@@ -69,7 +69,14 @@ export function resolveFile(entity: Pick<ContentServerEntity, 'content'>, src: s
 export function resolveFileAbsolute(scene: LoadableScene, src: string): string | null {
   const resolved = resolveFile(scene.entity, src)
 
-  if (resolved) return scene.baseUrl + resolved
+  // Percent-encode the hash into its URL path segment. A no-op for CIDs
+  // (alphanumeric), but a local-preview `b64-` hash can contain `/` (standard
+  // base64 of a path with e.g. non-ASCII characters), and sent raw that would
+  // add an extra path segment and miss the preview server's
+  // `/content/contents/:hash` route (path-to-regexp params match a single
+  // segment). Encoded, the router matches one segment and decodes the param
+  // back before resolving the file.
+  if (resolved) return scene.baseUrl + encodeURIComponent(resolved)
 
   return null
 }

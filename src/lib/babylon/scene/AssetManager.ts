@@ -48,9 +48,13 @@ export class AssetManager {
       // calculate the base path for the model
       const base = normalizedSrc.split('/').slice(0, -1).join('/')
 
+      // The hash is percent-encoded into its path segment for the same reason as
+      // resolveFileAbsolute: a local-preview `b64-` hash may contain `/`, which
+      // sent raw would miss the preview server's `/content/contents/:hash` route.
+      // No-op for CIDs. The cache key (this.models) stays the raw fileHash.
       const ret = BABYLON.SceneLoader.LoadAssetContainerAsync(
         this.loadableScene.baseUrl,
-        fileHash + '?sceneId=' + encodeURIComponent(this.loadableScene.urn) + '&base=' + encodeURIComponent(base),
+        encodeURIComponent(fileHash) + '?sceneId=' + encodeURIComponent(this.loadableScene.urn) + '&base=' + encodeURIComponent(base),
         this.babylonScene,
         null,
         extension
