@@ -4,7 +4,7 @@ import { DeleteEntity, PutComponentOperation } from '../../../src/lib/decentrala
 import { transformComponent } from '../../../src/lib/decentraland/sdk-components/transform-component'
 import { Entity } from '../../../src/lib/decentraland/types'
 import { testWithEngine } from './babylon-test-helper'
-import { AVATAR_ENTITY_RANGE } from '../../../src/lib/babylon/scene/logic/static-entities'
+import { AVATAR_ENTITY_RANGE, StaticEntities } from '../../../src/lib/babylon/scene/logic/static-entities'
 import { OTHER_PLAYER_ENTITIES_RANGE } from '../../../src/lib/decentraland/communications/player-entity-manager'
 import { Scene } from '@dcl/schemas'
 
@@ -86,6 +86,31 @@ testWithEngine(
       await $.ctx.crdtSendToRenderer({ data: buf.toBinary() })
 
       expect($.ctx.entities.has(avatarEntity)).toEqual(true)
+    })
+
+    test('a scene DELETE_ENTITY on a host static entity (PlayerEntity) is dropped', async () => {
+      const playerEntity = StaticEntities.PlayerEntity
+      $.ctx.tryGetOrCreateEntity(playerEntity)
+      expect($.ctx.entities.has(playerEntity)).toEqual(true)
+
+      const buf = new ReadWriteByteBuffer()
+      DeleteEntity.write({ entityId: playerEntity }, buf)
+      await $.ctx.crdtSendToRenderer({ data: buf.toBinary() })
+
+      // a scene must never delete a host-owned entity, even outside the avatar range
+      expect($.ctx.entities.has(playerEntity)).toEqual(true)
+    })
+
+    test('a scene DELETE_ENTITY on a reserved non-avatar entity is dropped', async () => {
+      const reservedEntity = 400 as Entity // in [256, 512): reserved but not avatar range
+      $.ctx.tryGetOrCreateEntity(reservedEntity)
+      expect($.ctx.entities.has(reservedEntity)).toEqual(true)
+
+      const buf = new ReadWriteByteBuffer()
+      DeleteEntity.write({ entityId: reservedEntity }, buf)
+      await $.ctx.crdtSendToRenderer({ data: buf.toBinary() })
+
+      expect($.ctx.entities.has(reservedEntity)).toEqual(true)
     })
 
     test('a scene DELETE_ENTITY on a scene-range entity still applies', async () => {

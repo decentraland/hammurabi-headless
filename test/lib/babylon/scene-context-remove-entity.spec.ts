@@ -50,8 +50,11 @@ testWithEngine(
     beforeEach(() => $.startEngine())
 
     it('should re-root the children to the scene root instead of the world root', async () => {
-      const parentId = 21 as Entity
-      const childId = 22 as Entity
+      // Scene-range ids (>= MAX_RESERVED_ENTITY): scene CRDT cannot delete
+      // reserved/host entities, so removeEntity behavior is exercised on the
+      // entities a real scene actually owns.
+      const parentId = 512 as Entity
+      const childId = 513 as Entity
 
       await $.ctx.crdtSendToRenderer({ data: putTransform(parentId, 0 as Entity, 1) })
       await $.ctx.crdtSendToRenderer({ data: putTransform(childId, parentId, 1) })
@@ -71,7 +74,7 @@ testWithEngine(
     })
 
     it('should purge the CRDT bookkeeping of the deleted entity from every component store', async () => {
-      const entityId = 23 as Entity
+      const entityId = 514 as Entity // scene range: see the re-root test above
 
       await $.ctx.crdtSendToRenderer({ data: putTransform(entityId, 0 as Entity, 1) })
 

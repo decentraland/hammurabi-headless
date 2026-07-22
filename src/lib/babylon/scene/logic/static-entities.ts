@@ -33,8 +33,19 @@ export const MAX_RESERVED_ENTITY = 512
  * avatar-range write guard (scene-context) and the avatar system's subscription
  * range can never disagree. (This was [128, 512] — the wrong half of the
  * reserved space — while the avatar system allocated [32, 256).)
+ *
+ * Same frozen alias as OTHER_PLAYER_ENTITIES_RANGE — treat as read-only.
  */
-export const AVATAR_ENTITY_RANGE: [number, number] = OTHER_PLAYER_ENTITIES_RANGE
+export const AVATAR_ENTITY_RANGE: readonly [number, number] = OTHER_PLAYER_ENTITIES_RANGE
+/**
+ * The whole host-owned reserved entity space `[0, MAX_RESERVED_ENTITY)` — static
+ * entities (RootEntity 0, PlayerEntity 1, CameraEntity 2), the avatar range, and
+ * everything else the scene does not own. Used to deny scene-sourced
+ * DELETE_ENTITY: unlike component writes (scenes legitimately set InputModifier
+ * on PlayerEntity, camera components, …), a scene must never DELETE a host entity.
+ */
+export const RESERVED_ENTITY_RANGE: readonly [number, number] =
+  Object.freeze([0, MAX_RESERVED_ENTITY]) as readonly [number, number]
 
 // Reused temporaries for the per-frame static-entity update (single-threaded).
 // The read-only constants are never mutated — they only feed copyFrom/compares.
@@ -45,7 +56,7 @@ const READONLY_IDENTITY = Quaternion.Identity()
 
 // this function defines if the engine should accept updates to the entity by its
 // entity number
-export function entityIsInRange(entity: Entity, range: [number, number]) {
+export function entityIsInRange(entity: Entity, range: readonly [number, number]) {
   const [entityNumber, _version] = EntityUtils.fromEntityId(entity)
   return entityNumber < range[1] && entityNumber >= range[0]
 }

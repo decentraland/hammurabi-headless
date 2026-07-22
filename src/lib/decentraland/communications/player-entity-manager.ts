@@ -25,8 +25,13 @@ const OTHER_PLAYER_ENTITIES_TO = 256
  * system's subscription range and the renderer's avatar-range write guard both
  * derive from this — static-entities' AVATAR_ENTITY_RANGE was [128, 512] for a
  * while, which would have made any guard built on it protect the wrong entities.
+ *
+ * Frozen and `readonly`: this value is aliased by several modules (the guard, the
+ * subscription range). A stray mutation by any consumer would silently repoint
+ * the global guard, so callers that need a mutable tuple must copy it (`[...x]`).
  */
-export const OTHER_PLAYER_ENTITIES_RANGE: [number, number] = [OTHER_PLAYER_ENTITIES_FROM, OTHER_PLAYER_ENTITIES_TO]
+export const OTHER_PLAYER_ENTITIES_RANGE: readonly [number, number] =
+  Object.freeze([OTHER_PLAYER_ENTITIES_FROM, OTHER_PLAYER_ENTITIES_TO]) as readonly [number, number]
 
 export class PlayerEntityManager {
   // Set of allocated entities for efficient checking

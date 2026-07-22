@@ -318,9 +318,20 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     (process.env.HAMMURABI_DEBUG_COMMS_POSITIONS ?? '').toLowerCase()
   )
   const COMMS_POS_LOG_INTERVAL_MS = 1000
-  // Bounded: one entry per connected peer (≤ pool size); entries are removed in
-  // removePlayerEntity alongside the rest of the per-peer state.
+  // Bounded: an entry is created only for an address that resolved to an entity
+  // (logging happens after findPlayerEntityByAddress succeeds), so there is at
+  // most one per allocated peer (≤ pool size), and removePlayerEntity clears it
+  // on disconnect. An address that never gets an entity (pool exhausted) never
+  // creates an entry.
   const lastCommsPosLogMs = new Map<string, number>()
+
+  // Collapse control chars and cap length so a crafted participant identity can't
+  // forge or flood log lines (matches the limit-logger sanitization convention).
+  function sanitizeForLog(value: string): string {
+    // eslint-disable-next-line no-control-regex
+    const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '?')
+    return cleaned.length > 64 ? cleaned.slice(0, 64) + '…' : cleaned
+  }
 
   function debugLogCommsPosition(kind: 'position' | 'movement', address: string, d: any) {
     const now = Date.now()
@@ -328,7 +339,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     if (now - last < COMMS_POS_LOG_INTERVAL_MS) return
     lastCommsPosLogMs.set(address, now)
     console.log(
-      `[COMMS-POS] ${kind} from=${address} pos=(${d.positionX.toFixed(2)}, ${d.positionY.toFixed(2)}, ${d.positionZ.toFixed(2)})`
+      `[COMMS-POS] ${kind} from=${sanitizeForLog(address)} pos=(${d.positionX.toFixed(2)}, ${d.positionY.toFixed(2)}, ${d.positionZ.toFixed(2)})`
     )
   }
 
