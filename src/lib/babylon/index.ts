@@ -3,6 +3,13 @@ import '@babylonjs/loaders/glTF/2.0/glTFLoader'
 import { setupEnvironment } from './visual/ambientLights'
 import { pickPointerEventsMesh } from './scene/logic/pointer-events'
 import { createRateLimitedErrorLogger } from '../misc/logger'
+import { metrics } from '../misc/metrics'
+
+const rendererFrames = metrics.counter('hammurabi_renderer_frames_total', 'Babylon render loop frames started')
+const rendererFrameErrors = metrics.counter(
+  'hammurabi_renderer_frame_errors_total',
+  'Render loop frames that threw (frame skipped, loop kept alive)'
+)
 
 // Renderer tick rate. Without a requestAnimationFrame global, Babylon paces the
 // render loop with a hard-coded setTimeout(fn, 16) AFTER each frame finishes, so
@@ -90,11 +97,13 @@ export async function initEngine(canvas?: HTMLCanvasElement) {
   // process stays alive — a silent zombie. Log (rate-limited) and keep ticking.
   const logRenderError = createRateLimitedErrorLogger()
   function renderLoop() {
+    rendererFrames.inc()
     try {
       if (scene.activeCamera) {
         scene.render()
       }
     } catch (error: any) {
+      rendererFrameErrors.inc()
       logRenderError('Error inside the render loop (frame skipped):', error)
     }
   }

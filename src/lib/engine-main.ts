@@ -20,6 +20,8 @@ import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
 import { registerShutdownHook, runGracefulShutdown, EXIT_CODES } from './misc/shutdown'
 import { limits } from './misc/limits'
+import { metrics } from './misc/metrics'
+import { startMetricsServer } from './misc/metrics-server'
 import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
@@ -29,6 +31,11 @@ import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/
 // GPU work to prioritize, so scenes get a generous slice of the frame
 // (HAMMURABI_MS_PER_FRAME_PROCESSING_SCENE_MESSAGES)
 const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = limits.msPerFrameProcessingSceneMessages
+
+const commsDisconnections = metrics.counter(
+  'hammurabi_comms_disconnections_total',
+  'Unexpected comms transport losses (client-initiated closes excluded)'
+)
 
 import { DclEnvironment } from './decentraland/environment'
 export { DclEnvironment }
@@ -131,6 +138,8 @@ export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> 
 
   // Setup XMLHttpRequest polyfill for GLTF loading before initializing Babylon.js
   setupXMLHttpRequestPolyfill()
+
+  startMetricsServer()
 
   // Set eagerly so a concurrent call fails fast, but roll back on failure —
   // otherwise a failed startup poisons every retry with "cannot be initialized
@@ -351,6 +360,7 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   const restartOnCommsLoss = options.restartOnCommsLoss ?? true
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
+    commsDisconnections.inc()
     commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
     if (event.kicked) {
       // A kick is LiveKit's DuplicateIdentity rule: rooms hold exactly one

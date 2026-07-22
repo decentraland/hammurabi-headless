@@ -1,4 +1,5 @@
 import { Entity } from "../types"
+import { metrics } from "../../misc/metrics"
 
 // Entity utilities for bit-packed entity numbers and versions
 const MAX_U16 = 0xffff
@@ -192,7 +193,15 @@ export class PlayerEntityManager {
   getAllocatedEntities(): Set<Entity> {
     return new Set(this.allocatedEntities)
   }
+
+  allocatedEntityCount(): number {
+    return this.allocatedEntities.size
+  }
 }
 
 // Singleton instance for global use
 export const playerEntityManager = new PlayerEntityManager()
+
+metrics.gauge('hammurabi_connected_players', 'Remote player entities currently allocated', () =>
+  playerEntityManager.allocatedEntityCount()
+)

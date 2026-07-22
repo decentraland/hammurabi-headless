@@ -3,6 +3,7 @@ import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, TransportMessageEvent, commsLogger } from './types'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
+import { metrics } from '../../misc/metrics'
 
 export enum RoomConnectionStatus {
   NONE,
@@ -10,6 +11,11 @@ export enum RoomConnectionStatus {
   CONNECTED,
   DISCONNECTED
 }
+
+export const commsStateGauge = metrics.gauge(
+  'hammurabi_comms_state',
+  'Comms room connection state (0=none, 1=connecting, 2=connected, 3=disconnected)'
+)
 
 export type TransportPacket<T> = {
   // sender address
@@ -59,8 +65,12 @@ export class CommsTransportWrapper {
 
   constructor(private transport: MinimumCommunicationsTransport, sceneId: string) {
     this.sceneId = sceneId
+    commsStateGauge.set(this.state)
     this.transport.events.on('message', this.handleMessage.bind(this))
-    this.transport.events.on('DISCONNECTION', (event) => this.events.emit('DISCONNECTION', event))
+    this.transport.events.on('DISCONNECTION', (event) => {
+      commsStateGauge.set(RoomConnectionStatus.DISCONNECTED)
+      this.events.emit('DISCONNECTION', event)
+    })
     this.transport.events.on('PEER_CONNECTED', (event) => this.events.emit('PEER_CONNECTED', event))
     this.transport.events.on('PEER_DISCONNECTED', (event) => {
       this.inboundRate.delete(event.address)
@@ -92,10 +102,13 @@ export class CommsTransportWrapper {
     if (this.state !== RoomConnectionStatus.NONE) return
     try {
       this.state = RoomConnectionStatus.CONNECTING
+      commsStateGauge.set(this.state)
       await this.transport.connect()
       this.state = RoomConnectionStatus.CONNECTED
+      commsStateGauge.set(this.state)
     } catch (e: any) {
       this.state = RoomConnectionStatus.DISCONNECTED
+      commsStateGauge.set(this.state)
       this.events.emit('DISCONNECTION', { error: e, kicked: false, clientInitiated: false })
       console.error(e)
     }

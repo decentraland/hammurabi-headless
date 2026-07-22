@@ -15,6 +15,12 @@ import { getAssetBundleRegistryUrl } from "../environment"
 import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
 import { limits } from "../../misc/limits"
 import { limitLogger } from "../../misc/limit-logger"
+import { metrics } from "../../misc/metrics"
+
+const playerPoolExhausted = metrics.counter(
+  'hammurabi_player_pool_exhausted_total',
+  'Packets dropped because the 224-slot remote-player entity pool was full'
+)
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -261,6 +267,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // Allocate a new entity for this remote player
     entity = playerEntityManager.allocateEntityForPlayer(normalizedAddress, false)
     if (entity === null) {
+      playerPoolExhausted.inc()
       const now = Date.now()
       if (now - lastPoolExhaustedLogAt > 1000) {
         lastPoolExhaustedLogAt = now

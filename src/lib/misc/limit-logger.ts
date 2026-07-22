@@ -1,5 +1,6 @@
 import { createLogger } from './logger'
 import { Limits } from './limits'
+import { metrics } from './metrics'
 
 /**
  * Operator-facing, THROTTLED logging for resource/DoS limit hits.
@@ -53,6 +54,8 @@ export interface ThrottledLimitLogger {
   hit(key: LimitKey, detail?: string): void
 }
 
+const limitHits = metrics.labeledCounter('hammurabi_limit_hits_total', 'Resource/DoS limit hits by limit key', 'limit')
+
 export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions = {}): ThrottledLimitLogger {
   const intervalMs = options.intervalMs ?? DEFAULT_LIMIT_LOG_INTERVAL_MS
   const now = options.now ?? Date.now
@@ -63,6 +66,7 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
 
   return {
     hit(key: LimitKey, detail?: string): void {
+      limitHits.inc(key)
       const t = now()
       let s = state.get(key)
       if (!s) {

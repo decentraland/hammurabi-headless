@@ -1,7 +1,15 @@
 import { RuntimeAbstraction } from "./types"
 import { limits } from "../misc/limits"
+import { metrics } from "../misc/metrics"
 
 const MIN_FRAME_TIME = limits.minFrameTimeMs // HAMMURABI_MIN_FRAME_TIME_MS
+
+const sceneTicks = metrics.counter('hammurabi_scene_ticks_total', 'Scene onUpdate turns started')
+const sceneDtSeconds = metrics.histogram(
+  'hammurabi_scene_update_dt_seconds',
+  'Elapsed time passed to scene onUpdate, in seconds',
+  [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]
+)
 
 // Extract an error message that survives the VM round-trip: host-side rejections
 // arrive as Error instances, errors bubbled through scene code as marshalled
@@ -40,6 +48,8 @@ export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
     await opts.onStart()
 
     // by ADR-133, the first update is always 0.0 elapsed time
+    sceneTicks.inc()
+    sceneDtSeconds.observe(0)
     await opts.onUpdate(0.0)
 
     let start = performance.now()
@@ -57,6 +67,8 @@ export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
 
       const dtSecs = dtMillis / 1000
 
+      sceneTicks.inc()
+      sceneDtSeconds.observe(dtSecs)
       await opts.onUpdate(dtSecs)
     }
   } catch (err) {

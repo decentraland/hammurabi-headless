@@ -52,6 +52,7 @@ import {
 } from '../../decentraland/communications/avatar-communication-system'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
+import { metrics } from '../../misc/metrics'
 
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
@@ -105,6 +106,15 @@ const MAX_INCOMING_QUEUE = limits.maxIncomingQueue // queued CRDT buffers awaiti
 // MessageBus never drains this, so it must be bounded or a peer can drive the
 // worker's heap up with scene-cased packets (drop-oldest). (HAMMURABI_MAX_NETWORK_MESSAGE_QUEUE)
 const MAX_NETWORK_MESSAGE_QUEUE = limits.maxNetworkMessageQueue
+
+const crdtIncomingDropped = metrics.counter(
+  'hammurabi_crdt_incoming_dropped_total',
+  'Scene-to-host CRDT batches dropped (oversized payload or saturated queue)'
+)
+const sceneBusDropped = metrics.counter(
+  'hammurabi_scene_bus_dropped_total',
+  'Inbound scene message-bus packets evicted (drop-oldest) because the scene never drained the queue'
+)
 
 let incrementalId = 0
 
@@ -660,8 +670,10 @@ export class SceneContext implements EngineApiInterface {
     ) {
       this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE })
     } else if (data.byteLength > MAX_CRDT_PAYLOAD_BYTES) {
+      crdtIncomingDropped.inc()
       limitLogger.hit('maxCrdtPayloadBytes', `${data.byteLength} bytes`)
     } else if (data.byteLength && this.incomingMessages.length >= MAX_INCOMING_QUEUE) {
+      crdtIncomingDropped.inc()
       limitLogger.hit('maxIncomingQueue')
     }
 
@@ -744,6 +756,7 @@ export class SceneContext implements EngineApiInterface {
           // MessageBus), a peer could otherwise grow it without limit.
           if (this.incomingNetworkMessages.length > MAX_NETWORK_MESSAGE_QUEUE) {
             this.incomingNetworkMessages.shift()
+            sceneBusDropped.inc()
             limitLogger.hit('maxNetworkMessageQueue')
           }
         }
