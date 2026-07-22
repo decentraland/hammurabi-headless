@@ -363,9 +363,11 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       !Number.isFinite(d.rotationX) || !Number.isFinite(d.rotationY) || !Number.isFinite(d.rotationZ) ||
       !Number.isFinite(d.rotationW)
     ) return
-    if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('position', normalizeAddress(event.address), d)
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
+      // Log only after allocation succeeds, so the throttle map gets an entry
+      // only for an address that has an entity (cleaned up in removePlayerEntity).
+      if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('position', normalizeAddress(event.address), d)
       putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
     }
   }
@@ -376,10 +378,11 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
       !Number.isFinite(d.rotationY)
     ) return
-    if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('movement', normalizeAddress(event.address), d)
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
+      // Log only after allocation succeeds (see handlePosition).
+      if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('movement', normalizeAddress(event.address), d)
       putPlayerTransform(entity, event.data, Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY))
     }
   }

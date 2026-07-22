@@ -124,5 +124,28 @@ testWithEngine(
 
       expect($.ctx.entities.has(sceneEntity)).toEqual(false)
     })
+
+    test('guard-denied ops count toward the cooperative frame quota', () => {
+      // A buffer packed with denied reserved-range DELETE_ENTITY ops. Before the
+      // fix, the guard `continue`d past the quota counter, so the host would
+      // parse/log/drop the entire buffer in one turn. Now every parsed message
+      // advances the counter, so a hasQuota() that reports "no budget" makes
+      // update() yield (return false) at the 10th op instead of draining all 15.
+      const buf = new ReadWriteByteBuffer()
+      for (let i = 0; i < 15; i++) {
+        DeleteEntity.write({ entityId: (300 + i) as Entity }, buf)
+      }
+      $.ctx.incomingMessages.push({
+        buffer: new ReadWriteByteBuffer(buf.toBinary()),
+        allowedEntityRange: [1, 65536],
+        sceneSourced: true
+      })
+
+      const yielded = $.ctx.update(() => false) === false
+
+      expect(yielded).toBe(true)
+      // the buffer was not fully drained — it stays queued to resume next turn
+      expect($.ctx.incomingMessages.length).toBe(1)
+    })
   }
 )
