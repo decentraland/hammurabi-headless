@@ -1,7 +1,9 @@
 import { RuntimeAbstraction } from "./types"
 import { limits } from "../misc/limits"
+import { limitLogger } from "../misc/limit-logger"
 
 const MIN_FRAME_TIME = limits.minFrameTimeMs // HAMMURABI_MIN_FRAME_TIME_MS
+const MAX_SCENE_DT = limits.maxSceneDtMs // HAMMURABI_MAX_SCENE_DT_MS
 
 // Extract an error message that survives the VM round-trip: host-side rejections
 // arrive as Error instances, errors bubbled through scene code as marshalled
@@ -55,7 +57,8 @@ export async function defaultUpdateLoop(opts: RuntimeAbstraction) {
 
       start = now
 
-      const dtSecs = dtMillis / 1000
+      if (dtMillis > MAX_SCENE_DT) limitLogger.hit('maxSceneDtMs', `${Math.round(dtMillis)}ms elapsed`)
+      const dtSecs = Math.min(dtMillis, MAX_SCENE_DT) / 1000
 
       await opts.onUpdate(dtSecs)
     }

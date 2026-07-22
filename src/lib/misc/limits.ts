@@ -64,6 +64,7 @@ export interface Limits {
 
   // --- Render loop / scheduling / shutdown ---
   minFrameTimeMs: number
+  maxSceneDtMs: number
   msPerFrameProcessingSceneMessages: number
   shutdownHookTimeoutMs: number
   shutdownDrainMs: number
@@ -137,6 +138,7 @@ const KNOBS: readonly Knob[] = [
 
   // Render loop / scheduling / shutdown
   { key: 'minFrameTimeMs', env: 'HAMMURABI_MIN_FRAME_TIME_MS', def: 24, min: 1 },
+  { key: 'maxSceneDtMs', env: 'HAMMURABI_MAX_SCENE_DT_MS', def: 1_000, min: 100 },
   { key: 'msPerFrameProcessingSceneMessages', env: 'HAMMURABI_MS_PER_FRAME_PROCESSING_SCENE_MESSAGES', def: 10, min: 1 },
   { key: 'shutdownHookTimeoutMs', env: 'HAMMURABI_SHUTDOWN_HOOK_TIMEOUT_MS', def: 2_000, min: 0 },
   { key: 'shutdownDrainMs', env: 'HAMMURABI_SHUTDOWN_DRAIN_MS', def: 1_500, min: 0 },

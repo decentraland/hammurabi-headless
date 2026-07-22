@@ -11,6 +11,7 @@ describe('readLimits', () => {
     expect(l.maxMessagesPerWindow).toBe(300)
     expect(l.fetchTimeoutMs).toBe(15_000)
     expect(l.maxAssetBytes).toBe(64 * 1024 * 1024)
+    expect(l.maxSceneDtMs).toBe(1_000)
     expect(l.maxRaycastIntersectionsPerFrame).toBe(50_000)
   })
 

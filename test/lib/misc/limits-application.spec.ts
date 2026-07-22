@@ -11,7 +11,8 @@ import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comm
 const TOUCHED = [
   'HAMMURABI_MAX_MESSAGES_PER_WINDOW',
   'HAMMURABI_MAX_INBOUND_PACKET_BYTES',
-  'HAMMURABI_MAX_SYNC_EXECUTION_MS'
+  'HAMMURABI_MAX_SYNC_EXECUTION_MS',
+  'HAMMURABI_MAX_SCENE_DT_MS'
 ]
 
 afterEach(() => {
@@ -70,6 +71,33 @@ describe('HAMMURABI_* overrides take effect in the code that enforces them', () 
       transport.events.emit('message', { data: pkt, address: '0xpeer' })
 
       expect(dispatched).toBe(0)
+    })
+  })
+
+  describe('a loop knob: HAMMURABI_MAX_SCENE_DT_MS', () => {
+    it('clamps the scene-visible dt at the overridden ceiling, not the 1000ms default', async () => {
+      process.env.HAMMURABI_MAX_SCENE_DT_MS = '250'
+      jest.resetModules()
+      const { defaultUpdateLoop } = require('../../../src/lib/common-runtime/game-loop')
+
+      const updates: number[] = []
+      let frames = 0
+      const nowSpy = jest.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(5000)
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        await defaultUpdateLoop({
+          onStart: async () => {},
+          onUpdate: async (dt: number) => {
+            updates.push(dt)
+          },
+          isRunning: () => frames++ < 1
+        })
+      } finally {
+        nowSpy.mockRestore()
+        errSpy.mockRestore()
+      }
+
+      expect(updates).toEqual([0, 0.25])
     })
   })
 

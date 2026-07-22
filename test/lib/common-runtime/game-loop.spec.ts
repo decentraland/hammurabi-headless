@@ -235,6 +235,60 @@ describe('defaultUpdateLoop', () => {
     })
   })
 
+  describe('when a host stall makes the elapsed time exceed the scene dt ceiling', () => {
+    let runtime: RuntimeAbstraction
+    let updates: number[]
+    let nowSpy: jest.SpyInstance
+
+    beforeEach(() => {
+      updates = []
+      let frames = 0
+      runtime = makeRuntime({
+        onUpdate: jest.fn().mockImplementation(async (dt: number) => {
+          updates.push(dt)
+        }),
+        isRunning: jest.fn().mockImplementation(() => frames++ < 1)
+      })
+      nowSpy = jest.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(5000)
+    })
+
+    afterEach(() => {
+      nowSpy.mockRestore()
+    })
+
+    it('clamps the dt passed to the scene to the 1s default ceiling', async () => {
+      await expect(defaultUpdateLoop(runtime)).resolves.toBeUndefined()
+      expect(updates).toEqual([0, 1])
+    })
+  })
+
+  describe('when frames elapse normally, under the scene dt ceiling', () => {
+    let runtime: RuntimeAbstraction
+    let updates: number[]
+    let nowSpy: jest.SpyInstance
+
+    beforeEach(() => {
+      updates = []
+      let frames = 0
+      runtime = makeRuntime({
+        onUpdate: jest.fn().mockImplementation(async (dt: number) => {
+          updates.push(dt)
+        }),
+        isRunning: jest.fn().mockImplementation(() => frames++ < 1)
+      })
+      nowSpy = jest.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(100)
+    })
+
+    afterEach(() => {
+      nowSpy.mockRestore()
+    })
+
+    it('passes the real elapsed time through unclamped', async () => {
+      await expect(defaultUpdateLoop(runtime)).resolves.toBeUndefined()
+      expect(updates).toEqual([0, 0.1])
+    })
+  })
+
   describe('when the scene stops running after the first frames', () => {
     let runtime: RuntimeAbstraction
     let updates: number[]
