@@ -20,11 +20,14 @@ export type VoiceSpatialParams = {
 const MAXIMUM_NETWORK_MSG_LENGTH = 30_000
 // Upper bound on a LiveKit connect; the FFI layer itself has no timeout.
 const CONNECT_TIMEOUT_MS = limits.livekitConnectTimeoutMs // HAMMURABI_LIVEKIT_CONNECT_TIMEOUT_MS
+const UNATTRIBUTED_WARN_INTERVAL_MS = 10_000
 
 export class LivekitAdapter implements MinimumCommunicationsTransport {
   public readonly events = mitt<CommsTransportEvents>()
 
   private disposed = false
+  private unattributedDrops = 0
+  private lastUnattributedWarn = 0
   private readonly room: Room
 
   constructor(private config: LivekitConfig) {
@@ -73,6 +76,16 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
       .on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: any, _?: any) => {
         if (participant) {
           this.handleMessage(participant.identity, payload)
+        } else {
+          this.unattributedDrops++
+          const now = Date.now()
+          if (now - this.lastUnattributedWarn >= UNATTRIBUTED_WARN_INTERVAL_MS) {
+            this.lastUnattributedWarn = now
+            commsLogger.log(
+              `⚠️ Dropped ${this.unattributedDrops} data packet(s) so far from peers not yet in the participant map (join race)`,
+              { room: this.room.name, bytes: payload.byteLength }
+            )
+          }
         }
       })
   }
