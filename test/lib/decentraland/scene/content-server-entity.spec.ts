@@ -30,6 +30,16 @@ describe('resolveFile content-hash validation', () => {
         expect(resolveFile(entity([{ file: 'bin/index.js', hash }]), 'bin/index.js')).toBe(hash)
       }
     })
+
+    it('should resolve "b64-" + base64url hashes (- and _, no padding) emitted by newer SDKs', () => {
+      // see b64UrlHashingFunction in @dcl/sdk-commands logic/project-files.ts
+      for (const hash of [
+        'b64-fn5-fn5_', // '-' and '_' from the url-safe alphabet
+        'b64-QzpcVXNlcnNcYWxvbnpvXHNjZW5lXGJpblxpbmRleC5qcy1tYWNoaW5lLWhvc3Q' // unpadded
+      ]) {
+        expect(resolveFile(entity([{ file: 'bin/index.js', hash }]), 'bin/index.js')).toBe(hash)
+      }
+    })
   })
 
   describe('when a "b64-" prefixed hash carries characters outside the base64 alphabet', () => {
