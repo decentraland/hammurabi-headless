@@ -8,7 +8,7 @@ import { avatarBaseComponent } from "../sdk-components/avatar-base"
 import { avatarEquippedDataComponent } from "../sdk-components/avatar-customizations"
 import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
-import { CommsTransportWrapper } from "./CommsTransportWrapper"
+import { CommsChannel } from "./comms-router"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
 import { playerEntityManager } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
@@ -21,7 +21,7 @@ import { robustFetch, drainResponse } from "../../misc/network"
  * `worldToScene` converts world/global positions received from comms into the owning scene's
  * coordinate system, so the Transforms written here are only valid for that scene.
  */
-export function createAvatarCommunicationSystem(transport: CommsTransportWrapper, worldToScene: (position: Vector3) => Vector3) {
+export function createAvatarCommunicationSystem(transport: CommsChannel, worldToScene: (position: Vector3) => Vector3) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
   const AvatarEquippedData = createLwwStore(avatarEquippedDataComponent)

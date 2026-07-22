@@ -22,12 +22,11 @@ import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, play
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
 import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/realm/resolution'
-import { Authenticator } from '@dcl/crypto'
-import { getSignedHeaders } from './decentraland/identity/signed-fetch'
-import { parseParcelPosition } from './decentraland/positions'
 import { CommsTransportWrapper } from './decentraland/communications/CommsTransportWrapper'
-import { PulseAdapter } from './decentraland/communications/transports/pulse'
-import { selectCommsProtocol } from './decentraland/communications/protocol-selection'
+import { readCommsListenerConfig } from './decentraland/communications/config'
+import { resolveRouting, isPulseEnabled, Transport } from './decentraland/communications/comms-routing'
+import { CommsRouter } from './decentraland/communications/comms-router'
+import { createPulseComms } from './decentraland/communications/pulse-comms'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
@@ -119,35 +118,6 @@ export function resetEngine() {
 
   // Reset the initialization flag
   initialized = false
-}
-
-type CommsListenerConfig = {
-  /** Raw HAMMURABI_COMMS_PROTOCOL value; the decision lives in {@link selectCommsProtocol}. */
-  envProtocol: string | undefined
-  host: string
-  port: number
-  realm: string
-}
-
-/**
- * Read the comms-listener configuration from the environment ONCE, here at the
- * boundary (no scattered `process.env` reads). The protocol value is passed raw to
- * {@link selectCommsProtocol} (livekit default, pulse opt-in); the port is
- * bounds-checked. Pulse host/port/realm default to the .zone server.
- */
-function readCommsListenerConfig(): CommsListenerConfig {
-  const envProtocol = process.env.HAMMURABI_COMMS_PROTOCOL
-
-  const envHost = process.env.PULSE_HOST
-  const host = envHost && envHost.length > 0 ? envHost : 'pulse-server.decentraland.zone'
-
-  const parsedPort = Number(process.env.PULSE_PORT)
-  const port = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 7777
-
-  const envRealm = process.env.PULSE_REALM
-  const realm = envRealm && envRealm.length > 0 ? envRealm : 'main'
-
-  return { envProtocol, host, port, realm }
 }
 
 export async function main(options: EngineOptions = {}): Promise<BABYLON.Scene> {
@@ -332,46 +302,15 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
 
   const commsConfig = readCommsListenerConfig()
 
-  // Livekit is the default everywhere; pulse is an explicit env opt-in that beats even an
-  // orchestrator-minted adapter (sdk-multiplayer-server always passes PROCESS_COMMS_ADAPTER).
-  const { protocol, ignoredAdapter } = selectCommsProtocol({
-    commsAdapter: options.commsAdapter,
-    envProtocol: commsConfig.envProtocol
-  })
-  if (ignoredAdapter) {
-    commsLogger.log('HAMMURABI_COMMS_PROTOCOL=pulse is set: ignoring the orchestrator-provided comms adapter')
-  }
+  // Livekit is the default everywhere; HAMMURABI_COMMS_PROTOCOL=pulse additionally routes Pulse's
+  // capability set (currently just `position`) through Pulse, keeping the rest on LiveKit. The
+  // routing plan decides which transports to connect — only those that own a listener are dialed.
+  const routing = resolveRouting(isPulseEnabled(commsConfig.envProtocol))
 
-  // Both paths yield a CommsTransportWrapper, so the avatar system and every
-  // RFC-4 message type are reused unchanged (Option A).
-  let sceneTransport: CommsTransportWrapper
-  if (protocol === 'pulse') {
-    // Signed-fetch `auth_chain` for the scene-listener handshake. The Pulse server
-    // re-derives the payload as `connect:/:<ts>:<md>`, so the method MUST be
-    // `connect` and the path `/`.
-    const authChain = JSON.stringify(
-      getSignedHeaders('connect', '/', {}, (payload) => Authenticator.signPayload(identity.authChain, payload))
-    )
-
-    // The scene footprint as raw parcel coordinates (scene.json "x,z" strings -> {x, z}; the DCL
-    // parcel Z lives in Vector2.y). pulse-client composes these into disjoint ParcelRects for the
-    // handshake, so hammurabi no longer computes grid indices.
-    const parcels = (loadedSceneContext.metadata.scene?.parcels ?? []).map((parcel) => {
-      const vec = parseParcelPosition(parcel)
-      return { x: vec.x, z: vec.y }
-    })
-
-    const adapter = new PulseAdapter({
-      host: commsConfig.host,
-      port: commsConfig.port,
-      realm: commsConfig.realm,
-      parcels,
-      authChain
-    })
-    sceneTransport = new CommsTransportWrapper(adapter, sceneId)
-  } else {
-    // Enable scene comms with Node.js compatible LiveKit
-    sceneTransport = await createSceneComms(realm, identityAtom, scene, {
+  const transports: Partial<Record<Transport, CommsTransportWrapper>> = {}
+  if (routing.connectionSet.has('livekit')) {
+    // Node.js-compatible LiveKit; uses the orchestrator-minted adapter when present.
+    transports.livekit = await createSceneComms(realm, identityAtom, scene, {
       isGenesisScene: isGenesisCity,
       sceneId,
       isWorld,
@@ -379,17 +318,24 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
       commsAdapter: options.commsAdapter
     })
   }
+  if (routing.connectionSet.has('pulse')) {
+    transports.pulse = createPulseComms(commsConfig, identity, loadedSceneContext.metadata.scene?.parcels ?? [], sceneId)
+  }
+
+  // One router in front of the (one or more) transports; the avatar system and every RFC-4 message
+  // type are reused unchanged, fed from whichever transport owns each listener.
+  const sceneTransport = new CommsRouter(routing, transports)
 
   session.transport = sceneTransport
   assertSessionCurrent(session)
 
   sceneContext.pipe(async (ctx) => {
-    ctx.attachLivekitTransport(sceneTransport)
+    ctx.attachCommsTransport(sceneTransport)
   })
 
-  // Attach the restart-on-loss handler before connecting pulse, so a failed
-  // initial handshake (surfaced as DISCONNECTION by the wrapper) is caught too.
-  // LiveKit already retries internally before emitting this.
+  // Attach the restart-on-loss handler BEFORE connecting, so a failed initial handshake (surfaced
+  // as DISCONNECTION by the wrapper) is caught too. LiveKit already retries internally before
+  // emitting this; losing any connected transport (position OR scene bus) triggers a restart.
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
     commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})${event.error ? `: ${event.error.message}` : ''}`)
@@ -399,10 +345,8 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
     }
   })
 
-  if (protocol === 'pulse') {
-    await sceneTransport.connect()
-    assertSessionCurrent(session)
-  }
+  await sceneTransport.connect()
+  assertSessionCurrent(session)
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)
   assertSessionCurrent(session)
