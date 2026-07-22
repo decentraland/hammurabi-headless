@@ -19,6 +19,15 @@ const PLAYER_ENTITY = 1
 const OTHER_PLAYER_ENTITIES_FROM = 32
 const OTHER_PLAYER_ENTITIES_TO = 256
 
+/**
+ * The entity-number range owned by the avatar communication system for remote
+ * players, as a half-open [from, to) tuple. SINGLE SOURCE OF TRUTH: the avatar
+ * system's subscription range and the renderer's avatar-range write guard both
+ * derive from this — static-entities' AVATAR_ENTITY_RANGE was [128, 512] for a
+ * while, which would have made any guard built on it protect the wrong entities.
+ */
+export const OTHER_PLAYER_ENTITIES_RANGE: [number, number] = [OTHER_PLAYER_ENTITIES_FROM, OTHER_PLAYER_ENTITIES_TO]
+
 export class PlayerEntityManager {
   // Set of allocated entities for efficient checking
   private allocatedEntities = new Set<Entity>()

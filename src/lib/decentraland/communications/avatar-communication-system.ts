@@ -10,7 +10,7 @@ import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
 import { CommsTransportWrapper } from "./CommsTransportWrapper"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
-import { playerEntityManager } from "./player-entity-manager"
+import { playerEntityManager, OTHER_PLAYER_ENTITIES_RANGE } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
 import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
 import { limits } from "../../misc/limits"
@@ -245,6 +245,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     const normalizedAddress = normalizeAddress(address)
     profileCache.delete(normalizedAddress)
     profileFetchState.delete(normalizedAddress)
+    lastCommsPosLogMs.delete(normalizedAddress)
   }
 
   function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
@@ -305,6 +306,32 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // retains; this only avoids the second, intermediate allocation per packet
   const tmpWorldPosition = new Vector3()
 
+  // DEBUG-only comms attribution tracer (opt-in). Logs which ADDRESS each
+  // position/movement packet was attributed to (by LiveKit participant identity)
+  // and the raw coordinates it carried, throttled per address. This is the
+  // dispositive evidence for the cross-wire class of bug where a player's entity
+  // receives ANOTHER player's coordinates: address attribution is the only
+  // routing key on this path, so a log showing address A with address B's
+  // trajectory localizes the fault below this layer (FFI/SFU) or at the sender.
+  // Matches the HAMMURABI_XHR_DEBUG convention: only 1/true/yes/on enable it.
+  const DEBUG_COMMS_POSITIONS = ['1', 'true', 'yes', 'on'].includes(
+    (process.env.HAMMURABI_DEBUG_COMMS_POSITIONS ?? '').toLowerCase()
+  )
+  const COMMS_POS_LOG_INTERVAL_MS = 1000
+  // Bounded: one entry per connected peer (≤ pool size); entries are removed in
+  // removePlayerEntity alongside the rest of the per-peer state.
+  const lastCommsPosLogMs = new Map<string, number>()
+
+  function debugLogCommsPosition(kind: 'position' | 'movement', address: string, d: any) {
+    const now = Date.now()
+    const last = lastCommsPosLogMs.get(address) ?? 0
+    if (now - last < COMMS_POS_LOG_INTERVAL_MS) return
+    lastCommsPosLogMs.set(address, now)
+    console.log(
+      `[COMMS-POS] ${kind} from=${address} pos=(${d.positionX.toFixed(2)}, ${d.positionY.toFixed(2)}, ${d.positionZ.toFixed(2)})`
+    )
+  }
+
   const putPlayerTransform = (entity: Entity, data: any, rotation: Quaternion) => {
     tmpWorldPosition.set(data.positionX, data.positionY, data.positionZ)
     Transform.createOrReplace(entity, {
@@ -325,6 +352,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       !Number.isFinite(d.rotationX) || !Number.isFinite(d.rotationY) || !Number.isFinite(d.rotationZ) ||
       !Number.isFinite(d.rotationW)
     ) return
+    if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('position', normalizeAddress(event.address), d)
     const entity = findPlayerEntityByAddress(event.address, true)
     if (entity) {
       putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
@@ -337,6 +365,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
       !Number.isFinite(d.rotationY)
     ) return
+    if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('movement', normalizeAddress(event.address), d)
     const entity = findPlayerEntityByAddress(event.address, true)
 
     if (entity) {
@@ -369,8 +398,8 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   // Public API for managing the avatar system
   return {
-    // Entity range this system manages
-    range: [32, 256] as [number, number],
+    // Entity range this system manages (single source of truth: player-entity-manager)
+    range: OTHER_PLAYER_ENTITIES_RANGE,
 
     // Update function to be called each frame
     update() {
@@ -401,7 +430,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       subscriptionTrackers.add(tracker)
 
       return {
-        range: [32, 256] as [number, number],
+        range: OTHER_PLAYER_ENTITIES_RANGE,
         dispose() {
           subscriptionTrackers.delete(tracker)
           state.clear()

@@ -3,7 +3,8 @@ import mitt from 'mitt'
 import { ReadWriteByteBuffer } from '../../../src/lib/decentraland/ByteBuffer'
 import { CommsEvents, CommsTransportWrapper } from '../../../src/lib/decentraland/communications/CommsTransportWrapper'
 import { createAvatarCommunicationSystem } from '../../../src/lib/decentraland/communications/avatar-communication-system'
-import { StaticEntities } from '../../../src/lib/babylon/scene/logic/static-entities'
+import { AVATAR_ENTITY_RANGE, StaticEntities } from '../../../src/lib/babylon/scene/logic/static-entities'
+import { OTHER_PLAYER_ENTITIES_RANGE } from '../../../src/lib/decentraland/communications/player-entity-manager'
 import { transformComponent } from '../../../src/lib/decentraland/sdk-components/transform-component'
 import { CrdtMessageType, DeleteEntityMessage, PutComponentMessage, readAllMessages } from '../../../src/lib/decentraland/crdt-wire-protocol'
 
@@ -124,6 +125,28 @@ describe('avatar communication system - departed players are removed', () => {
     // And not re-delivered on subsequent frames.
     system.update()
     expect(drainDeleteEntities(subscription)).toEqual([])
+
+    system.dispose()
+  })
+})
+
+// The avatar system's declared entity range, the player entity manager's
+// allocation range, and the renderer's avatar-range write guard must all agree —
+// static-entities' AVATAR_ENTITY_RANGE was [128, 512] for a while, which would
+// have made a guard built on it protect the wrong half of the reserved space.
+describe('avatar communication system - entity range consistency', () => {
+  const worldToScene = (position: Vector3) => position.clone()
+
+  test('system and subscription ranges are the player-entity-manager allocation range', () => {
+    const events = mitt<CommsEvents>()
+    const transport = { events } as unknown as CommsTransportWrapper
+    const system = createAvatarCommunicationSystem(transport, worldToScene)
+    const subscription = system.createSubscription()
+
+    expect(system.range).toEqual(OTHER_PLAYER_ENTITIES_RANGE)
+    expect(subscription.range).toEqual(OTHER_PLAYER_ENTITIES_RANGE)
+    expect(AVATAR_ENTITY_RANGE).toEqual(OTHER_PLAYER_ENTITIES_RANGE)
+    expect(OTHER_PLAYER_ENTITIES_RANGE).toEqual([32, 256])
 
     system.dispose()
   })

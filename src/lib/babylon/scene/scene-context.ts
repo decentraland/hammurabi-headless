@@ -29,7 +29,7 @@ import {
 import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-component'
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
-import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import { StaticEntities, MAX_RESERVED_ENTITY, AVATAR_ENTITY_RANGE, entityIsInRange, updateStaticEntities } from './logic/static-entities'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
 import { engineInfoComponent } from '../../decentraland/sdk-components/engine-info'
@@ -136,7 +136,16 @@ export class SceneContext implements EngineApiInterface {
   // quota each renderer frame. ByteBuffer reading is continuable using iterators.
   // the incoming messages also include the range of allowe entities that the origin
   // transports had access to
-  incomingMessages: { buffer: ByteBuffer; readonly allowedEntityRange: [number, number] }[] = []
+  incomingMessages: {
+    buffer: ByteBuffer
+    readonly allowedEntityRange: [number, number]
+    // Entities the origin transport must NOT touch even inside its allowed
+    // range. Scene-sourced messages carry the avatar-comms range here: those
+    // entities are owned by the avatar communication system, and a scene write
+    // landing on one would fight it with an independent LWW timestamp domain
+    // (endless conflict corrections) and could pre-create avatar slots.
+    readonly deniedEntityRange?: [number, number]
+  }[] = []
 
   // stash of outgoing messages ready to be sent to back to the scripting scene
   outgoingMessagesBuffer: ByteBuffer = new ReadWriteByteBuffer()
@@ -274,7 +283,7 @@ export class SceneContext implements EngineApiInterface {
       if (resolveFileAbsolute(this.loadableScene, file)) {
         const { content } = await this.readFile(file)
         this.mainCrdt = content
-        this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(content), allowedEntityRange: SCENE_ENTITY_RANGE })
+        this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(content), allowedEntityRange: SCENE_ENTITY_RANGE, deniedEntityRange: AVATAR_ENTITY_RANGE })
       }
     } catch (err: any) {
       this.log(err)
@@ -378,6 +387,29 @@ export class SceneContext implements EngineApiInterface {
     return this.getOrCreateEntity(entityId)
   }
 
+  // Throttle state for the avatar-range write guard log: a scene bug (or a
+  // hostile scene) hitting the guard every frame must not flood stdout. Same
+  // reasoning as limitLogger, but this is not a configurable resource cap, so
+  // it keeps a local 1s throttle with a suppressed-count on the next emission.
+  private lastBlockedAvatarWriteLogMs = 0
+  private blockedAvatarWritesSuppressed = 0
+
+  private logBlockedAvatarRangeWrite(crdtMessage: { entityId: number; type: number; componentId?: number }) {
+    const now = Date.now()
+    if (now - this.lastBlockedAvatarWriteLogMs < 1000) {
+      this.blockedAvatarWritesSuppressed++
+      return
+    }
+    const suppressed = this.blockedAvatarWritesSuppressed
+    this.blockedAvatarWritesSuppressed = 0
+    this.lastBlockedAvatarWriteLogMs = now
+    console.warn(
+      `[SceneContext] Blocked scene CRDT op on avatar-range entity: type=${crdtMessage.type} entity=${crdtMessage.entityId}` +
+      (crdtMessage.componentId !== undefined ? ` component=${crdtMessage.componentId}` : '') +
+      (suppressed > 0 ? ` (+${suppressed} suppressed since last log)` : '')
+    )
+  }
+
   getEntityOrNull(entityId: Entity): BabylonEntity | null {
     return this.entities.get(entityId) || null
   }
@@ -413,8 +445,17 @@ export class SceneContext implements EngineApiInterface {
           case CrdtMessageType.APPEND_VALUE:
           case CrdtMessageType.DELETE_COMPONENT:
           case CrdtMessageType.PUT_COMPONENT: {
-            // ignore updates of entities outside range
-            // if (!entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) continue
+            // Avatar-range write guard: drop component ops the origin transport
+            // is denied (scene-sourced messages carry the avatar-comms range).
+            // The historical allowed-range check stays disabled for component
+            // ops — scenes legitimately write to static entities (InputModifier
+            // on PlayerEntity, camera components) and possibly RootEntity, so a
+            // positive allowlist here would need protocol archaeology; the
+            // denial of the avatar range is the load-bearing part.
+            if (message.deniedEntityRange && entityIsInRange(crdtMessage.entityId, message.deniedEntityRange)) {
+              this.logBlockedAvatarRangeWrite(crdtMessage)
+              continue
+            }
 
             // Bound host memory: a scene can stream PUT/APPEND for unbounded
             // distinct entity ids (entity number + generational version), each
@@ -442,6 +483,12 @@ export class SceneContext implements EngineApiInterface {
           case CrdtMessageType.DELETE_ENTITY: {
             // ignore updates of entities outside range
             if (!entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) continue
+            // Avatar-range guard, same as the component-op branch: a scene
+            // DELETE_ENTITY on an avatar slot would tear down a live player.
+            if (message.deniedEntityRange && entityIsInRange(crdtMessage.entityId, message.deniedEntityRange)) {
+              this.logBlockedAvatarRangeWrite(crdtMessage)
+              continue
+            }
 
             this.removeEntity(crdtMessage.entityId)
             break
@@ -658,7 +705,7 @@ export class SceneContext implements EngineApiInterface {
       data.byteLength <= MAX_CRDT_PAYLOAD_BYTES &&
       this.incomingMessages.length < MAX_INCOMING_QUEUE
     ) {
-      this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE })
+      this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE, deniedEntityRange: AVATAR_ENTITY_RANGE })
     } else if (data.byteLength > MAX_CRDT_PAYLOAD_BYTES) {
       limitLogger.hit('maxCrdtPayloadBytes', `${data.byteLength} bytes`)
     } else if (data.byteLength && this.incomingMessages.length >= MAX_INCOMING_QUEUE) {
