@@ -8,6 +8,7 @@ import { realmInfoComponent } from '../../../decentraland/sdk-components/realm-i
 import { EntityUtils } from '../../../decentraland/crdt-internal/generational-index-pool'
 import { playerEntityAtom, currentRealm } from '../../../decentraland/state'
 import { isLocalhostRealm } from '../../../decentraland/realm/resolution'
+import { OTHER_PLAYER_ENTITIES_RANGE } from '../../../decentraland/communications/player-entity-manager'
 
 export const StaticEntities = {
   RootEntity: 0 as Entity,
@@ -16,8 +17,35 @@ export const StaticEntities = {
 } as const
 
 export const PLAYER_HEIGHT = 1.7
+/**
+ * Babylon capsules are anchored at their CENTER, but scene-facing player
+ * transforms are feet-anchored by protocol convention (comms movement packets
+ * and the explorers report feet). Reporting the raw capsule position leaks a
+ * +PLAYER_HEIGHT/2 offset into scenes — exactly the "~0.85m Y" fingerprint that
+ * surfaced in the flag-tag cross-wire investigation (a position stream matching
+ * another player's movement plus this constant). Every site that turns
+ * capsule.position into a scene-facing player position must subtract this.
+ */
+export const PLAYER_CAPSULE_HALF_HEIGHT = PLAYER_HEIGHT / 2
 export const MAX_RESERVED_ENTITY = 512
-export const AVATAR_ENTITY_RANGE: [number, number] = [128, MAX_RESERVED_ENTITY]
+/**
+ * The avatar-comms entity range, sourced from the player entity manager so the
+ * avatar-range write guard (scene-context) and the avatar system's subscription
+ * range can never disagree. (This was [128, 512] — the wrong half of the
+ * reserved space — while the avatar system allocated [32, 256).)
+ *
+ * Same frozen alias as OTHER_PLAYER_ENTITIES_RANGE — treat as read-only.
+ */
+export const AVATAR_ENTITY_RANGE: readonly [number, number] = OTHER_PLAYER_ENTITIES_RANGE
+/**
+ * The whole host-owned reserved entity space `[0, MAX_RESERVED_ENTITY)` — static
+ * entities (RootEntity 0, PlayerEntity 1, CameraEntity 2), the avatar range, and
+ * everything else the scene does not own. Used to deny scene-sourced
+ * DELETE_ENTITY: unlike component writes (scenes legitimately set InputModifier
+ * on PlayerEntity, camera components, …), a scene must never DELETE a host entity.
+ */
+export const RESERVED_ENTITY_RANGE: readonly [number, number] =
+  Object.freeze([0, MAX_RESERVED_ENTITY]) as readonly [number, number]
 
 // Reused temporaries for the per-frame static-entity update (single-threaded).
 // The read-only constants are never mutated — they only feed copyFrom/compares.
@@ -28,7 +56,7 @@ const READONLY_IDENTITY = Quaternion.Identity()
 
 // this function defines if the engine should accept updates to the entity by its
 // entity number
-export function entityIsInRange(entity: Entity, range: [number, number]) {
+export function entityIsInRange(entity: Entity, range: readonly [number, number]) {
   const [entityNumber, _version] = EntityUtils.fromEntityId(entity)
   return entityNumber < range[1] && entityNumber >= range[0]
 }
@@ -103,6 +131,9 @@ export function updateStaticEntities(context: SceneContext) {
 
     // convert the player position to scene-space coordinates (into a reused temp)
     globalCoordinatesToSceneCoordinatesToRef(context, player?.absolutePosition ?? READONLY_ZERO, tmpPosition)
+    // The atom holds the CharacterController capsule, whose position is its
+    // CENTER — report feet to the scene (see PLAYER_CAPSULE_HALF_HEIGHT).
+    if (player) tmpPosition.y -= PLAYER_CAPSULE_HALF_HEIGHT
     const rotation = player?.absoluteRotationQuaternion ?? READONLY_IDENTITY
 
     // Only dirty (re-serialize + re-send) the transform when it actually moved.

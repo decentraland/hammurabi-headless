@@ -30,6 +30,7 @@ import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-c
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
 import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import { isDeniedSceneCrdtOp, sanitizeSceneCrdt } from './logic/scene-crdt-guard'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
 import { engineInfoComponent } from '../../decentraland/sdk-components/engine-info'
@@ -136,7 +137,16 @@ export class SceneContext implements EngineApiInterface {
   // quota each renderer frame. ByteBuffer reading is continuable using iterators.
   // the incoming messages also include the range of allowe entities that the origin
   // transports had access to
-  incomingMessages: { buffer: ByteBuffer; readonly allowedEntityRange: [number, number] }[] = []
+  incomingMessages: {
+    buffer: ByteBuffer
+    readonly allowedEntityRange: readonly [number, number]
+    // True when the buffer originates from the untrusted scene runtime
+    // (crdtSendToRenderer / main.crdt) rather than a trusted host subscription
+    // (avatar system, virtual scenes). Scene-sourced ops are subject to the
+    // write guard (see scene-crdt-guard.ts): component ops are denied on the
+    // avatar range, DELETE_ENTITY on the whole reserved range.
+    readonly sceneSourced?: boolean
+  }[] = []
 
   // stash of outgoing messages ready to be sent to back to the scripting scene
   outgoingMessagesBuffer: ByteBuffer = new ReadWriteByteBuffer()
@@ -273,8 +283,13 @@ export class SceneContext implements EngineApiInterface {
       const file = 'main.crdt'
       if (resolveFileAbsolute(this.loadableScene, file)) {
         const { content } = await this.readFile(file)
-        this.mainCrdt = content
-        this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(content), allowedEntityRange: SCENE_ENTITY_RANGE })
+        // main.crdt is scene-authored (untrusted) initial state. Sanitize it ONCE
+        // here so it obeys the same write guard as runtime scene CRDT, and store
+        // the sanitized bytes — crdtGetState echoes this.mainCrdt back to the
+        // scene, so echoing the raw bytes would hand the scene avatar/reserved ops
+        // the host itself rejected (host/scene initial-state divergence).
+        this.mainCrdt = sanitizeSceneCrdt(content).bytes
+        this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(this.mainCrdt), allowedEntityRange: SCENE_ENTITY_RANGE, sceneSourced: true })
       }
     } catch (err: any) {
       this.log(err)
@@ -378,6 +393,29 @@ export class SceneContext implements EngineApiInterface {
     return this.getOrCreateEntity(entityId)
   }
 
+  // Throttle state for the scene write-guard log: a scene bug (or a hostile
+  // scene) hitting the guard every frame must not flood stdout. Same reasoning
+  // as limitLogger, but this is not a configurable resource cap, so it keeps a
+  // local 1s throttle with a suppressed-count on the next emission.
+  private lastBlockedSceneWriteLogMs = 0
+  private blockedSceneWritesSuppressed = 0
+
+  private logBlockedSceneWrite(crdtMessage: { entityId: number; type: number; componentId?: number }) {
+    const now = Date.now()
+    if (now - this.lastBlockedSceneWriteLogMs < 1000) {
+      this.blockedSceneWritesSuppressed++
+      return
+    }
+    const suppressed = this.blockedSceneWritesSuppressed
+    this.blockedSceneWritesSuppressed = 0
+    this.lastBlockedSceneWriteLogMs = now
+    console.warn(
+      `[SceneContext] Blocked scene CRDT op on reserved entity: type=${crdtMessage.type} entity=${crdtMessage.entityId}` +
+      (crdtMessage.componentId !== undefined ? ` component=${crdtMessage.componentId}` : '') +
+      (suppressed > 0 ? ` (+${suppressed} suppressed since last log)` : '')
+    )
+  }
+
   getEntityOrNull(entityId: Entity): BabylonEntity | null {
     return this.entities.get(entityId) || null
   }
@@ -407,49 +445,62 @@ export class SceneContext implements EngineApiInterface {
       const message = this.incomingMessages[0]
 
       for (const crdtMessage of readAllMessages(message.buffer)) {
-        if (this.deletedEntities.has(crdtMessage.entityId)) continue
-        // STUB create or delete entities based on putComponent and deleteEntity
-        switch (crdtMessage.type) {
-          case CrdtMessageType.APPEND_VALUE:
-          case CrdtMessageType.DELETE_COMPONENT:
-          case CrdtMessageType.PUT_COMPONENT: {
-            // ignore updates of entities outside range
-            // if (!entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) continue
+        // Structured as fall-through (no `continue`) so EVERY parsed message
+        // reaches the quota check below — including ones skipped here
+        // (already-deleted, guard-denied, out-of-range, or dropped at the entity
+        // cap). Otherwise a scene could pack a large buffer with denied/no-op ops
+        // and make the host parse/log/drop the whole thing in one update turn
+        // instead of yielding every 10 ops.
+        if (!this.deletedEntities.has(crdtMessage.entityId)) {
+          if (message.sceneSourced && isDeniedSceneCrdtOp(crdtMessage)) {
+            // Scene write guard: drop ops the untrusted scene runtime must not
+            // perform — component ops on the avatar range, DELETE_ENTITY on the
+            // whole reserved range (see scene-crdt-guard.ts). Trusted host
+            // subscriptions (avatar system, virtual scenes) are not scene-sourced
+            // and pass through, so avatar removal still works.
+            this.logBlockedSceneWrite(crdtMessage)
+          } else if (
+            crdtMessage.type === CrdtMessageType.APPEND_VALUE ||
+            crdtMessage.type === CrdtMessageType.DELETE_COMPONENT ||
+            crdtMessage.type === CrdtMessageType.PUT_COMPONENT
+          ) {
+            // NOTE: the historical allowed-range check stays disabled for component
+            // ops — scenes legitimately write to static entities (InputModifier on
+            // PlayerEntity, camera components) and possibly RootEntity, so a
+            // positive allowlist here would need protocol archaeology.
 
             // Bound host memory: a scene can stream PUT/APPEND for unbounded
             // distinct entity ids (entity number + generational version), each
             // allocating a host BabylonEntity. Refuse to create NEW entities past
             // a hard ceiling; updates to already-live entities still apply.
             const entity = this.tryGetOrCreateEntity(crdtMessage.entityId)
-            if (!entity) continue
-            const component = (this.components as any)[crdtMessage.componentId] as ComponentDefinition<any> | void
+            if (entity) {
+              const component = (this.components as any)[crdtMessage.componentId] as ComponentDefinition<any> | void
 
-            // if the change is accepted, then we instruct the entity to update its internal state
-            // via putComponent or deleteComponent calls
-            if (component && component.updateFromCrdt(crdtMessage, this.outgoingMessagesBuffer)) {
-              if (
-                crdtMessage.type === CrdtMessageType.PUT_COMPONENT ||
-                crdtMessage.type === CrdtMessageType.APPEND_VALUE
-              ) {
-                entity.putComponent(component)
-              } else {
-                entity.deleteComponent(component)
+              // if the change is accepted, then we instruct the entity to update its internal state
+              // via putComponent or deleteComponent calls
+              if (component && component.updateFromCrdt(crdtMessage, this.outgoingMessagesBuffer)) {
+                if (
+                  crdtMessage.type === CrdtMessageType.PUT_COMPONENT ||
+                  crdtMessage.type === CrdtMessageType.APPEND_VALUE
+                ) {
+                  entity.putComponent(component)
+                } else {
+                  entity.deleteComponent(component)
+                }
               }
             }
-
-            break
-          }
-          case CrdtMessageType.DELETE_ENTITY: {
+          } else if (crdtMessage.type === CrdtMessageType.DELETE_ENTITY) {
             // ignore updates of entities outside range
-            if (!entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) continue
-
-            this.removeEntity(crdtMessage.entityId)
-            break
+            if (entityIsInRange(crdtMessage.entityId, message.allowedEntityRange)) {
+              this.removeEntity(crdtMessage.entityId)
+            }
           }
         }
 
-        // if we exceeded the quota, finish the processing of this "message" and yield
-        // the execution control back to the event loop
+        // If we exceeded the quota, finish processing this "message" and yield
+        // control back to the event loop. The message just handled is already
+        // behind the read cursor, so resuming re-reads from the next one.
         if (++rollingOperationCounter % 10 == 0 && !hasQuota()) {
           return false
         }
@@ -658,7 +709,7 @@ export class SceneContext implements EngineApiInterface {
       data.byteLength <= MAX_CRDT_PAYLOAD_BYTES &&
       this.incomingMessages.length < MAX_INCOMING_QUEUE
     ) {
-      this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE })
+      this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE, sceneSourced: true })
     } else if (data.byteLength > MAX_CRDT_PAYLOAD_BYTES) {
       limitLogger.hit('maxCrdtPayloadBytes', `${data.byteLength} bytes`)
     } else if (data.byteLength && this.incomingMessages.length >= MAX_INCOMING_QUEUE) {

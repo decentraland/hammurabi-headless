@@ -68,12 +68,15 @@ testWithEngine("scene context implents ADR-148", {
   })
 
   it('tests one message with a blank entity component', async () => {
-    const entityId = 1 as Entity
+    // Scene-range id (>= MAX_RESERVED_ENTITY): the entity is created and then
+    // deleted through the scene CRDT channel, which cannot delete reserved/host
+    // entities (entity 1 is PlayerEntity).
+    const entityId = 512 as Entity
 
     // first there is no entity
     expect($.ctx.entities.has(entityId)).toEqual(false)
 
-    // then we create a component for the entityId=1
+    // then we create a component for the entity
     {
       const componentBuffer = new ReadWriteByteBuffer()
       transformComponent.serialize({
