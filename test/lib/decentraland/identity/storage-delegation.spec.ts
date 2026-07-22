@@ -145,15 +145,36 @@ describe('getFreshStorageDelegation', () => {
     expect(storageDelegation.getOrNull()?.expiration).toBe(renewedExpiration)
   })
 
-  it('rejects a renewal reply bound to a different scene (does not rebind)', async () => {
+  it('accepts a same-world renewal with a rotated sceneId/parcel (redeploy) and rebinds', async () => {
     const current = parseStorageDelegation(encode({ expiration: Date.now() + 60_000 }))!
     storageDelegation.swap(current)
+    const renewedExpiration = Date.now() + 3_600_000
     process.send = jest.fn(() => {
-      // Parent replies with a delegation for a DIFFERENT scene — must be rejected.
       setImmediate(() =>
         process.emit('message' as any, {
           type: 'storage-delegation:response',
-          delegation: encode({ sceneId: 'bafkrei-other', expiration: Date.now() + 3_600_000 })
+          delegation: encode({ sceneId: 'bafkrei-redeployed', parcel: '6,8', expiration: renewedExpiration })
+        })
+      )
+      return true
+    }) as any
+
+    const result = await getFreshStorageDelegation()
+
+    expect(result?.sceneId).toBe('bafkrei-redeployed')
+    expect(storageDelegation.getOrNull()?.sceneId).toBe('bafkrei-redeployed')
+    expect(storageDelegation.getOrNull()?.parcel).toBe('6,8')
+    expect(storageDelegation.getOrNull()?.expiration).toBe(renewedExpiration)
+  })
+
+  it('rejects a renewal reply bound to a different world (does not rebind)', async () => {
+    const current = parseStorageDelegation(encode({ expiration: Date.now() + 60_000 }))!
+    storageDelegation.swap(current)
+    process.send = jest.fn(() => {
+      setImmediate(() =>
+        process.emit('message' as any, {
+          type: 'storage-delegation:response',
+          delegation: encode({ world: 'other.dcl.eth', expiration: Date.now() + 3_600_000 })
         })
       )
       return true
@@ -163,6 +184,6 @@ describe('getFreshStorageDelegation', () => {
 
     // Falls back to the current (near-expiry) delegation; the atom is NOT rebound.
     expect(result).toBe(current)
-    expect(storageDelegation.getOrNull()?.sceneId).toBe('bafkrei-scene')
+    expect(storageDelegation.getOrNull()?.world).toBe('boedo.dcl.eth')
   })
 })
