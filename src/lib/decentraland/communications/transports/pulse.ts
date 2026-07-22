@@ -10,10 +10,27 @@ export type PulseConfig = {
   realm: string
   /** Scene footprint as raw parcel coordinates; pulse-client composes it into disjoint ParcelRects. */
   parcels: ParcelCoord[]
-  authChain: string
+  /**
+   * Mints a fresh signed-fetch `auth_chain` for the handshake. Called INSIDE connect() and never
+   * cached: the chain embeds a timestamp, so a future in-process reconnect must re-sign rather than
+   * replay a stale one.
+   */
+  mintAuthChain: () => string
+  /** Log each received position (PULSE_DEBUG). Read from config, never from the per-packet hot path. */
+  debug: boolean
 }
 
 const IDENTITY_ROTATION = { x: 0, y: 0, z: 0, w: 1 }
+
+// Bound the subjectId->address map: it grows one entry per distinct peer. The pulse server is
+// operator-configured (semi-trusted) but relays untrusted peer data, so keep it bounded like every
+// other untrusted-input structure in the host. A full map degrades playerLeft to the subjectId
+// fallback rather than growing without bound.
+const MAX_TRACKED_PEERS = 1024
+
+// A well-formed EVM address. Anything else from the wire falls back to the subjectId so a malformed
+// value can't flow downstream (profile-fetch URL / entity manager) as a forged identity.
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/
 
 export class PulseAdapter implements MinimumCommunicationsTransport {
   public readonly events = mitt<CommsTransportEvents>()
@@ -23,8 +40,9 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
   private connected = false
   // The pulse-client contract: `disconnected` fires exactly once on every terminal loop
   // exit, while `error` is non-fatal (e.g. one malformed packet, an abandoned resync).
-  // This flag keeps DISCONNECTION single-fire regardless.
+  // This flag keeps DISCONNECTION single-fire regardless (terminal loss OR clean disconnect).
   private terminated = false
+  private warnedReceiveOnly = false
   // subjectId -> address, seeded from joined/updated so playerLeft (which only
   // carries a subjectId) can resolve an address it is never given directly.
   private readonly subjectAddresses = new Map<string, string>()
@@ -42,7 +60,7 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       port: this.config.port,
       realm: this.config.realm,
       parcels: this.config.parcels,
-      authChain: this.config.authChain
+      authChain: this.config.mintAuthChain()
     })
     this.connected = true
 
@@ -71,6 +89,11 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       this.events.emit('error', error)
     })
     this.listener.on('disconnected', (reason) => this.terminate(reason ? new Error(reason) : undefined))
+
+    commsLogger.log(
+      `Pulse listener connected to ${this.config.host}:${this.config.port} ` +
+        `realm=${this.config.realm} parcels=${this.config.parcels.length} players=${this.listener.getPlayers().length}`
+    )
   }
 
   /** Terminal loop exit: flip the connection state and surface DISCONNECTION exactly once. */
@@ -81,8 +104,13 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
     this.events.emit('DISCONNECTION', { kicked: false, error })
   }
 
-  // Receive-only observer: the scene listener never publishes peer traffic.
-  send(_data: Uint8Array, _hints: SendHints, _destination: string[]): void {}
+  // Receive-only observer: the scene listener never publishes peer traffic. Warn ONCE (own-position
+  // sends can hit 30 Hz) so a scene relying on outbound comms isn't a silent black hole.
+  send(_data: Uint8Array, _hints: SendHints, _destination: string[]): void {
+    if (this.warnedReceiveOnly) return
+    this.warnedReceiveOnly = true
+    commsLogger.error('PulseAdapter is receive-only: outbound comms (own position / MessageBus / chat) are dropped')
+  }
 
   setVoicePosition(_address: string, _position: proto.Position): void {}
 
@@ -93,6 +121,11 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
     this.listener?.close()
     this.listener = undefined
     this.subjectAddresses.clear()
+    // Clean, locally-initiated teardown — surface it once for parity with LivekitAdapter.
+    if (!this.terminated) {
+      this.terminated = true
+      this.events.emit('DISCONNECTION', { kicked: false, clientInitiated: true })
+    }
   }
 
   getRoomInfo(): { roomName: string; isConnected: boolean } | undefined {
@@ -100,8 +133,13 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
   }
 
   private track(player: Player): string {
-    const address = player.address ?? player.subjectId
-    this.subjectAddresses.set(player.subjectId, address)
+    const raw = player.address
+    const address = raw && ADDRESS_RE.test(raw) ? raw : player.subjectId
+    // Store only when there is room, or when the subject is already tracked (a refresh). A full
+    // map degrades a later playerLeft to the subjectId fallback rather than growing unbounded.
+    if (this.subjectAddresses.has(player.subjectId) || this.subjectAddresses.size < MAX_TRACKED_PEERS) {
+      this.subjectAddresses.set(player.subjectId, address)
+    }
     return address
   }
 
@@ -120,7 +158,7 @@ export class PulseAdapter implements MinimumCommunicationsTransport {
       rotationZ: rotation.z,
       rotationW: rotation.w
     }
-    if (process.env.PULSE_DEBUG) {
+    if (this.config.debug) {
       const p = player.position
       commsLogger.log(`📍 recv ${address} pos=(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) seq=${player.sequence}`)
     }

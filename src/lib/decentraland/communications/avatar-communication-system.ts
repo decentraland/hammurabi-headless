@@ -8,7 +8,7 @@ import { avatarBaseComponent } from "../sdk-components/avatar-base"
 import { avatarEmoteCommandComponent, avatarEquippedDataComponent } from "../sdk-components/avatar-customizations"
 import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
-import { CommsTransportWrapper } from "./CommsTransportWrapper"
+import { CommsChannel } from "./comms-router"
 import { StaticEntities } from "../../babylon/scene/logic/static-entities"
 import { playerEntityManager, OTHER_PLAYER_ENTITIES_RANGE } from "./player-entity-manager"
 import { getAssetBundleRegistryUrl } from "../environment"
@@ -67,7 +67,7 @@ type AvatarTransportRegistry = {
 }
 
 // Keyed weakly so a discarded transport takes its registry with it.
-const avatarTransportRegistries = new WeakMap<CommsTransportWrapper, RegistryInternals>()
+const avatarTransportRegistries = new WeakMap<CommsChannel, RegistryInternals>()
 
 /**
  * Which engine/comms session the avatar state belongs to.
@@ -106,7 +106,7 @@ type RegistryInternals = AvatarTransportRegistry & {
   detach(): void
 }
 
-function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTransportRegistry {
+function getAvatarTransportRegistry(transport: CommsChannel): AvatarTransportRegistry {
   const existing = avatarTransportRegistries.get(transport)
   if (existing) {
     if (existing.generation === avatarSessionGeneration) return existing
@@ -364,7 +364,7 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
 }
 
 export function createAvatarCommunicationSystem(
-  transport: CommsTransportWrapper,
+  transport: CommsChannel,
   worldToScene: (position: Vector3) => Vector3,
   // Injectable so a test can drive a resolver whose cache/debounce/in-flight state it
   // owns. The default is process-wide on purpose (emote urns repeat across peers and
