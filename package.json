@@ -65,7 +65,7 @@
     "@babylonjs/materials": "6.4.1",
     "@dcl/crypto": "3.7.0",
     "@dcl/protocol": "^1.0.0-27167791416.commit-a470b13",
-    "@dcl/pulse-client": "file:../dcl-pulse-client",
+    "@dcl/pulse-client": "https://builder-items.decentraland.zone/@dcl/pulse-client/branch/ci/split-workflows-s3-preview/dcl-pulse-client-0.0.0-488ebf1.tgz",
     "@dcl/rpc": "^1.1.3-20230519185613.commit-95da0ce",
     "@dcl/schemas": "^7.1.0",
     "@jitl/quickjs-ng-wasmfile-release-sync": "^0.32.0",
