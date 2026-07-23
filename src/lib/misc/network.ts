@@ -1,10 +1,12 @@
 import { sleep } from './promises'
 import { createLogger } from './logger'
+import { limits } from './limits'
+import { limitLogger, LimitKey } from './limit-logger'
 
 const logger = createLogger('🌐 net')
 
-const DEFAULT_TIMEOUT_MS = 15000
-const DEFAULT_RETRIES = 2
+const DEFAULT_TIMEOUT_MS = limits.fetchTimeoutMs // HAMMURABI_FETCH_TIMEOUT_MS
+const DEFAULT_RETRIES = limits.fetchRetries // HAMMURABI_FETCH_RETRIES
 
 export type RobustFetchOptions = { timeoutMs?: number; retries?: number; label?: string }
 
@@ -33,7 +35,7 @@ function backoffMs(attempt: number) {
 // (signed fetches, realm /about). Far above any legitimate API response; the
 // per-attempt timeout bounds time, not volume, so a hostile endpoint on a fast
 // link could otherwise stream unbounded bytes into host memory.
-export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
+export const DEFAULT_MAX_BODY_BYTES = limits.maxBodyBytes // HAMMURABI_MAX_BODY_BYTES
 
 /**
  * Reads a Response body as text, enforcing a byte ceiling.
@@ -45,11 +47,18 @@ export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
  * which broke JSON.parse on BOM-prefixed bodies that `response.json()` used to
  * accept (common from Windows/.NET backends).
  */
-export async function readBodyCappedBytes(response: Response, maxBytes: number): Promise<Buffer> {
+export async function readBodyCappedBytes(
+  response: Response,
+  maxBytes: number,
+  limitKey: LimitKey = 'maxBodyBytes'
+): Promise<Buffer> {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maxBytes) {
     await drainResponse(response)
-    throw new Error(`response body exceeds ${maxBytes} bytes`)
+    // Name the URL: a bare "response body exceeds N bytes" is undiagnosable
+    // when several fetches are in flight during startup.
+    limitLogger.hit(limitKey, `content-length ${declared} > ${maxBytes} (${response.url})`)
+    throw new Error(`response body exceeds ${maxBytes} bytes (${response.url})`)
   }
 
   if (!response.body) return Buffer.alloc(0)
@@ -62,7 +71,8 @@ export async function readBodyCappedBytes(response: Response, maxBytes: number):
       if (done) break
       total += value.byteLength
       if (total > maxBytes) {
-        throw new Error(`response body exceeds ${maxBytes} bytes`)
+        limitLogger.hit(limitKey, `streamed > ${maxBytes} bytes (${response.url})`)
+        throw new Error(`response body exceeds ${maxBytes} bytes (${response.url})`)
       }
       chunks.push(value)
     }

@@ -1,6 +1,6 @@
 /**
  * The runtimes of this project can start a scene in many different runners. Like
- * a WebWorker, an isolated-vm in node, and QuickJS via WASM.
+ * a WebWorker or an isolated-vm in node.
  */
 
 export type RuntimeAbstraction = {

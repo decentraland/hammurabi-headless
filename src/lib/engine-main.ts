@@ -18,6 +18,8 @@ import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/av
 import { pickWorldSpawnpoint } from './decentraland/scene/spawn-points'
 import { addSystems } from './decentraland/system'
 import { Atom } from './misc/atom'
+import { registerShutdownHook, runGracefulShutdown, EXIT_CODES } from './misc/shutdown'
+import { limits } from './misc/limits'
 import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, playerEntityAtom, CurrentRealm, currentEnvironment, storageDelegation } from './decentraland/state'
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
@@ -30,7 +32,8 @@ import { createPulseComms } from './decentraland/communications/pulse-comms'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
-const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = 10
+// (HAMMURABI_MS_PER_FRAME_PROCESSING_SCENE_MESSAGES)
+const MS_PER_FRAME_PROCESSING_SCENE_MESSAGES = limits.msPerFrameProcessingSceneMessages
 
 import { DclEnvironment } from './decentraland/environment'
 export { DclEnvironment }
@@ -72,8 +75,14 @@ let initialized = false
 type EngineSession = {
   babylonScene?: BABYLON.Scene
   transport?: { disconnect(): Promise<void> }
+  sceneContext?: SceneContext
 }
 let activeSession: EngineSession | undefined
+
+// The graceful-shutdown hook reads the CURRENT session (via `activeSession`), which
+// resetEngine() clears — so after a hot reload it never disposes a stale/disposed
+// scene or misses the live one.
+let shutdownHookRegistered = false
 
 function disposeSession(session: EngineSession) {
   // Tear down comms: the DISCONNECTION handler ignores client-initiated closes,
@@ -230,6 +239,20 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   const isWorld = isDclEns(realmUrl)
   const isGenesisCity = !isLocalhost && !isWorld
 
+  // An sdk-commands preview server reached through a non-localhost hostname
+  // (e.g. --realm=http://192.168.x.x:8000 copied from the preview's LAN URL)
+  // would silently fall into the Genesis City branch and die much later with
+  // misleading errors ("Position parameter is required", a gatekeeper 401).
+  // Preview realms identify themselves in /about — fail right here with the
+  // actual problem instead.
+  if (!isLocalhost && aboutResponse?.configurations?.realmName === 'LocalPreview') {
+    throw new Error(
+      `Realm "${realmUrl}" is an sdk-commands preview server, but only localhost/127.0.0.1 hostnames ` +
+        `are treated as local preview. Use --realm=http://localhost:<port> instead. ` +
+        `(Realms are classified as: localhost → local preview, *.dcl.eth → world, anything else → Genesis City.)`
+    )
+  }
+
   // Create identity atom for sceneComms
   const identityAtom = Atom(identity)
 
@@ -333,15 +356,43 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
     ctx.attachCommsTransport(sceneTransport)
   })
 
-  // Attach the restart-on-loss handler BEFORE connecting, so a failed initial handshake (surfaced
-  // as DISCONNECTION by the wrapper) is caught too. LiveKit already retries internally before
-  // emitting this; losing any connected transport (position OR scene bus) triggers a restart.
+  // Record this session's scene so the (single) shutdown hook tears down cleanly:
+  // disposing the scene closes its RPC transport, so the scene's update loop exits
+  // between turns and the isolate disposes IDLE (disposing/exiting mid-turn
+  // SIGSEGVs the process). Reading through `activeSession` means resetEngine()
+  // clearing it makes the hook track the current session (or no-op post-reset).
+  session.sceneContext = loadedSceneContext
+  if (!shutdownHookRegistered) {
+    shutdownHookRegistered = true
+    registerShutdownHook(async () => {
+      try { activeSession?.sceneContext?.dispose() } catch { /* best-effort */ }
+      try { await activeSession?.transport?.disconnect() } catch { /* best-effort */ }
+    })
+  }
+
+  // Attach the restart-on-loss handler BEFORE connecting, so a failed initial handshake
+  // (surfaced as DISCONNECTION by the wrapper) is caught too. LiveKit already retries
+  // internally before emitting this; losing any connected transport (position OR scene bus)
+  // triggers a restart.
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
     commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})${event.error ? `: ${event.error.message}` : ''}`)
+    if (event.kicked) {
+      // A kick is LiveKit's DuplicateIdentity rule: rooms hold exactly one
+      // 'authoritative-server' participant, so another server instance for this
+      // same scene just took the room over (locally: usually a second preview
+      // of the same project). Without this message the losing instance looks
+      // healthy while silently serving nobody.
+      commsLogger.error(
+        '🥊 Another authoritative server took over this scene\'s comms room — you probably have a second ' +
+          'preview/server of this project running. This instance is no longer serving clients.'
+      )
+    }
     if (restartOnCommsLoss) {
-      commsLogger.error('Exiting so the server can be restarted with a fresh connection')
-      process.exit(1)
+      commsLogger.error('Shutting down so the supervisor can restart us with a fresh connection')
+      // Graceful (dispose scene → isolate goes idle → clean exit); a bare
+      // process.exit() here would SIGSEGV whenever a scene turn is mid-flight.
+      void runGracefulShutdown(EXIT_CODES.COMMS_LOST)
     }
   })
 

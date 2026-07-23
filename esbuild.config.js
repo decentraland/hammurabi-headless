@@ -2,9 +2,11 @@ const esbuild = require('esbuild')
 
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production')
 
-// Build configuration for CommonJS worker bundle
+// Build configuration for CommonJS worker bundle. The entry is worker-entry.ts
+// (NOT index.ts): the worker bundle is a process entrypoint and runs the
+// Node-version preflight, while the plain package export stays import-safe.
 const buildWorkerBundle = {
-  entryPoints: ['src/index.ts'],
+  entryPoints: ['src/worker-entry.ts'],
   bundle: true,
   outfile: 'dist/worker-bundle.cjs',
   format: 'cjs',
@@ -46,12 +48,10 @@ const buildWorkerBundle = {
     // native module resolution. @dcl/pulse-client is kept external alongside it.
     '@dcl/pulse-client',
     'koffi',
-    // QuickJS engine: the quickjs-ng variant loads its .wasm from its own package
-    // dir at runtime, so keep it external (required from node_modules) rather than
-    // inlined — bundling would break the wasm path resolution.
-    'quickjs-emscripten-core',
-    '@jitl/quickjs-ng-wasmfile-release-sync',
-    '@jitl/quickjs-ng-wasmfile-release-sync/*',
+    // isolated-vm is a native addon (.node binary): keep it external so it's
+    // required from node_modules at runtime rather than inlined — esbuild cannot
+    // bundle a native addon, and its prebuilt binary is resolved via node-gyp-build.
+    'isolated-vm',
     // Any .node files
     '*.node'
   ],

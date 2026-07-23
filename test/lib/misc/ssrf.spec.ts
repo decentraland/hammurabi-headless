@@ -88,9 +88,39 @@ describe('assertPublicSceneUrl', () => {
     })
   })
 
+  describe('when the host is an IPv6 form that embeds an IPv4 address', () => {
+    // NAT64 (64:ff9b::/96), 6to4 (2002::/16), and the deprecated IPv4-compatible
+    // (::/96) prefixes each carry an IPv4 inside the literal; new URL() normalizes
+    // them to hex, so they bypassed the earlier ::ffff:-only check.
+    it('should reject NAT64 wrapping loopback / metadata', async () => {
+      await expect(assertPublicSceneUrl('http://[64:ff9b::7f00:1]/')).rejects.toThrow(/non-public/i)
+      await expect(assertPublicSceneUrl('http://[64:ff9b::a9fe:a9fe]/latest/meta-data/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should reject 6to4 wrapping loopback', async () => {
+      await expect(assertPublicSceneUrl('http://[2002:7f00:1::]/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should reject the IPv4-compatible form wrapping loopback', async () => {
+      await expect(assertPublicSceneUrl('http://[::7f00:1]/')).rejects.toThrow(/non-public/i)
+    })
+
+    it('should still allow these prefixes when they embed a PUBLIC IPv4', async () => {
+      // 8.8.8.8 embedded via 6to4 and NAT64 is a real public destination.
+      await expect(assertPublicSceneUrl('http://[2002:0808:0808::]/')).resolves.toBeUndefined()
+      await expect(assertPublicSceneUrl('http://[64:ff9b::0808:0808]/')).resolves.toBeUndefined()
+      expect(lookupMock).not.toHaveBeenCalled()
+    })
+  })
+
   describe('when the host is a public IP literal', () => {
     it('should allow it without a DNS lookup', async () => {
       await expect(assertPublicSceneUrl('https://8.8.8.8/path')).resolves.toBeUndefined()
+      expect(lookupMock).not.toHaveBeenCalled()
+    })
+
+    it('should allow a genuine public IPv6 address', async () => {
+      await expect(assertPublicSceneUrl('https://[2606:4700:4700::1111]/')).resolves.toBeUndefined()
       expect(lookupMock).not.toHaveBeenCalled()
     })
   })
@@ -121,6 +151,98 @@ describe('assertPublicSceneUrl', () => {
         expect(error.message).toMatch(/non-public/i)
         expect(error.message).not.toContain('10.1.2.3')
       })
+    })
+  })
+
+  describe('when the local-preview loopback relaxation is enabled', () => {
+    describe('and the destination is loopback', () => {
+      it('should allow localhost and *.localhost names', async () => {
+        await expect(assertPublicSceneUrl('http://localhost:3000/api', { allowLoopback: true })).resolves.toBeUndefined()
+        await expect(assertPublicSceneUrl('http://app.localhost:3000/', { allowLoopback: true })).resolves.toBeUndefined()
+      })
+
+      it('should allow the whole 127.0.0.0/8 range', async () => {
+        await expect(assertPublicSceneUrl('http://127.0.0.1:9090/', { allowLoopback: true })).resolves.toBeUndefined()
+        await expect(assertPublicSceneUrl('http://127.1.2.3/', { allowLoopback: true })).resolves.toBeUndefined()
+      })
+
+      it('should allow the IPv6 loopback literal', async () => {
+        await expect(assertPublicSceneUrl('http://[::1]:8081/', { allowLoopback: true })).resolves.toBeUndefined()
+      })
+
+      describe('and a hostname resolves to loopback (e.g. an /etc/hosts alias)', () => {
+        beforeEach(() => {
+          lookupMock.mockResolvedValue([{ address: '127.0.0.1', family: 4 }])
+        })
+
+        it('should allow it', async () => {
+          await expect(assertPublicSceneUrl('http://myapp.test:3000/', { allowLoopback: true })).resolves.toBeUndefined()
+        })
+      })
+    })
+
+    describe('and the destination is private but NOT loopback', () => {
+      it('should still reject RFC1918 and CGNAT literals', async () => {
+        await expect(assertPublicSceneUrl('http://192.168.1.1/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+        await expect(assertPublicSceneUrl('http://10.0.0.5/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+        await expect(assertPublicSceneUrl('http://100.64.0.1/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+      })
+
+      it('should still reject the cloud metadata address', async () => {
+        await expect(assertPublicSceneUrl('http://169.254.169.254/latest/meta-data/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+      })
+
+      it('should still reject .local and .internal names', async () => {
+        await expect(assertPublicSceneUrl('http://mymac.local:3000/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+        await expect(assertPublicSceneUrl('http://db.internal/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+      })
+
+      it('should still reject exotic loopback spellings (mapped/6to4/NAT64)', async () => {
+        await expect(assertPublicSceneUrl('http://[::ffff:127.0.0.1]/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+        await expect(assertPublicSceneUrl('http://[2002:7f00:1::]/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+        await expect(assertPublicSceneUrl('http://[64:ff9b::7f00:1]/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+      })
+
+      describe('and a hostname resolves to a private address', () => {
+        beforeEach(() => {
+          lookupMock.mockResolvedValue([{ address: '10.1.2.3', family: 4 }])
+        })
+
+        it('should still reject it', async () => {
+          await expect(assertPublicSceneUrl('https://sneaky.example.com/x', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+        })
+      })
+    })
+
+    describe('and a hostname resolves to BOTH loopback and a private address', () => {
+      beforeEach(() => {
+        lookupMock.mockResolvedValue([
+          { address: '127.0.0.1', family: 4 },
+          { address: '192.168.1.1', family: 4 }
+        ])
+      })
+
+      it('should reject it (the private record wins)', async () => {
+        await expect(assertPublicSceneUrl('http://both.example.com/', { allowLoopback: true })).rejects.toThrow(/non-public/i)
+      })
+    })
+  })
+
+  describe('when a literal non-public host is blocked', () => {
+    let warnSpy: jest.SpyInstance
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      warnSpy.mockRestore()
+    })
+
+    it('should log the block host-side so it is visible in the worker terminal', async () => {
+      await expect(assertPublicSceneUrl('http://localhost:3000/api')).rejects.toThrow(/non-public/i)
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('blocked scene request to localhost'))
     })
   })
 })

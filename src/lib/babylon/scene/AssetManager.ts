@@ -5,8 +5,14 @@
 // buffers for each model requies us to find a reusable solution
 
 import * as BABYLON from '@babylonjs/core'
-import { robustFetch, drainResponse } from '../../misc/network'
-import { LoadableScene, WearableContentServerEntity, resolveFile, resolveFileAbsolute } from '../../decentraland/scene/content-server-entity'
+import { robustFetch, drainResponse, readBodyCappedBytes } from '../../misc/network'
+import { limits } from '../../misc/limits'
+
+// Cap an asset/file body before buffering it whole. A large deployed file (or the
+// scene-reachable `~system/Runtime.readFile` RPC) would otherwise drive an
+// unbounded host allocation → worker OOM. Matches the glTF/XHR ceiling. (HAMMURABI_MAX_ASSET_BYTES)
+const MAX_ASSET_BYTES = limits.maxAssetBytes
+import { LoadableScene, WearableContentServerEntity, resolveFile, resolveFileAbsolute, encodeContentHashForUrl } from '../../decentraland/scene/content-server-entity'
 import { GLTFFileLoader, GLTFLoaderAnimationStartMode } from '@babylonjs/loaders/glTF/glTFFileLoader'
 import { GLTFLoader } from '@babylonjs/loaders/glTF/2.0'
 import { setColliderMask } from './logic/colliders'
@@ -42,9 +48,12 @@ export class AssetManager {
       // calculate the base path for the model
       const base = normalizedSrc.split('/').slice(0, -1).join('/')
 
+      // The hash goes into a URL path segment, so it uses the shared encoding
+      // helper (see encodeContentHashForUrl for the local-preview `b64-` hash
+      // rationale). The cache key (this.models) stays the raw fileHash.
       const ret = BABYLON.SceneLoader.LoadAssetContainerAsync(
         this.loadableScene.baseUrl,
-        fileHash + '?sceneId=' + encodeURIComponent(this.loadableScene.urn) + '&base=' + encodeURIComponent(base),
+        encodeContentHashForUrl(fileHash) + '?sceneId=' + encodeURIComponent(this.loadableScene.urn) + '&base=' + encodeURIComponent(base),
         this.babylonScene,
         null,
         extension
@@ -74,14 +83,27 @@ export class AssetManager {
 
     const absoluteLocation = resolveFileAbsolute(this.loadableScene, file)
     if (!absoluteLocation) throw new Error(`File not found: ${file}`)
-    const res = await robustFetch(absoluteLocation, {}, { label: 'asset' })
+    // `redirect: 'manual'` — do NOT auto-follow 3xx. This fetch is scene-reachable
+    // (`~system/Runtime.readFile` → readFile, plus the auto-read of main.crdt) and
+    // its body is handed to untrusted scene code. A content-addressed store has no
+    // legitimate reason to redirect (the glTF/texture path already rejects 3xx via
+    // the XHR polyfill), so following one would only let a compromised/malicious
+    // content server bounce the request from THIS worker's network position onto a
+    // loopback / private / cloud-metadata host and relay the response back to the
+    // scene (SSRF). undici surfaces a 3xx here as an opaqueredirect (status 0, !ok).
+    const res = await robustFetch(absoluteLocation, { redirect: 'manual' }, { label: 'asset' })
+
+    if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+      await drainResponse(res)
+      throw new Error(`Asset fetch refused to follow a redirect: ${absoluteLocation}`)
+    }
 
     if (!res.ok) {
       await drainResponse(res) // release the socket before discarding the response
       throw new Error(`Error loading URL: ${absoluteLocation}`)
     }
 
-    return { content: new Uint8Array(await res.arrayBuffer()), hash }
+    return { content: new Uint8Array(await readBodyCappedBytes(res, MAX_ASSET_BYTES, 'maxAssetBytes')), hash }
   }
 
   async loadTexture(file: string) {

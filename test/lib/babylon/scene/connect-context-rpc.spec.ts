@@ -99,9 +99,9 @@ describe('scene RPC capabilities', () => {
       expect(signedFetchMock.mock.calls[0][1]).not.toBe(AUTHORITATIVE_AUTH_CHAIN)
     })
 
-    it('should mark the request metadata as a guest signer', () => {
+    it('should label the request metadata with the kernel-scene signer role while staying a guest', () => {
       const metadata = signedFetchMock.mock.calls[0][3]
-      expect(metadata).toMatchObject({ isGuest: true, signer: 'dcl:scene-guest' })
+      expect(metadata).toMatchObject({ isGuest: true, signer: 'decentraland-kernel-scene' })
     })
   })
 
@@ -261,7 +261,33 @@ describe('scene RPC capabilities', () => {
     })
   })
 
-  describe('when a scene targets a blocked host that is NOT the realm origin', () => {
+  describe('when a scene under a localhost realm targets another loopback port', () => {
+    let response: any
+
+    beforeEach(async () => {
+      currentRealm.swap({
+        baseUrl: 'http://localhost:8000',
+        connectionString: 'http://localhost:8000',
+        aboutResponse: { configurations: { realmName: 'localhost' } } as any
+      })
+      signedFetchMock.mockResolvedValueOnce({ ok: true, status: 200, statusText: 'OK', headers: {}, text: '{}' })
+      const service: any = loadModuleForPort(port, '~system/SignedFetch')
+      // Different port = different origin, so the realm-origin exemption does
+      // not apply — but the localhost realm enables the loopback relaxation,
+      // so a dev's own local backend is reachable from server-side scene code.
+      response = await service.signedFetch({
+        url: 'http://localhost:9999/api',
+        init: { method: 'GET', headers: {} }
+      })
+    })
+
+    it('should allow the request through the loopback relaxation', () => {
+      expect(signedFetchMock).toHaveBeenCalledTimes(1)
+      expect(response.ok).toBe(true)
+    })
+  })
+
+  describe('when a scene under a localhost realm targets a private non-loopback host', () => {
     let response: any
 
     beforeEach(async () => {
@@ -271,10 +297,9 @@ describe('scene RPC capabilities', () => {
         aboutResponse: { configurations: { realmName: 'localhost' } } as any
       })
       const service: any = loadModuleForPort(port, '~system/SignedFetch')
-      // Same host, different port: a different origin, so the exemption must
-      // not apply and the guard must still block it.
+      // The loopback relaxation must never extend to LAN / private ranges.
       response = await service.signedFetch({
-        url: 'http://localhost:9999/admin',
+        url: 'http://192.168.1.7/admin',
         init: { method: 'GET', headers: {} }
       })
     })
@@ -282,6 +307,11 @@ describe('scene RPC capabilities', () => {
     it('should still block the request', () => {
       expect(signedFetchMock).not.toHaveBeenCalled()
       expect(response.ok).toBe(false)
+    })
+
+    it('should report the block as a 403 naming the SSRF guard, not a fake 500', () => {
+      expect(response.status).toBe(403)
+      expect(response.statusText).toContain('SSRF guard')
     })
   })
 

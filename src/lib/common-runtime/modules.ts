@@ -7,7 +7,7 @@ import { SendBinaryRequest } from '@dcl/protocol/out-js/decentraland/kernel/apis
 import { TestingServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/testing.gen'
 import { RpcClientPort } from '@dcl/rpc'
 import * as codegen from '@dcl/rpc/dist/codegen'
-import { coerceMaybeU8Array } from '../quick-js/convert-handles'
+import { coerceMaybeU8Array } from './marshal-utils'
 import { RuntimeServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/runtime.gen'
 import { UserIdentityServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_identity.gen'
 import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
@@ -20,9 +20,9 @@ export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
   switch (moduleName) {
     case '~system/EngineApi': {
       const originalService = codegen.loadService(port, EngineApiServiceDefinition)
-      // Binary payloads normally cross the VM boundary as real Uint8Arrays (see
-      // quick-js/convert-handles.ts). The coercion below is defense in depth for
-      // the documented plain-object fallback: without it, protobuf encodes a
+      // Binary payloads normally cross the sandbox boundary as real Uint8Arrays
+      // (structured copy). The coercion below is defense in depth for the
+      // documented plain-object fallback: without it, protobuf encodes a
       // byte-keyed object as an EMPTY payload and the request silently no-ops.
       return {
         ...originalService,

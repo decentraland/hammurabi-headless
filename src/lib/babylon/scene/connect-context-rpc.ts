@@ -20,21 +20,24 @@ import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '..
 import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signed-fetch'
 import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
+import { isLocalhostRealm } from '../../decentraland/realm/resolution'
+import { limits } from '../../misc/limits'
+import { limitLogger } from '../../misc/limit-logger'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { StaticEntities } from './logic/static-entities'
 
 // Per-call caps on scene→LiveKit publishing (CommunicationsController.sendBinary).
 // The request is fully scene-controlled; without caps a scene could flood the room.
-const MAX_SEND_PEERS = 256
-const MAX_SEND_MESSAGES = 512
-const MAX_COMMS_MESSAGE_BYTES = 30_000 // matches the transport's network message limit
+const MAX_SEND_PEERS = limits.maxSendPeers // HAMMURABI_MAX_SEND_PEERS
+const MAX_SEND_MESSAGES = limits.maxSendMessages // HAMMURABI_MAX_SEND_MESSAGES
+const MAX_COMMS_MESSAGE_BYTES = limits.maxCommsMessageBytes // HAMMURABI_MAX_COMMS_MESSAGE_BYTES (matches the transport's network message limit)
 
 // Max redirects a scene SignedFetch will follow. Each hop is re-validated by the
 // SSRF guard so a public host can't 3xx-redirect the request onto a private
 // address (metadata endpoint, loopback admin) — the single-shot guard alone was
 // bypassable because the underlying fetch follows redirects transparently.
-const MAX_SIGNED_FETCH_REDIRECTS = 5
+const MAX_SIGNED_FETCH_REDIRECTS = limits.maxSignedFetchRedirects // HAMMURABI_MAX_SIGNED_FETCH_REDIRECTS
 
 // The world-storage-service. Requests to these hosts are signed with the
 // world-scoped storage delegation (when present) instead of the guest identity.
@@ -261,17 +264,33 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
         // Count every ENTRY examined (including oversized ones we skip) against the
         // cap so a scene can't force unbounded host iteration with oversized spam.
         let processed = 0
+        if (req.peerData.length > MAX_SEND_PEERS) limitLogger.hit('maxSendPeers', `${req.peerData.length} peers`)
         for (const peerData of req.peerData.slice(0, MAX_SEND_PEERS)) {
           for (const data of peerData.data) {
-            if (processed >= MAX_SEND_MESSAGES) break
+            if (processed >= MAX_SEND_MESSAGES) {
+              limitLogger.hit('maxSendMessages')
+              break
+            }
             processed++
             // Guard the type as well as the size: a non-Uint8Array here (e.g. a
             // byte-keyed plain object) has undefined length, which would pass the
             // cap check and then publish an empty payload.
-            if (!(data instanceof Uint8Array) || data.length > MAX_COMMS_MESSAGE_BYTES) continue
+            if (!(data instanceof Uint8Array)) continue
+            if (data.length > MAX_COMMS_MESSAGE_BYTES) {
+              limitLogger.hit('maxCommsMessageBytes', `${data.length} bytes`)
+              continue
+            }
+            // Same key as the peer-entries cap above (same constant bounds both);
+            // the detail string distinguishes which of the two was truncated.
+            const addressCount = peerData.address?.length ?? 0
+            if (addressCount > MAX_SEND_PEERS) limitLogger.hit('maxSendPeers', `${addressCount} destination addresses`)
             void context.transport.sendParcelSceneMessage(
               { sceneId: context.entityId, data: encodeMessage(data, MsgType.Uint8Array) },
-              peerData.address
+              // Cap the destination-identities list too: it's forwarded verbatim to
+              // LiveKit, so an unbounded per-message address array is host CPU/heap
+              // (serialize) + control-plane bytes with no real fan-out (the SFU
+              // drops unknown identities).
+              (peerData.address ?? []).slice(0, MAX_SEND_PEERS)
             )
           }
           if (processed >= MAX_SEND_MESSAGES) break
@@ -369,8 +388,15 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       const realm = await currentRealm.deref()
 
       const metadata = {
-        origin: 'hammurabi-server//',
-        signer: 'dcl:scene-guest',
+        origin: 'hammurabi-server://',
+        // `signer` is a self-declared ROLE label in the signed metadata, not a key —
+        // the actual signer address is recovered from `identity.authChain` below (still
+        // the unprivileged scene identity). It must be `decentraland-kernel-scene`, the
+        // value the reference kernel uses for scene-originated signed fetches: DCL
+        // services (e.g. comms-gatekeeper's scene-admin/scene-bans routes) whitelist
+        // scene requests by `metadata.signer === 'decentraland-kernel-scene'` and reject
+        // anything else with 400 "Invalid metadata content".
+        signer: 'decentraland-kernel-scene',
         isGuest: true,
         realm: { serverName: realm.aboutResponse.configurations?.realmName, hostname: realm.baseUrl },
         realmName: realm.aboutResponse.configurations?.realmName,
@@ -401,9 +427,14 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           console.warn(`SignedFetch: cannot derive realm origin from "${realm.baseUrl}", realm-origin exemption disabled`)
         }
 
+        // In local preview (localhost realm) the guard admits loopback
+        // destinations, matching the scene's unprivileged fetch/WebSocket
+        // globals (see rpc-scene-runtime.ts). Production realms never relax.
+        const allowLoopback = isLocalhostRealm(realm.baseUrl)
+
         for (let hop = 0; ; hop++) {
           if (realmOrigin === null || new URL(currentUrl).origin !== realmOrigin) {
-            await assertPublicSceneUrl(currentUrl)
+            await assertPublicSceneUrl(currentUrl, { allowLoopback })
           }
 
           // Only forward scene-supplied headers while on the original origin. On a
@@ -445,6 +476,7 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           if (!isRedirect || !location) break
 
           if (hop >= MAX_SIGNED_FETCH_REDIRECTS) {
+            limitLogger.hit('maxSignedFetchRedirects', currentUrl)
             throw new Error('Blocked scene request: too many redirects')
           }
           // Resolve relative Location values against the current URL.
@@ -459,12 +491,18 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
           body: result.text || '{}'
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error'
+        // An SSRF-guard block is a policy decision, not a backend failure. It
+        // used to surface as a generic 500 "Internal Error", which sends devs
+        // chasing a phantom bug in their own service — return a 403 that names
+        // the guard instead. Everything else stays a 500.
+        const blockedByGuard = message.startsWith('Blocked scene request')
         return {
           ok: false,
-          status: 500,
-          statusText: 'Internal Error',
+          status: blockedByGuard ? 403 : 500,
+          statusText: blockedByGuard ? 'Blocked by scene-server SSRF guard' : 'Internal Error',
           headers: {},
-          body: JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' })
+          body: JSON.stringify({ error: message })
         }
       }
     },

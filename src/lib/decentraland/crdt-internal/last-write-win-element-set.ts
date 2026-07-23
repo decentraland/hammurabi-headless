@@ -4,6 +4,8 @@ import { Entity } from "../types"
 import { ComponentDeclaration, ComponentType, LastWriteWinElementSetComponentDefinition, SerDe } from "./components"
 import { ProcessMessageResultType } from "./conflict-resolution"
 import { dataCompare } from "./dataCompare"
+import { limits } from "../../misc/limits"
+import { limitLogger } from "../../misc/limit-logger"
 
 export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, number>): number {
   const newTimestamp = (timestamps.get(entity) || 0) + 1
@@ -44,7 +46,7 @@ function serializeToScratch<T>(serde: SerDe<T>, value: T): Uint8Array {
 // entities, re-enabling the echo amplification the map exists to prevent at
 // exactly the scale where it matters. Eviction only ever costs a redundant
 // corrective message, never correctness.
-const MAX_ECHO_DEDUPE_ENTRIES = 8192
+const MAX_ECHO_DEDUPE_ENTRIES = limits.maxEchoDedupeEntries // HAMMURABI_MAX_ECHO_DEDUPE_ENTRIES
 
 export function createUpdateLwwFromCrdt<T>(
   componentId: number,
@@ -154,6 +156,7 @@ export function createUpdateLwwFromCrdt<T>(
         if (echoedAtTimestamp.size >= MAX_ECHO_DEDUPE_ENTRIES) {
           const oldest = echoedAtTimestamp.keys().next().value
           if (oldest !== undefined) echoedAtTimestamp.delete(oldest)
+          limitLogger.hit('maxEchoDedupeEntries')
         }
         echoedAtTimestamp.set(entityId, timestamp)
 

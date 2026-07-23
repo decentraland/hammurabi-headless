@@ -50,22 +50,61 @@ import {
   createAvatarCommunicationSystem,
   AvatarCommunicationSystem
 } from '../../decentraland/communications/avatar-communication-system'
+import { limits } from '../../misc/limits'
+import { limitLogger } from '../../misc/limit-logger'
 
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
 // Untrusted-input bounds. Scene CRDT is fully attacker-controlled and is applied
-// in HOST code, outside the QuickJS VM's memory/interrupt limits — so these caps
-// are what keep a hostile scene from exhausting the worker's heap. Drops are
-// silent by design: logging per drop would let a scene amplify into log spam.
-const MAX_LIVE_ENTITIES = 100_000 // concurrent host BabylonEntity objects per scene
-const MAX_DELETED_TOMBSTONES = 100_000 // retained delete tombstones per scene
-const MAX_CRDT_PAYLOAD_BYTES = 8 * 1024 * 1024 // per crdtSendToRenderer call
-const MAX_INCOMING_QUEUE = 1024 // queued CRDT buffers awaiting processing
+// in HOST code, outside the isolate's memory/execution limits — so these caps
+// are what keep a hostile scene from exhausting the worker's heap. The drop itself
+// stays per-drop-silent (no cost on the hot path); a hit is reported to the
+// THROTTLED limitLogger, which emits at most once per interval so a scene can't
+// amplify the log — the operator still gets a signal that the cap is being hit.
+const MAX_LIVE_ENTITIES = limits.maxLiveEntities // concurrent host BabylonEntity objects per scene (HAMMURABI_MAX_LIVE_ENTITIES)
+const MAX_DELETED_TOMBSTONES = limits.maxDeletedTombstones // retained delete tombstones per scene (HAMMURABI_MAX_DELETED_TOMBSTONES)
+const MAX_CRDT_PAYLOAD_BYTES = limits.maxCrdtPayloadBytes // per crdtSendToRenderer call (HAMMURABI_MAX_CRDT_PAYLOAD_BYTES)
+
+// DEBUG-only entity-provenance tracer (opt-in). Scans CRDT crossing the
+// scene<->host boundary and logs component ops on RESERVED entities (<512) and
+// any DELETE_ENTITY, so a scene component appearing on an avatar/reserved slot
+// (or a scene-range entity being deleted by the host) is caught red-handed.
+// Matches the HAMMURABI_XHR_DEBUG convention: only 1/true/yes/on enable it, so
+// HAMMURABI_DEBUG_ENTITY_PROVENANCE=0 / =false read as "off".
+const DEBUG_ENTITY_PROVENANCE = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.HAMMURABI_DEBUG_ENTITY_PROVENANCE ?? '').toLowerCase()
+)
+// Exported for tests. Scene entities are always >= RESERVED_STATIC_ENTITIES (512);
+// avatar/reserved entities live in 32..255. A scene component op on a reserved
+// entity, or a DELETE_ENTITY targeting a scene-range entity, is anomalous and the
+// signal we want to surface. Logging only — never mutates state.
+export function debugScanCrdt(dir: string, buffers: Uint8Array[]) {
+  for (const buf of buffers) {
+    if (!buf || !buf.byteLength) continue
+    for (const m of readAllMessages(new ReadWriteByteBuffer(buf))) {
+      const eid = (m as { entityId: number }).entityId
+      const num = eid & 0xffff
+      const ver = (eid >>> 16) & 0xffff
+      const isCompOp =
+        m.type === CrdtMessageType.PUT_COMPONENT ||
+        m.type === CrdtMessageType.DELETE_COMPONENT ||
+        m.type === CrdtMessageType.APPEND_VALUE
+      if (isCompOp && num < 512) {
+        const componentId = (m as { componentId?: number }).componentId
+        console.log(`[ENTITY-PROVENANCE] ${dir} compOp type=${m.type} comp=${componentId} entity=${num}v${ver} (id=${eid}) RESERVED`)
+      }
+      if (m.type === CrdtMessageType.DELETE_ENTITY) {
+        console.log(`[ENTITY-PROVENANCE] ${dir} DELETE_ENTITY entity=${num}v${ver} (id=${eid})${num >= 512 ? ' SCENE-RANGE!' : ''}`)
+      }
+    }
+  }
+}
+const MAX_INCOMING_QUEUE = limits.maxIncomingQueue // queued CRDT buffers awaiting processing (HAMMURABI_MAX_INCOMING_QUEUE)
 // Inbound ADR-104 scene-bus messages from remote peers, awaiting the scene to
 // drain them via CommunicationsController.sendBinary. A scene that never uses the
 // MessageBus never drains this, so it must be bounded or a peer can drive the
-// worker's heap up with scene-cased packets (drop-oldest).
-const MAX_NETWORK_MESSAGE_QUEUE = 1024
+// worker's heap up with scene-cased packets (drop-oldest). (HAMMURABI_MAX_NETWORK_MESSAGE_QUEUE)
+const MAX_NETWORK_MESSAGE_QUEUE = limits.maxNetworkMessageQueue
 
 let incrementalId = 0
 
@@ -81,7 +120,7 @@ export class SceneContext implements EngineApiInterface {
   // this future is resolved when the scene is disposed
   readonly stopped = future<void>()
   // RPC transports owned by this scene (registered by the runtime connector,
-  // e.g. the QuickJS memory transport). Unlike the shared comms transport
+  // e.g. the isolated-vm memory transport). Unlike the shared comms transport
   // below, these die with the scene: dispose() closes them, which flips the
   // scene runtime's port to 'closed' and ends its update loop. Owning this
   // here (not at each connector call site) means every runtime flavor gets
@@ -261,6 +300,7 @@ export class SceneContext implements EngineApiInterface {
     if (this.deletedEntities.size > MAX_DELETED_TOMBSTONES) {
       const oldest = this.deletedEntities.values().next().value
       if (oldest !== undefined) this.deletedEntities.delete(oldest)
+      limitLogger.hit('maxDeletedTombstones')
     }
     const entity = this.getEntityOrNull(entityId)
     if (entity) {
@@ -332,6 +372,7 @@ export class SceneContext implements EngineApiInterface {
    */
   tryGetOrCreateEntity(entityId: Entity): BabylonEntity | null {
     if (!this.entities.has(entityId) && this.entities.size >= MAX_LIVE_ENTITIES) {
+      limitLogger.hit('maxLiveEntities')
       return null
     }
     return this.getOrCreateEntity(entityId)
@@ -609,14 +650,19 @@ export class SceneContext implements EngineApiInterface {
 
   private async _crdtSendToRenderer(data: Uint8Array) {
     // Drop oversized batches and shed load when the queue is saturated so a scene
-    // cannot exhaust host memory via huge or high-frequency CRDT payloads. Silent
-    // by design (see the MAX_* constants) — do not log per drop.
+    // cannot exhaust host memory via huge or high-frequency CRDT payloads. The drop
+    // itself is still silent (no per-drop cost); the throttled limitLogger below
+    // surfaces WHICH cap is being hit at most once per interval.
     if (
       data.byteLength &&
       data.byteLength <= MAX_CRDT_PAYLOAD_BYTES &&
       this.incomingMessages.length < MAX_INCOMING_QUEUE
     ) {
       this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(data), allowedEntityRange: SCENE_ENTITY_RANGE })
+    } else if (data.byteLength > MAX_CRDT_PAYLOAD_BYTES) {
+      limitLogger.hit('maxCrdtPayloadBytes', `${data.byteLength} bytes`)
+    } else if (data.byteLength && this.incomingMessages.length >= MAX_INCOMING_QUEUE) {
+      limitLogger.hit('maxIncomingQueue')
     }
 
     // create a future to wait until all the messages are processed. even if there
@@ -642,7 +688,15 @@ export class SceneContext implements EngineApiInterface {
   }
 
   async crdtSendToRenderer(payload: CrdtSendToRendererRequest): Promise<CrdtSendToResponse> {
-    return this._crdtSendToRenderer(payload.data)
+    // DEBUG (opt-in via HAMMURABI_DEBUG_ENTITY_PROVENANCE): trace the entity
+    // provenance of scene components. Catches the smoking gun for the flagtag
+    // "Component ctf-player-flag-hold-time for <id> not found" case — a scene
+    // component op landing on a RESERVED/avatar entity (<512), or a DELETE_ENTITY
+    // wiping a SCENE-range (>=512) entity. Off by default; zero cost when unset.
+    if (DEBUG_ENTITY_PROVENANCE) debugScanCrdt('scene→host', [payload.data])
+    const res = await this._crdtSendToRenderer(payload.data)
+    if (DEBUG_ENTITY_PROVENANCE) debugScanCrdt('host→scene', res.data)
+    return res
   }
 
   get transport(): CommsChannel | undefined {
@@ -690,6 +744,7 @@ export class SceneContext implements EngineApiInterface {
           // MessageBus), a peer could otherwise grow it without limit.
           if (this.incomingNetworkMessages.length > MAX_NETWORK_MESSAGE_QUEUE) {
             this.incomingNetworkMessages.shift()
+            limitLogger.hit('maxNetworkMessageQueue')
           }
         }
       }

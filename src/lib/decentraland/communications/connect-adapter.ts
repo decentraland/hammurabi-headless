@@ -33,10 +33,16 @@ export async function connectLocalAdapter(baseUrl: string) {
     if (result.ok && result.json.adapter) {
       return await connectAdapter(result.json.adapter, identity, urn)
     }
-    throw 'Invalid livekit connection'
+    // A string throw here used to surface as "❌ Failed to start: undefined"
+    // (error.message of a string is undefined) — always throw real Errors.
+    throw new Error(`Comms gatekeeper rejected the local-preview handshake (HTTP ${result.status}): no adapter returned`)
   } catch (e: any) {
-    console.log(e)
-    throw e
+    const message = e instanceof Error ? e.message : String(e)
+    console.error(
+      `❌ Local-preview comms handshake failed against ${COMMS_GATEKEEPER_LOCAL}: ${message}\n` +
+        `   Authoritative-multiplayer preview needs internet access (comms gatekeeper + LiveKit cloud).`
+    )
+    throw e instanceof Error ? e : new Error(message)
   }
 }
 
@@ -74,10 +80,19 @@ export async function connectProductionAdapter(sceneId: string, realmName: strin
       return await connectAdapter(result.json.adapter, identity, sceneId)
     }
 
-    throw 'Invalid livekit connection'
+    // The gatekeeper only mints server adapters for the authoritative identity
+    // on production realms, so a guest run (no --private-key / no supervisor
+    // adapter) lands here with a 401. Name that instead of throwing a bare
+    // string (which used to print "❌ Failed to start: undefined").
+    throw new Error(
+      `Comms gatekeeper rejected the handshake for realm "${realmName}" (HTTP ${result.status}). ` +
+        `Non-preview realms require the authoritative server identity — ` +
+        `for local development use a localhost realm; for production runs supply the server key.`
+    )
   } catch (e: any) {
-    console.log(e)
-    throw e
+    const message = e instanceof Error ? e.message : String(e)
+    console.error(`❌ Comms handshake failed against ${gatekeeperUrl}: ${message}`)
+    throw e instanceof Error ? e : new Error(message)
   }
 }
 

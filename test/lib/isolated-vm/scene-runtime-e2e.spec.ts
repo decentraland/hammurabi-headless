@@ -3,7 +3,7 @@ import { Scene } from '@dcl/schemas'
 import { createRpcClient, createRpcServer } from '@dcl/rpc'
 import { MemoryTransport } from '@dcl/rpc/dist/transports/Memory'
 import { connectContextToRpcServer } from '../../../src/lib/babylon/scene/connect-context-rpc'
-import { startQuickJsSceneRuntime } from '../../../src/lib/quick-js/rpc-scene-runtime'
+import { startIsolatedVmSceneRuntime } from '../../../src/lib/isolated-vm/rpc-scene-runtime'
 import type { SceneContext } from '../../../src/lib/babylon/scene/scene-context'
 import { sceneIdentity, currentRealm } from '../../../src/lib/decentraland/state'
 import { ReadWriteByteBuffer } from '../../../src/lib/decentraland/ByteBuffer'
@@ -12,11 +12,11 @@ import { transformComponent } from '../../../src/lib/decentraland/sdk-components
 import { Entity } from '../../../src/lib/decentraland/types'
 import { testWithEngine } from '../babylon/babylon-test-helper'
 
-// End-to-end coverage for the PRODUCTION per-scene runtime (startQuickJsSceneRuntime,
+// End-to-end coverage for the PRODUCTION per-scene runtime (startIsolatedVmSceneRuntime,
 // used by src/lib/babylon/scene/nodejs-runtime.ts). It drives a real, compiled scene
-// bundle through the QuickJS sandbox and the RPC bridge:
+// bundle through the isolated-vm sandbox and the RPC bridge:
 //
-//   scene JS  →  QuickJS eval  →  require('~system/...')  →  @dcl/rpc client
+//   scene JS  →  isolated-vm eval  →  require('~system/...')  →  @dcl/rpc client
 //             →  MemoryTransport  →  connectContextToRpcServer handlers  →  back
 //
 // Everything is in-memory and mockable — no content server, no LiveKit, no network.
@@ -49,7 +49,7 @@ async function runSceneWithContext(
   const logs: any[] = []
   const errors: any[] = []
 
-  await startQuickJsSceneRuntime(port, {
+  await startIsolatedVmSceneRuntime(port, {
     log: (...args: any[]) => logs.push(...args),
     error: (...args: any[]) => errors.push(...args),
     async updateLoop(o) {
@@ -122,7 +122,7 @@ const CRDT_SCENE_PARAMS = {
   urn: '123'
 } as const
 
-describe('scene runtime end-to-end (QuickJS + RPC, fully in-memory)', () => {
+describe('scene runtime end-to-end (isolated-vm + RPC, fully in-memory)', () => {
   it('runs a working scene through the production runtime and round-trips over RPC', async () => {
     const source = `
       const runtime = require('~system/Runtime')
@@ -262,7 +262,7 @@ describe('scene runtime end-to-end (QuickJS + RPC, fully in-memory)', () => {
 })
 
 // A full CRDT round-trip needs a real SceneContext (a Babylon NullEngine), still
-// fully in-memory. It proves an untrusted scene's CRDT bytes traverse QuickJS + RPC
+// fully in-memory. It proves an untrusted scene's CRDT bytes traverse isolated-vm + RPC
 // and actually materialize a host entity + component (through the hardened reader).
 testWithEngine(
   'scene runtime end-to-end: CRDT ingest materializes a host entity',

@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 
+// MUST stay the first import: checks the Node version at import time and exits
+// with a clear message before anything transitively requires isolated-vm.
+import './lib/misc/node-version-check'
 import { main, resetEngine } from './lib/engine-main'
+import { runGracefulShutdown, EXIT_CODES } from './lib/misc/shutdown'
+import { isPermanentStartupError } from './lib/misc/startup-errors'
 import type { DclEnvironment } from './lib/decentraland/environment'
 
 // Parse arguments
@@ -60,7 +65,7 @@ Examples:
     // only to fail later with a misleading "No scene found".
     if (!/^-?\d+,-?\d+$/.test(position)) {
       console.error('❌ Invalid position format. Use --position=x,y (e.g., --position=80,80)')
-      process.exit(1)
+      process.exit(EXIT_CODES.CONFIG)
     }
   } else if (arg.startsWith('--scene-id=')) {
     sceneId = argValue!
@@ -71,7 +76,7 @@ Examples:
       environment = argValue
     } else {
       console.error('❌ Invalid --env value. Use --env=zone or --env=org')
-      process.exit(1)
+      process.exit(EXIT_CODES.CONFIG)
     }
   } else if (arg === '--production') {
     developmentMode = false
@@ -108,6 +113,20 @@ process.on('unhandledRejection', (reason: any) => {
     console.log('Type "r" + Enter to restart or [Ctrl+C] to exit')
   }
 })
+
+// Supervised (production) shutdown: a parent server signals us to stop. Tear down
+// gracefully — dispose the scene so its isolate reaches idle and the process exits
+// cleanly — instead of the OS killing us mid-turn (which would leave the LiveKit
+// participant dangling until the SFU times it out). Dev mode keeps the default
+// signal behavior so Ctrl+C exits immediately.
+if (!developmentMode) {
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, () => {
+      console.log(`↩️  Received ${signal}, shutting down gracefully…`)
+      void runGracefulShutdown(0, signal)
+    })
+  }
+}
 
 // Simple restart mechanism
 let isRestarting = false
@@ -167,12 +186,15 @@ if (developmentMode && process.stdin.setRawMode) {
 }
 
 // Start server
-start().catch(() => {
+start().catch((error) => {
   // Error already logged. In development the user can retry with 'r', but in
   // production nothing can recover: the render loop started by main() keeps the
   // event loop alive, so without an explicit exit a supervisor would see a
-  // healthy-looking process that will never serve.
+  // healthy-looking process that will never serve. Failures that no restart
+  // with the same configuration can fix (scene entity not in the world's
+  // current deployment, SDK6 scene) exit with the permanent CONFIG code so a
+  // supervisor knows not to respawn; anything else stays STARTUP (transient).
   if (!developmentMode) {
-    process.exit(1)
+    process.exit(isPermanentStartupError(error) ? EXIT_CODES.CONFIG : EXIT_CODES.STARTUP)
   }
 })

@@ -2,6 +2,9 @@
  * XMLHttpRequest polyfill for Node.js environment
  * Enables Babylon.js GLTF loading in headless server
  */
+import { limits } from '../misc/limits'
+import { limitLogger } from '../misc/limit-logger'
+
 export function setupXMLHttpRequestPolyfill() {
   if (typeof (globalThis as any).XMLHttpRequest !== 'undefined') return
 
@@ -28,9 +31,9 @@ export function setupXMLHttpRequestPolyfill() {
 
   // Cap the response body size. Scene assets (glTF/GLB) are fetched through this
   // polyfill and handed to Babylon's NATIVE glTF parser, which runs outside the
-  // QuickJS sandbox. Bounding the bytes limits both worker-heap exhaustion and the
-  // size of hostile input reaching that native parser.
-  const MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+  // isolate sandbox. Bounding the bytes limits both worker-heap exhaustion and the
+  // size of hostile input reaching that native parser. (HAMMURABI_MAX_XHR_RESPONSE_BYTES)
+  const MAX_RESPONSE_BYTES = limits.maxXhrResponseBytes
 
   class XMLHttpRequestPolyfill {
     static _seq = 0
@@ -151,7 +154,9 @@ export function setupXMLHttpRequestPolyfill() {
           res.on('data', (chunk: Buffer) => {
             received += chunk.length
             if (received > MAX_RESPONSE_BYTES) {
-              console.error(`[XHR] #${id} ✗ response exceeded ${MAX_RESPONSE_BYTES}b cap: ${this.method} ${this.url}`)
+              // Throttled: a scene requesting many oversized assets would otherwise
+              // flood stdout with one synchronous write per hostile download.
+              limitLogger.hit('maxXhrResponseBytes', `${this.method} ${this.url}`)
               // Deterministic failure: the asset is simply too big, so abort
               // without retrying (retrying would re-download the hostile asset).
               sizeExceeded = true

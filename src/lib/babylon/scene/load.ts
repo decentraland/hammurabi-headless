@@ -6,7 +6,8 @@ import { connectSceneContextUsingNodeJs } from './nodejs-runtime'
 import { loadedScenesByEntityId } from '../../decentraland/state'
 import { VirtualScene } from '../../decentraland/virtual-scene'
 import { json } from '../../misc/json'
-import { robustFetch } from '../../misc/network'
+import { robustFetch, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from '../../misc/network'
+import { PermanentStartupError } from '../../misc/startup-errors'
 import { Entity } from '@dcl/schemas'
 import { initHotReload } from './hot-reload'
 import { sleep } from '../../misc/promises'
@@ -16,7 +17,9 @@ import { Atom } from '../../misc/atom'
  * Creates and initializes a scene context from a loadable scene
  */
 async function createSceneContext(engineScene: BABYLON.Scene, loadableScene: LoadableScene, entityId: string, isGlobal: boolean, virtualScene?: VirtualScene): Promise<SceneContext> {
-  if ((loadableScene.entity.metadata as any).runtimeVersion !== '7') throw new Error('The scene is not compatible with the current runtime version. It may be using SDK6')
+  // Permanent: the runtime version is part of the (content-addressed) entity,
+  // so no restart of the same scene can ever succeed.
+  if ((loadableScene.entity.metadata as any).runtimeVersion !== '7') throw new PermanentStartupError('The scene is not compatible with the current runtime version. It may be using SDK6')
 
   const ctx = new SceneContext(engineScene, loadableScene, isGlobal, entityId)
 
@@ -108,7 +111,7 @@ export async function getLoadableSceneFromUrl(
   baseUrl: string,
   entity?: any
 ): Promise<LoadableScene> {
-  const resolvedEntity = entity ?? (await (await robustFetch(`${baseUrl}${entityId}`, {}, { label: 'entity' })).json())
+  const resolvedEntity = entity ?? JSON.parse(await readBodyCapped(await robustFetch(`${baseUrl}${entityId}`, {}, { label: 'entity' }), DEFAULT_MAX_BODY_BYTES))
 
   return {
     urn: entityId,
@@ -125,7 +128,7 @@ export async function getLoadableSceneFromUrl(
 export async function fetchSceneJson(baseUrl: string) {
   const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'
   const result = await robustFetch(`${normalizedBaseUrl}scene.json`, {}, { label: 'scene.json' })
-  return await result.json()
+  return JSON.parse(await readBodyCapped(result, DEFAULT_MAX_BODY_BYTES))
 }
 
 /**
@@ -140,14 +143,23 @@ export async function getLoadableSceneFromLocalContext(baseUrl: string) {
   if (pointers.length === 0) {
     throw new Error('No pointers found in scene.json')
   }
-  // Then post to /content/entities/active with the pointers
+  // Request ONE pointer only: every parcel of the scene maps to the same entity
+  // and only entities[0] is consumed below. The sdk-commands preview server
+  // answers with a full entity copy PER requested pointer (it does not dedupe
+  // like a real catalyst), so posting all parcels multiplies the response by
+  // the parcel count — a 50x50 scene (2500 parcels x ~80KB entity) returned
+  // ~200MB and blew the maxBodyBytes cap before the scene could even load.
+  // Trust `base` only when it is actually one of the parcels: an inconsistent
+  // scene.json (base outside the parcels list) would otherwise resolve nothing.
+  const base = sceneConfig.scene?.base
+  const basePointer = base && pointers.includes(base) ? base : pointers[0]
   const entitiesResponse = await robustFetch(`${baseUrl}/content/entities/active`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pointers })
+    body: JSON.stringify({ pointers: [basePointer] })
   }, { label: 'entities/active' })
 
-  const entity = (await entitiesResponse.json() as any)[0]
+  const entity = (JSON.parse(await readBodyCapped(entitiesResponse, DEFAULT_MAX_BODY_BYTES)) as any)[0]
 
   return {
     baseUrl: baseUrl + '/content/contents/',
@@ -209,7 +221,10 @@ export async function loadSceneContextFromPosition(
   const entities = await fetchEntitiesByPointers([pointer], contentServerUrl)
 
   if (entities.length === 0) {
-    throw new Error(`No scene found at position ${pointer}`)
+    // Permanent: nothing is deployed at this parcel. A later deploy produces a
+    // new entity (and a new supervised process identity), so retrying THIS
+    // configuration is doomed.
+    throw new PermanentStartupError(`No scene found at position ${pointer}`)
   }
 
   const entity = entities[0]
@@ -271,17 +286,25 @@ export async function loadSceneContextFromWorld(
 
   const scenesUrl = `${options.realmBaseUrl}/scenes`
   const scenesRes = await robustFetch(scenesUrl, {}, { label: 'world/scenes' })
-  const scenesBody = await scenesRes.json() as { scenes?: WorldSceneEntry[] }
+  // Cap before buffering/parsing (the body inlines deployer-controlled metadata),
+  // matching the /about + active-entities fetches; an uncapped `.json()` would OOM
+  // the worker → crash loop on a hostile/huge /scenes response.
+  const scenesBody = JSON.parse(await readBodyCapped(scenesRes, DEFAULT_MAX_BODY_BYTES)) as { scenes?: WorldSceneEntry[] }
   const scenes = scenesBody.scenes ?? []
 
   if (scenes.length === 0) {
-    throw new Error(`No scenes found in world ${options.worldName}`)
+    // Permanent: the world has no deployment. See the not-found case below.
+    throw new PermanentStartupError(`No scenes found in world ${options.worldName}`)
   }
 
   const targetScene = pickScene(scenes, options.sceneId)
 
   if (!targetScene) {
-    throw new Error(
+    // Permanent: the requested entity is not part of the world's CURRENT
+    // deployment — typically a supervisor spawn triggered by a client whose
+    // session predates a redeploy (its join still carries the old sceneId).
+    // Respawning with the same sceneId can never succeed.
+    throw new PermanentStartupError(
       `Scene "${options.sceneId}" not found in world "${options.worldName}"`
     )
   }

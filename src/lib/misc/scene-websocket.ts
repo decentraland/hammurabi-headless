@@ -1,19 +1,21 @@
 import WS from 'ws'
 import { assertPublicSceneUrl } from './ssrf'
+import { limits } from './limits'
+import { limitLogger } from './limit-logger'
 
 // Per-frame message ceiling. Incoming frames larger than this are rejected by
 // `ws` (maxPayload) which closes the socket; outgoing frames are checked here.
-// Bounds host memory a scene can drive through a single socket.
-const DEFAULT_MAX_MESSAGE_BYTES = 1 * 1024 * 1024
+// Bounds host memory a scene can drive through a single socket. (HAMMURABI_MAX_WS_MESSAGE_BYTES)
+const DEFAULT_MAX_MESSAGE_BYTES = limits.maxWsMessageBytes
 
 // Ceiling on unflushed outbound bytes (ws bufferedAmount). Bounds host memory when
 // a scene sends faster than a slow/stalled peer drains — the per-frame cap alone
-// does not, since ws queues frames without a default limit.
-const DEFAULT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024
+// does not, since ws queues frames without a default limit. (HAMMURABI_MAX_WS_BUFFERED_BYTES)
+const DEFAULT_MAX_BUFFERED_BYTES = limits.maxWsBufferedBytes
 
 // Abort a stalled upgrade instead of hanging forever (ws has no default). Bounds a
-// black-hole/slowloris host that accepts TCP but never completes the handshake.
-const HANDSHAKE_TIMEOUT_MS = 15_000
+// black-hole/slowloris host that accepts TCP but never completes the handshake. (HAMMURABI_WS_HANDSHAKE_TIMEOUT_MS)
+const HANDSHAKE_TIMEOUT_MS = limits.wsHandshakeTimeoutMs
 
 // WHATWG / `ws` ready states (identical numeric values).
 export const WS_CONNECTING = 0
@@ -22,10 +24,10 @@ export const WS_CLOSING = 2
 export const WS_CLOSED = 3
 
 /**
- * Host-side view of a scene WebSocket. Deliberately VM-agnostic: the QuickJS
- * bridge (see quick-js/index.ts) registers listeners and forwards events into the
- * scene's `on*` handlers. Data crosses as strings — scene comms is overwhelmingly
- * text/JSON, and this keeps the VM marshalling simple.
+ * Host-side view of a scene WebSocket. Deliberately VM-agnostic: the isolated-vm
+ * bridge (see isolated-vm/network-globals.ts) registers listeners and forwards
+ * events into the scene's `on*` handlers. Data crosses as strings — scene comms is
+ * overwhelmingly text/JSON, and this keeps the marshalling simple.
  */
 export interface HostWebSocket {
   readonly url: string
@@ -45,8 +47,10 @@ export interface HostWebSocket {
 export type HostWebSocketFactory = (url: string, protocols?: string | string[]) => HostWebSocket
 
 export type SceneWebSocketDeps = {
-  // Injectable so tests can connect to a localhost ws server (the real guard
-  // blocks loopback). Defaults to the real guard; production never overrides it.
+  // Injectable for two callers: tests (to connect to a localhost ws server) and
+  // the scene runtime, which passes the REAL guard with the loopback relaxation
+  // applied when the realm is a localhost preview (see rpc-scene-runtime.ts).
+  // Defaults to the strict real guard.
   assertPublicUrl?: (url: string) => Promise<void>
   maxMessageBytes?: number
   maxBufferedBytes?: number
@@ -236,11 +240,13 @@ class SceneWebSocketConnection implements HostWebSocket {
     else payload = String(data)
     const byteLength = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength
     if (byteLength > this.maxMessageBytes) {
+      limitLogger.hit('maxWsMessageBytes', `${byteLength} bytes`)
       throw new Error(`WebSocket: message exceeds ${this.maxMessageBytes} bytes`)
     }
     // Backpressure: refuse to keep queueing when the peer isn't draining, so a
     // slow/stalled peer can't make the ws outbound buffer grow without bound.
     if (this.socket.bufferedAmount + byteLength > this.maxBufferedBytes) {
+      limitLogger.hit('maxWsBufferedBytes', `buffered ${this.socket.bufferedAmount} + ${byteLength}`)
       throw new Error('WebSocket: send buffer is full')
     }
     this.socket.send(payload)

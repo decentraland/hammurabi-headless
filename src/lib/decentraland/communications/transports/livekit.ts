@@ -4,6 +4,7 @@ import { ConnectionState, DisconnectReason, Room, RoomEvent } from '@livekit/rtc
 import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, SendHints, commsLogger } from '../types'
 import { Scene } from '@babylonjs/core'
+import { limits } from '../../../misc/limits'
 
 export type LivekitConfig = {
   url: string
@@ -17,6 +18,8 @@ export type VoiceSpatialParams = {
 }
 
 const MAXIMUM_NETWORK_MSG_LENGTH = 30_000
+// Upper bound on a LiveKit connect; the FFI layer itself has no timeout.
+const CONNECT_TIMEOUT_MS = limits.livekitConnectTimeoutMs // HAMMURABI_LIVEKIT_CONNECT_TIMEOUT_MS
 
 export class LivekitAdapter implements MinimumCommunicationsTransport {
   public readonly events = mitt<CommsTransportEvents>()
@@ -75,7 +78,30 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
   }
 
   async connect(): Promise<void> {
-    await this.room.connect(this.config.url, this.config.token)
+    // Bound the connect: the underlying FfiClient.waitFor has no timeout, so a
+    // half-open SFU (socket accepted, connect callback never delivered) would hang
+    // forever — the supervised process would then neither connect nor exit-to-restart.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.room.connect(this.config.url, this.config.token),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`LiveKit connect timed out after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS)
+        })
+      ])
+    } catch (err) {
+      // A failed/timed-out connect leaves our RoomEvent handlers attached (and a
+      // library-internal FfiClient listener that Room.disconnect() won't remove
+      // while !isConnected). Best-effort remove ours so a repeated dev reconnect
+      // doesn't accumulate them; in production the process exits on connect failure,
+      // reclaiming the residual. Mark disposed so this dead adapter no-ops.
+      this.disposed = true
+      try { this.room.removeAllListeners() } catch { /* best-effort */ }
+      try { await this.room.disconnect() } catch { /* best-effort */ }
+      throw err
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
     commsLogger.log(`Connected to livekit room ${this.room.name}`, {
       sid: await this.room.getSid(),
       metadata: this.room.metadata
@@ -102,9 +128,12 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
     try {
       await this.room.localParticipant?.publishData(data, { reliable, destination_identities: destination })
     } catch (err: any) {
-      // NOTE: for tracking purposes only, this is not a "code" error, this is a failed connection or a problem with the livekit instance.
-      // This is an unexpected failure (not a clean local disconnect), so it should bubble up as a restartable disconnection.
-      await this.doDisconnect(false, false)
+      // A single publishData failure is usually transient (position/movement
+      // publishes at up to 30Hz) — do NOT tear the whole server down over one
+      // glitch (that turned a flaky SFU into a restart storm). Real connection loss
+      // still surfaces via the connectionState guard above and the
+      // RoomEvent.Disconnected handler, which drives the graceful restart.
+      commsLogger.error(`publishData failed (message dropped): ${err?.message ?? err}`)
     }
   }
 

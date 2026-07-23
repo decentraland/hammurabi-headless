@@ -38,7 +38,7 @@ export function readMessage(buf: ByteBuffer): CrdtMessage | null | undefined {
  * Once it finishes, the ByteBuffer can be considered fully read.
  *
  * SECURITY: the buffer is untrusted (scene-controlled) and this runs in host
- * code, outside the QuickJS interrupt/memory limits. A well-formed header with
+ * code, outside the isolate's memory/execution limits. A well-formed header with
  * an unrecognized `type` makes `readMessage` return `null` WITHOUT consuming any
  * bytes; naively looping on that spins forever and hangs the worker. So we skip
  * an unrecognized message by its declared length and, as a hard backstop, stop
