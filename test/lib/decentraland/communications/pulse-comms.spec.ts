@@ -18,7 +18,7 @@ describe('sceneParcelsToPulseCoords', () => {
 
 describe('createPulseComms', () => {
   it('builds an unconnected wrapper reporting the configured realm', () => {
-    const config = readCommsListenerConfig({ PULSE_REALM: 'my-realm' })
+    const config = readCommsListenerConfig({ HAMMURABI_PULSE_REALM: 'my-realm' })
     const identity = { authChain: [] } as unknown as ExplorerIdentity
 
     const wrapper = createPulseComms(config, identity, ['0,0'], 'scene-id')

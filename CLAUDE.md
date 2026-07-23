@@ -27,6 +27,13 @@ npx @dcl/hammurabi-server --position=0,0  # Default to peer.decentraland.org
 # Environment variables
 HAMMURABI_FPS=60 node dist/cli.js ...        # renderer tick rate (default 30, max 60)
 HAMMURABI_XHR_DEBUG=1 node dist/cli.js ...   # per-request asset fetch logging
+
+# Pulse comms (augments LiveKit; see "Comms transport routing" below)
+HAMMURABI_COMMS_PROTOCOL=pulse node dist/cli.js ...  # route Pulse's capability set through Pulse
+HAMMURABI_PULSE_HOST=localhost ...           # pulse server host (default pulse-server.decentraland.zone)
+HAMMURABI_PULSE_PORT=7777 ...                # pulse UDP port (default 7777, valid 1-65535)
+HAMMURABI_PULSE_REALM=main ...               # realm sent in the handshake (default main)
+HAMMURABI_PULSE_DEBUG=1 ...                  # log each received Pulse position
 ```
 
 ## Project Architecture
