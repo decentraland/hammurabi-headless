@@ -124,6 +124,23 @@ PRIVATE_KEY=0x<your-hex-key> hammurabi --position=0,0
 | `HAMMURABI_FPS` | `30` | Renderer tick rate, clamped to `[1, 60]`. |
 | `HAMMURABI_XHR_DEBUG` | `off` | Per-request asset-fetch logging. Enable with `1`/`true`/`yes`/`on`. |
 
+### Comms transport (Pulse)
+
+LiveKit is the default and carries every message type. Setting `HAMMURABI_COMMS_PROTOCOL=pulse`
+additionally connects a Pulse scene-listener **alongside** LiveKit and routes Pulse's capability
+set (currently player **positions**) through it, while presence, profiles, chat and the scene
+message bus stay on LiveKit. Pulse augments LiveKit; it does not replace it. Only transports that
+own a message type are connected, so leaving this unset keeps the LiveKit-only behavior unchanged.
+The `HAMMURABI_PULSE_*` variables take effect only when Pulse is enabled.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAMMURABI_COMMS_PROTOCOL` | `livekit` | Set to `pulse` to run Pulse alongside LiveKit. Any other value (or unset) keeps LiveKit-only. |
+| `HAMMURABI_PULSE_HOST` | `pulse-server.decentraland.zone` | Pulse server host. |
+| `HAMMURABI_PULSE_PORT` | `7777` | Pulse UDP port (valid `1`–`65535`; an invalid value falls back to the default). |
+| `HAMMURABI_PULSE_REALM` | `main` | Realm name sent in the Pulse handshake. |
+| `HAMMURABI_PULSE_DEBUG` | `off` | Log each received Pulse position. Enable with any non-empty value. |
+
 ### Resource & DoS limits
 
 Every numeric cap and timeout that bounds an untrusted scene, a remote comms peer,
