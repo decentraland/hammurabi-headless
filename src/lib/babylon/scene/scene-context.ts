@@ -45,7 +45,7 @@ import { avatarBaseComponent } from '../../decentraland/sdk-components/avatar-ba
 import { tweenComponent } from '../../decentraland/sdk-components/tween'
 import { materialComponent } from '../../decentraland/sdk-components/material-component'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
-import { CommsTransportWrapper } from '../../decentraland/communications/CommsTransportWrapper'
+import { CommsChannel } from '../../decentraland/communications/comms-router'
 import {
   createAvatarCommunicationSystem,
   AvatarCommunicationSystem
@@ -115,7 +115,7 @@ export class SceneContext implements EngineApiInterface {
 
   readonly entityId: string
 
-  private _transport?: CommsTransportWrapper
+  private _transport?: CommsChannel
   private _avatarSystem?: AvatarCommunicationSystem
   // this future is resolved when the scene is disposed
   readonly stopped = future<void>()
@@ -699,7 +699,7 @@ export class SceneContext implements EngineApiInterface {
     return res
   }
 
-  get transport(): CommsTransportWrapper | undefined {
+  get transport(): CommsChannel | undefined {
     return this._transport
   }
 
@@ -716,7 +716,7 @@ export class SceneContext implements EngineApiInterface {
     return messages
   }
 
-  attachLivekitTransport(transport: CommsTransportWrapper) {
+  attachCommsTransport(transport: CommsChannel) {
     this._transport = transport
 
     // Create avatar communication system for this scene

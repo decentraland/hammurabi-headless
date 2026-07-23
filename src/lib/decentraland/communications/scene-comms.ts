@@ -8,7 +8,9 @@ import { Scene } from "@babylonjs/core"
 import { CurrentRealm } from "../state"
 
 /**
- * This system is in charge to handle realm connections and connect/disconnect transports accordingly.
+ * Resolves the realm's comms adapter and builds an UNCONNECTED transport wrapper. The caller
+ * (CommsRouter) owns connect ordering so it can attach lifecycle handlers before dialing — call
+ * `.connect()` on the returned wrapper to open the connection.
  */
 export async function createSceneComms(
   realm: CurrentRealm,
@@ -29,9 +31,7 @@ export async function createSceneComms(
   // and handed us the adapter. Connect directly — no signed handshake and no
   // privileged identity is used in this (untrusted) worker.
   if (options?.commsAdapter) {
-    const transport = connectTransport(options.commsAdapter, identity, scene, options.sceneId ?? 'realm')
-    transport.connect()
-    return transport
+    return connectTransport(options.commsAdapter, identity, scene, options.sceneId ?? 'realm')
   }
 
   let newAdapter
@@ -54,9 +54,8 @@ export async function createSceneComms(
         `⚠️  Comms handshake failed (${message}); starting in OFFLINE single-player mode — ` +
           `no clients will connect to this server until it is restarted with working comms.`
       )
-      const transport = new CommsTransportWrapper(createOfflineTransport(), options.sceneId ?? 'realm')
-      transport.connect()
-      return transport
+      // Return unconnected like every other path; the CommsRouter owns connect ordering.
+      return new CommsTransportWrapper(createOfflineTransport(), options.sceneId ?? 'realm')
     }
   } else if (options?.isWorld && options?.sceneId) {
     // Decentraland Worlds
@@ -81,9 +80,5 @@ export async function createSceneComms(
 
   const desiredTransports = await newAdapter.desiredTransports.deref()
   const connectionString = desiredTransports[0]
-  const transport = connectTransport(connectionString.url, identity, scene, connectionString.sceneId)
-
-  transport.connect()
-
-  return transport
+  return connectTransport(connectionString.url, identity, scene, connectionString.sceneId)
 }

@@ -3,7 +3,7 @@ import mitt from 'mitt'
 import { testWithEngine } from './babylon-test-helper'
 
 // The production transport's `.events` IS a mitt emitter (CommsTransportWrapper),
-// so the stub uses the same library; attachLivekitTransport only needs `.events`.
+// so the stub uses the same library; attachCommsTransport only needs `.events`.
 const makeEmitter = () => mitt<Record<string, any>>()
 
 testWithEngine(
@@ -19,7 +19,7 @@ testWithEngine(
     // peer keeps sending scene-cased packets.
     test('drops oldest messages beyond the cap when the scene never drains them', () => {
       const transport = { events: makeEmitter() }
-      $.ctx.attachLivekitTransport(transport as any)
+      $.ctx.attachCommsTransport(transport as any)
 
       const sceneId = $.ctx.entityId
       const CAP = 1024

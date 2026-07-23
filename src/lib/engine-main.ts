@@ -24,6 +24,11 @@ import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, play
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
 import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/realm/resolution'
+import { CommsTransportWrapper } from './decentraland/communications/CommsTransportWrapper'
+import { readCommsListenerConfig } from './decentraland/communications/config'
+import { resolveRouting, isPulseEnabled, Transport } from './decentraland/communications/comms-routing'
+import { CommsRouter } from './decentraland/communications/comms-router'
+import { createPulseComms } from './decentraland/communications/pulse-comms'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
@@ -313,20 +318,42 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
   const loadedSceneContext = await ctx.deref()
   const sceneId = loadedSceneContext.loadableScene.urn
 
-  // Enable scene comms with Node.js compatible LiveKit
-  const sceneTransport = await createSceneComms(realm, identityAtom, scene, {
-    isGenesisScene: isGenesisCity,
-    sceneId,
-    isWorld,
-    isLocalhost,
-    commsAdapter: options.commsAdapter
-  })
+  // A headless server is useless without comms. If the connection is lost
+  // unexpectedly (i.e. not a clean local disconnect), exit so the supervising
+  // process restarts us with a fresh connection and token.
+  const restartOnCommsLoss = options.restartOnCommsLoss ?? true
+
+  const commsConfig = readCommsListenerConfig()
+
+  // Livekit is the default everywhere; HAMMURABI_COMMS_PROTOCOL=pulse additionally routes Pulse's
+  // capability set (currently just `position`) through Pulse, keeping the rest on LiveKit. The
+  // routing plan decides which transports to connect — only those that own a listener are dialed.
+  const routing = resolveRouting(isPulseEnabled(commsConfig.envProtocol))
+
+  const transports: Partial<Record<Transport, CommsTransportWrapper>> = {}
+  if (routing.connectionSet.has('livekit')) {
+    // Node.js-compatible LiveKit; uses the orchestrator-minted adapter when present.
+    transports.livekit = await createSceneComms(realm, identityAtom, scene, {
+      isGenesisScene: isGenesisCity,
+      sceneId,
+      isWorld,
+      isLocalhost,
+      commsAdapter: options.commsAdapter
+    })
+  }
+  if (routing.connectionSet.has('pulse')) {
+    transports.pulse = createPulseComms(commsConfig, identity, loadedSceneContext.metadata.scene?.parcels ?? [], sceneId)
+  }
+
+  // One router in front of the (one or more) transports; the avatar system and every RFC-4 message
+  // type are reused unchanged, fed from whichever transport owns each listener.
+  const sceneTransport = new CommsRouter(routing, transports)
 
   session.transport = sceneTransport
   assertSessionCurrent(session)
 
   sceneContext.pipe(async (ctx) => {
-    ctx.attachLivekitTransport(sceneTransport)
+    ctx.attachCommsTransport(sceneTransport)
   })
 
   // Record this session's scene so the (single) shutdown hook tears down cleanly:
@@ -343,15 +370,13 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
     })
   }
 
-  // A headless server is useless without comms. If the transport is lost
-  // unexpectedly (i.e. not a clean local disconnect), exit so the supervising
-  // process restarts us with a fresh connection and token. LiveKit already
-  // retries internally before emitting this, so reconnecting in-process would
-  // just repeat what it already gave up on.
-  const restartOnCommsLoss = options.restartOnCommsLoss ?? true
+  // Attach the restart-on-loss handler BEFORE connecting, so a failed initial handshake
+  // (surfaced as DISCONNECTION by the wrapper) is caught too. LiveKit already retries
+  // internally before emitting this; losing any connected transport (position OR scene bus)
+  // triggers a restart.
   sceneTransport.events.on('DISCONNECTION', (event) => {
     if (event.clientInitiated) return
-    commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})`)
+    commsLogger.error(`🔌 Comms transport lost (kicked=${event.kicked})${event.error ? `: ${event.error.message}` : ''}`)
     if (event.kicked) {
       // A kick is LiveKit's DuplicateIdentity rule: rooms hold exactly one
       // 'authoritative-server' participant, so another server instance for this
@@ -370,6 +395,9 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
       void runGracefulShutdown(EXIT_CODES.COMMS_LOST)
     }
   })
+
+  await sceneTransport.connect()
+  assertSessionCurrent(session)
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)
   assertSessionCurrent(session)
