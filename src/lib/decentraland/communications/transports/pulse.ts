@@ -16,7 +16,7 @@ export type PulseConfig = {
    * replay a stale one.
    */
   mintAuthChain: () => string
-  /** Log each received position (PULSE_DEBUG). Read from config, never from the per-packet hot path. */
+  /** Log each received position (HAMMURABI_PULSE_DEBUG). Read from config, never from the per-packet hot path. */
   debug: boolean
 }
 

@@ -34,6 +34,13 @@ HAMMURABI_ISOLATE_MEMORY_LIMIT_MB=512 node dist/cli.js ...      # per-scene isol
 HAMMURABI_MAX_ASYNC_TURN_MS=30000 node dist/cli.js ...          # async-turn watchdog deadline
 HAMMURABI_MAX_LIVE_ENTITIES=50000 node dist/cli.js ...          # concurrent entities per scene
 HAMMURABI_MAX_MESSAGES_PER_WINDOW=150 node dist/cli.js ...      # per-peer inbound comms rate
+
+# Pulse comms (augments LiveKit; see "Comms transport routing" below)
+HAMMURABI_COMMS_PROTOCOL=pulse node dist/cli.js ...  # route Pulse's capability set through Pulse
+HAMMURABI_PULSE_HOST=localhost ...           # pulse server host (default pulse-server.decentraland.zone)
+HAMMURABI_PULSE_PORT=7777 ...                # pulse UDP port (default 7777, valid 1-65535)
+HAMMURABI_PULSE_REALM=main ...               # realm sent in the handshake (default main)
+HAMMURABI_PULSE_DEBUG=1 ...                  # log each received Pulse position
 ```
 
 ## Configurable Resource Limits
