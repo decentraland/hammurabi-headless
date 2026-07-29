@@ -223,6 +223,53 @@ describe('avatar communication system entity lifecycle', () => {
     })
   })
 
+  describe('when a hot reload replaces the avatar system', () => {
+    // Departed markers and pool slots outlive any one system, so a replacement must
+    // inherit them. Held per-system, a reload forgot who had left and a straggler could
+    // re-adopt a departed peer through the surviving global mapping.
+    let replacement: any
+
+    afterEach(() => replacement?.dispose())
+
+    it('should refuse a straggler for a peer that departed before the reload', () => {
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+      // Something still holds a global mapping for the departed address — a sibling
+      // that has not processed the departure, or any other allocation — so the straggler
+      // below has a stale entity it could be adopted through.
+      const stale = playerEntityManager.allocateEntityForPlayer('0xpeer', false)!
+
+      system.dispose()
+      replacement = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+      const subscription = replacement.createSubscription()
+
+      transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
+      replacement.update()
+
+      expect(identityPutsFor(subscription, stale)).toHaveLength(0)
+    })
+
+    it('should retire a peer that disconnects while no system is listening', () => {
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).not.toBeNull()
+
+      // The reload gap: loadSceneContextFromLocal disposes the old system, sleeps, then
+      // creates the replacement. A departure landing in between had no listener at all.
+      system.dispose()
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      // The registry owns the transport subscription, so the slot is still released.
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+
+      // And the replacement inherits the departed marker, so a straggler cannot
+      // resurrect the peer.
+      replacement = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+      transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+  })
+
   describe('when one of several subscriptions is disposed', () => {
     let survivingSubscription: any
     let disposedSubscription: any
