@@ -14,6 +14,20 @@ import { AppendValueOperation } from './appendValue'
  *   disagree with its declared frame (see PutComponentOperation.read)
  * Returns undefined if it cannot read a valid CRDT header
  *
+ * NON-RESUMABLE, and this is the whole reason {@link readAllMessages} exists.
+ * On `null` the read cursor has ALREADY advanced part-way into the rejected
+ * message — to just past the header for an unrecognized type, or past the fixed
+ * fields for a frame-length disagreement — so it does NOT sit on a message
+ * boundary and a caller cannot simply call this again. It is `readAllMessages`
+ * that re-anchors the cursor on `offsetBefore + header.length` after every
+ * message; resuming a raw `readMessage` loop instead would parse the rejected
+ * frame's tail as a fresh header and shift every message after it, pairing one
+ * entity's header with another entity's component data.
+ *
+ * Treat this and the per-type readers (`PutComponentOperation.read` and friends)
+ * as low-level primitives for a caller that owns its own framing.
+ * `readAllMessages` is the only resumable entry point.
+ *
  * @param peekedHeader - a header already peeked (validated, not consumed) by the
  * caller, so the hot read loop validates each message exactly once.
  */

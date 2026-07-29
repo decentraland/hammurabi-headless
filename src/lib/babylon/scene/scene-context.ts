@@ -593,6 +593,23 @@ export class SceneContext implements EngineApiInterface {
         this.outgoingMessagesBuffer.incrementReadOffset(-this.outgoingMessagesBuffer.currentReadOffset())
       }
     } finally {
+      // BACKSTOP: reset both shared buffers unconditionally, whatever threw and
+      // wherever. The inner `finally` blocks above only run once their `try` has
+      // been entered, so a throw from an EARLIER step in this method —
+      // processRaycasts, updateStaticEntities, or the component dump loop — would
+      // otherwise skip them and leave residue that is re-sent to the scene AND
+      // re-ingested as incoming messages on every later frame, in a buffer that
+      // never shrinks. Resetting twice on the happy path is free: the offsets are
+      // already zero, so both calls are no-ops.
+      //
+      // Ordering is safe with respect to the TIMING HAZARD below: resetting a write
+      // offset does not zero the bytes, and the views in `outMessages` are copied by
+      // the RPC layer on a microtask before the next frame can overwrite them.
+      this.subscriptionsBuffer.incrementWriteOffset(-this.subscriptionsBuffer.currentWriteOffset())
+      this.subscriptionsBuffer.incrementReadOffset(-this.subscriptionsBuffer.currentReadOffset())
+      this.outgoingMessagesBuffer.incrementWriteOffset(-this.outgoingMessagesBuffer.currentWriteOffset())
+      this.outgoingMessagesBuffer.incrementReadOffset(-this.outgoingMessagesBuffer.currentReadOffset())
+
       // TIMING HAZARD: outMessages holds toBinary() VIEWS into subscriptionsBuffer
       // and outgoingMessagesBuffer, whose write offsets were just reset for reuse.
       // This is safe ONLY because the futures resolved below are consumed (RPC

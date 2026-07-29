@@ -112,6 +112,56 @@ testWithEngine(
         await expect($.ctx.crdtSendToRenderer({ data: Uint8Array.of() })).resolves.toEqual({ data: [expectedBatch] })
       })
     })
+
+    describe('when an earlier step of the frame throws, before any flush block is reached', () => {
+      let updateStaticEntities: jest.SpyInstance
+      let consoleError: jest.SpyInstance
+
+      beforeEach(() => {
+        // Residue in BOTH shared buffers. The per-flush `finally` blocks only run once
+        // their own `try` has been entered, so a throw from an earlier step — raycasts,
+        // static entities — skips every one of them; only an outermost backstop resets.
+        const componentData = new ReadWriteByteBuffer()
+        transformComponent.serialize(
+          { parent: 0, position: Vector3.Zero(), scale: Vector3.One(), rotation: Quaternion.Identity() },
+          componentData
+        )
+        PutComponentOperation.write(
+          {
+            entityId: StaticEntities.CameraEntity,
+            componentId: transformComponent.componentId,
+            timestamp: 1,
+            data: componentData.toBinary()
+          },
+          $.ctx.outgoingMessagesBuffer
+        )
+        DeleteEntity.write({ entityId: 41 as Entity }, $.ctx.subscriptionsBuffer)
+
+        updateStaticEntities = jest.spyOn($.ctx, 'updateStaticEntities').mockImplementation(() => {
+          throw new TypeError('failed before reaching any flush block')
+        })
+        consoleError = jest.spyOn(console, 'error').mockImplementation(() => void 0)
+      })
+
+      afterEach(() => {
+        updateStaticEntities.mockRestore()
+        consoleError.mockRestore()
+      })
+
+      it('should resolve the pending frame future instead of leaving the scene turn hanging', async () => {
+        await expect($.ctx.crdtSendToRenderer({ data: Uint8Array.of() })).resolves.toEqual({ data: [] })
+      })
+
+      it('should reset both shared buffers so the residue is not replayed forever', async () => {
+        // Losing one failed frame's partial output is the deliberate trade: keeping it
+        // would re-deliver AND re-ingest those bytes on every later frame, in buffers
+        // that never shrink.
+        await $.ctx.crdtSendToRenderer({ data: Uint8Array.of() })
+
+        expect($.ctx.outgoingMessagesBuffer.currentWriteOffset()).toEqual(0)
+        expect($.ctx.subscriptionsBuffer.currentWriteOffset()).toEqual(0)
+      })
+    })
   }
 )
 
