@@ -5,7 +5,7 @@ import { robustFetch, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from './misc/netw
 import { Scene } from '@dcl/schemas'
 import { initEngine } from './babylon'
 import { loadSceneContextFromLocal, loadSceneContextFromPosition, loadSceneContextFromWorld } from './babylon/scene/load'
-import { PLAYER_HEIGHT } from './babylon/scene/logic/static-entities'
+import { PLAYER_CAPSULE_HALF_HEIGHT } from './babylon/scene/logic/static-entities'
 import { createSceneCullingSystem } from './babylon/scene/scene-culling'
 import { createSceneTickSystem } from './babylon/scene/update-scheduler'
 import { createCharacterControllerSystem } from './babylon/avatars/CharacterController'
@@ -373,8 +373,15 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
 
   const { position } = pickWorldSpawnpoint((await ctx.deref()).loadableScene.entity.metadata as Scene)
   assertSessionCurrent(session)
+  // Spawn points are FEET positions (scene.json `spawnPoints`; the default is
+  // y=0, i.e. ground level) while teleport() takes a capsule-CENTER position, so
+  // lift by half the capsule height to stand the player ON the spawn point.
+  // This was `+= PLAYER_HEIGHT` — a full height, which put the capsule's FEET
+  // 0.85m above the spawn point: the server's own PlayerEntity transform started
+  // 0.85m too high and the character then free-fell onto the ground (or fell
+  // forever, if no collider sits beneath the spawn point).
   characterControllerSystem.teleport(position)
-  characterControllerSystem.capsule.position.y += PLAYER_HEIGHT
+  characterControllerSystem.capsule.position.y += PLAYER_CAPSULE_HALF_HEIGHT
 
   // this is for debugging purposes
   Object.assign(globalThis, { scene })

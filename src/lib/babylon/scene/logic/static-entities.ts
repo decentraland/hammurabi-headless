@@ -18,13 +18,23 @@ export const StaticEntities = {
 
 export const PLAYER_HEIGHT = 1.7
 /**
- * Babylon capsules are anchored at their CENTER, but scene-facing player
- * transforms are feet-anchored by protocol convention (comms movement packets
- * and the explorers report feet). Reporting the raw capsule position leaks a
- * +PLAYER_HEIGHT/2 offset into scenes — exactly the "~0.85m Y" fingerprint that
- * surfaced in the flag-tag cross-wire investigation (a position stream matching
- * another player's movement plus this constant). Every site that turns
- * capsule.position into a scene-facing player position must subtract this.
+ * Half of PLAYER_HEIGHT: the offset between a player capsule's origin and its feet.
+ *
+ * `CreateCapsule({ height, radius })` builds a mesh spanning `y ∈ [-height/2,
+ * +height/2]` in local space (`capsuleBuilder`: `halfHeight = (height - 2r)/2`, so
+ * the extreme cap vertices sit at `±(halfHeight + r) = ±height/2`), so
+ * `capsule.position` is its CENTER. Scene-facing player transforms are
+ * feet-anchored — that is what the explorers put on the wire (unity-explorer sends
+ * `Character.transform.position`, godot-explorer the avatar root origin) and what
+ * scene authors expect, though note it is a de-facto convention: rfc4
+ * `Position`/`Movement` document these fields only as `// world position` and
+ * specify no anchor.
+ *
+ * Reporting the raw capsule position therefore leaks a +PLAYER_HEIGHT/2 error into
+ * every scene that reads the player transform. Every site converting between
+ * capsule space and scene-facing player space must apply this offset; the values
+ * that used to sit at those sites (0, 1, and PLAYER_HEIGHT) were all wrong, in
+ * three different ways.
  */
 export const PLAYER_CAPSULE_HALF_HEIGHT = PLAYER_HEIGHT / 2
 export const MAX_RESERVED_ENTITY = 512
