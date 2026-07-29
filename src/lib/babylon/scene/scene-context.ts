@@ -52,6 +52,7 @@ import {
 } from '../../decentraland/communications/avatar-communication-system'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
+import { createRateLimitedErrorLogger } from '../../misc/logger'
 
 const SCENE_ENTITY_RANGE: [number, number] = [1, MAX_ENTITY_NUMBER]
 
@@ -151,6 +152,12 @@ export class SceneContext implements EngineApiInterface {
 
   // log function for tests
   log: (...args: any[]) => void = (...args) => console.log(this.rootNode.name, ...args)
+
+  // Throttled sink for the per-frame catch blocks in lateUpdate. A failure caused
+  // by untrusted data (a peer profile, a scene value) recurs at tick rate, so an
+  // unthrottled console.error would itself be the amplification vector. One
+  // instance per scene so a noisy scene cannot suppress another scene's errors.
+  private readonly logFrameError = createRateLimitedErrorLogger()
 
   // tick counter for EngineInfo
   currentTick = 0
@@ -478,6 +485,18 @@ export class SceneContext implements EngineApiInterface {
    *
    * The lateUpdate function is declared as a property to be added and removed to the
    * rendering engine without binding the SceneContext object.
+   *
+   * EXCEPTION SAFETY: everything after the early returns runs inside try/finally.
+   * Component serializers CAN throw on untrusted data (e.g.
+   * `PBAvatarEquippedData.encode` iterates `profile.avatar?.wearables`, which
+   * comes straight from a peer-announced profile: a non-iterable value throws
+   * TypeError). That throw is swallowed upstream (per-system try/catch in
+   * `addSystems`, per-scene try/catch in the tick system), so before this the
+   * process survived with damaged state: both shared buffers kept their residue
+   * (re-delivered AND re-ingested as stale messages, growing by a frame's worth
+   * of messages every frame while the bad value persisted) and `nextFrameFutures`
+   * stayed unresolved, so the scene's `crdtSendToRenderer` never returned and its
+   * turn hung until the async-turn watchdog disposed the isolate.
    */
   lateUpdate() {
     // only emit messages if there are receiver promises
@@ -506,62 +525,93 @@ export class SceneContext implements EngineApiInterface {
 
     const outMessages: Uint8Array[] = []
 
-    processRaycasts(this)
+    try {
+      processRaycasts(this)
 
-    // TODO: Execute queries into this.outgoingMessages
-    // TODO: Collect events into this.outgoingMessages
+      // TODO: Execute queries into this.outgoingMessages
+      // TODO: Collect events into this.outgoingMessages
 
-    // update the components of the static entities to be sent to the scene
-    this.updateStaticEntities()
+      // update the components of the static entities to be sent to the scene
+      this.updateStaticEntities()
 
-    // write all the CRDT updates in the outgoingMessagesBuffer
-    for (const component of this.componentList) {
-      component.dumpCrdtUpdates(this.outgoingMessagesBuffer)
-    }
-
-    // forward all messages from all subscriptions
-    for (const subscription of this.subscriptions) {
-      subscription.getUpdates(this.subscriptionsBuffer)
-
-      if (this.subscriptionsBuffer.currentWriteOffset()) {
-        // COPY, not a view: subscriptionsBuffer is shared across subscriptions and
-        // reset+rewritten in place on the NEXT loop iteration, which would clobber
-        // this subscription's still-referenced bytes (both the outMessages entry
-        // and the incomingMessages buffer below) before they are consumed. Unlike
-        // outgoingMessagesBuffer (a single view consumed on a microtask), this one
-        // is reused synchronously within the same frame.
-        const binary = this.subscriptionsBuffer.toCopiedBinary()
-        // send the messages from the subscriptions to the scenes
-        outMessages.push(binary)
-        // auto process the messages from the subscriptions
-        this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(binary), allowedEntityRange: subscription.range })
-        // reset the buffer
-        this.subscriptionsBuffer.incrementWriteOffset(-this.subscriptionsBuffer.currentWriteOffset())
-        this.subscriptionsBuffer.incrementReadOffset(-this.subscriptionsBuffer.currentReadOffset())
+      // write all the CRDT updates in the outgoingMessagesBuffer. Contained per
+      // component: one component whose value fails to serialize drops only ITS
+      // updates for this frame instead of aborting the whole frame.
+      for (const component of this.componentList) {
+        try {
+          component.dumpCrdtUpdates(this.outgoingMessagesBuffer)
+        } catch (err: any) {
+          this.logFrameError(`Scene ${this.entityId}: dumpCrdtUpdates failed for component ${component.componentId}`, err)
+        }
       }
+
+      // forward all messages from all subscriptions
+      for (const subscription of this.subscriptions) {
+        try {
+          try {
+            subscription.getUpdates(this.subscriptionsBuffer)
+          } catch (err: any) {
+            // Contained per subscription: a failing subscription must not cost
+            // the other subscriptions (or the frame) their updates. Whatever it
+            // managed to write is still forwarded below, and a SERIALIZER throw
+            // cannot leave a half-written message there: each value is serialized
+            // into the scratch buffer (an argument, fully evaluated) before the
+            // first byte of its CRDT message is emitted.
+            this.logFrameError(`Scene ${this.entityId}: subscription.getUpdates failed`, err)
+          }
+
+          if (this.subscriptionsBuffer.currentWriteOffset()) {
+            // COPY, not a view: subscriptionsBuffer is shared across subscriptions and
+            // reset+rewritten in place on the NEXT loop iteration, which would clobber
+            // this subscription's still-referenced bytes (both the outMessages entry
+            // and the incomingMessages buffer below) before they are consumed. Unlike
+            // outgoingMessagesBuffer (a single view consumed on a microtask), this one
+            // is reused synchronously within the same frame.
+            const binary = this.subscriptionsBuffer.toCopiedBinary()
+            // send the messages from the subscriptions to the scenes
+            outMessages.push(binary)
+            // auto process the messages from the subscriptions
+            this.incomingMessages.push({ buffer: new ReadWriteByteBuffer(binary), allowedEntityRange: subscription.range })
+          }
+        } finally {
+          // reset the buffer — ALWAYS, even if the block above threw. Residue
+          // here is re-delivered to the scene AND re-ingested as incoming
+          // messages on every later frame, and the buffer never shrinks.
+          this.subscriptionsBuffer.incrementWriteOffset(-this.subscriptionsBuffer.currentWriteOffset())
+          this.subscriptionsBuffer.incrementReadOffset(-this.subscriptionsBuffer.currentReadOffset())
+        }
+      }
+
+      try {
+        if (this.outgoingMessagesBuffer.currentWriteOffset()) {
+          outMessages.push(this.outgoingMessagesBuffer.toBinary())
+        }
+      } finally {
+        // Same rationale as above: an unreset outgoing buffer re-sends every
+        // message it still holds on each subsequent frame, forever.
+        this.outgoingMessagesBuffer.incrementWriteOffset(-this.outgoingMessagesBuffer.currentWriteOffset())
+        this.outgoingMessagesBuffer.incrementReadOffset(-this.outgoingMessagesBuffer.currentReadOffset())
+      }
+    } finally {
+      // TIMING HAZARD: outMessages holds toBinary() VIEWS into subscriptionsBuffer
+      // and outgoingMessagesBuffer, whose write offsets were just reset for reuse.
+      // This is safe ONLY because the futures resolved below are consumed (RPC
+      // protobuf-encodes, i.e. copies, the bytes) on a microtask before the next
+      // frame writes into these buffers. If that scheduling ever changes, switch
+      // to toCopiedBinary() here.
+      // finally resolve the future so the function "receiveBatch" is unblocked
+      // and the next scripting frame is allowed to happen.
+      // This MUST run even when something above threw: an unresolved future
+      // leaves the scene's crdtSendToRenderer awaiting forever, hanging its turn
+      // until the async-turn watchdog disposes the isolate.
+      this.nextFrameFutures.forEach((fut) => fut.resolve({ data: outMessages }))
+      // finally clean the futures
+      this.nextFrameFutures.length = 0
+
+      // increment the tick number, as per ADR-148
+      this.currentTick++
+      this.finishedProcessingIncomingMessagesOfTick = false
     }
-
-    if (this.outgoingMessagesBuffer.currentWriteOffset()) {
-      outMessages.push(this.outgoingMessagesBuffer.toBinary())
-      this.outgoingMessagesBuffer.incrementWriteOffset(-this.outgoingMessagesBuffer.currentWriteOffset())
-      this.outgoingMessagesBuffer.incrementReadOffset(-this.outgoingMessagesBuffer.currentReadOffset())
-    }
-
-    // TIMING HAZARD: outMessages holds toBinary() VIEWS into subscriptionsBuffer
-    // and outgoingMessagesBuffer, whose write offsets were just reset for reuse.
-    // This is safe ONLY because the futures resolved below are consumed (RPC
-    // protobuf-encodes, i.e. copies, the bytes) on a microtask before the next
-    // frame writes into these buffers. If that scheduling ever changes, switch
-    // to toCopiedBinary() here.
-    // finally resolve the future so the function "receiveBatch" is unblocked
-    // and the next scripting frame is allowed to happen
-    this.nextFrameFutures.forEach((fut) => fut.resolve({ data: outMessages }))
-    // finally clean the futures
-    this.nextFrameFutures.length = 0
-
-    // increment the tick number, as per ADR-148
-    this.currentTick++
-    this.finishedProcessingIncomingMessagesOfTick = false
   }
 
   /**
@@ -676,15 +726,18 @@ export class SceneContext implements EngineApiInterface {
     const result = await this._crdtSendToRenderer(new Uint8Array(0))
     const hasEntities = this.mainCrdt.byteLength > 0
 
-    if (hasEntities) {
-      // prepend the main.crdt to the response (if not empty). crdt messages are
-      // processed sequentially, so the main.crdt will be processed first.
-      // if the renderer has any modifications to the main.crdt, they will be
-      // applied because they will be processed after
-      result.data.unshift(this.mainCrdt)
-    }
+    // prepend the main.crdt to the response (if not empty). crdt messages are
+    // processed sequentially, so the main.crdt will be processed first.
+    // if the renderer has any modifications to the main.crdt, they will be
+    // applied because they will be processed after.
+    //
+    // NEW ARRAY, never `result.data.unshift(...)`: lateUpdate resolves EVERY
+    // pending future with the SAME array instance, so mutating it in place leaked
+    // main.crdt into the response of any crdtSendToRenderer awaiting the same
+    // frame (and into every later crdtGetState, once per call).
+    const data = hasEntities ? [this.mainCrdt, ...result.data] : result.data
 
-    return { hasEntities, data: result.data }
+    return { hasEntities, data }
   }
 
   async crdtSendToRenderer(payload: CrdtSendToRendererRequest): Promise<CrdtSendToResponse> {

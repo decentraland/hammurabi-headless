@@ -2,7 +2,7 @@ import { ByteBuffer, ReadWriteByteBuffer } from "../../../src/lib/decentraland/B
 import { CrdtMessageType, readAllMessages, readMessage } from "../../../src/lib/decentraland/crdt-wire-protocol"
 import { createLwwStore, createUpdateLwwFromCrdt } from "../../../src/lib/decentraland/crdt-internal/last-write-win-element-set"
 import { Entity } from "../../../src/lib/decentraland/types"
-import { ComponentDeclaration } from "../../../src/lib/decentraland/crdt-internal/components"
+import { ComponentDeclaration, LastWriteWinElementSetComponentDefinition } from "../../../src/lib/decentraland/crdt-internal/components"
 import { prettyPrintCrdtMessage } from "../../../src/lib/decentraland/crdt-wire-protocol/prettyPrint"
 
 describe('Conflict resolution rules for LWW-ElementSet based components', () => {
@@ -442,5 +442,64 @@ describe('integration lww', () => {
     const deltas = new ReadWriteByteBuffer()
     store.dumpCrdtDeltas(deltas, 0)
     expect(Array.from(readAllMessages(deltas))).toEqual([])
+  })
+})
+
+// Regression: a serializer throwing mid-dump escaped both dump functions, which
+// left the timestamp/tick bookkeeping applied but skipped `dirtyIterator.clear()`
+// (dumpCrdtUpdates) and the caller's `state.set(component, newTick)`
+// (dumpCrdtDeltas) — so the same failing value was re-attempted on every frame,
+// and every entity after it in the iteration lost its update.
+describe('when a component value fails to serialize', () => {
+  const failingEntity = 0x77 as Entity
+  const healthyEntity = 0x78 as Entity
+  let store: LastWriteWinElementSetComponentDefinition<{ u8: number }>
+  let consoleError: jest.SpyInstance
+
+  beforeEach(() => {
+    const decl: ComponentDeclaration<{ u8: number }, number> = {
+      componentId: 1,
+      applyChanges() { },
+      serialize(value, builder: ByteBuffer) {
+        // stands in for PBAvatarEquippedData.encode on a non-iterable `wearables`
+        if (value.u8 < 0) throw new TypeError('value.wearableUrns is not iterable')
+        builder.writeInt8(value.u8)
+      },
+      deserialize(reader: ByteBuffer) {
+        return { u8: reader.readInt8() }
+      }
+    }
+    store = createLwwStore(decl)
+    // insertion order matters: the failing entity is dumped FIRST, so anything
+    // that aborts the dump also loses the healthy entity's update
+    store.createOrReplace(failingEntity, { u8: -1 })
+    store.createOrReplace(healthyEntity, { u8: 3 })
+    consoleError = jest.spyOn(console, 'error').mockImplementation(() => void 0)
+  })
+
+  afterEach(() => {
+    consoleError.mockRestore()
+  })
+
+  it('should drop only the failing entity and still emit the other updates', () => {
+    const updates = new ReadWriteByteBuffer()
+
+    store.dumpCrdtUpdates(updates)
+
+    expect(Array.from(readAllMessages(updates)).map(_ => prettyPrintCrdtMessage(_))).toEqual([
+      'PUT c=1 e=0x78 t=1 #v=byte[1]'
+    ])
+  })
+
+  it('should clear the dirty state so the failing value is not re-dumped on every later frame', () => {
+    store.dumpCrdtUpdates(new ReadWriteByteBuffer())
+
+    expect(Array.from(store.dirtyIterator())).toEqual([])
+  })
+
+  it('should still return an advanced tick from dumpCrdtDeltas so the delta cursor moves on', () => {
+    store.dumpCrdtUpdates(new ReadWriteByteBuffer())
+
+    expect(store.dumpCrdtDeltas(new ReadWriteByteBuffer(), 0)).toBeGreaterThan(0)
   })
 })

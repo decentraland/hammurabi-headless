@@ -6,6 +6,12 @@ import { ProcessMessageResultType } from "./conflict-resolution"
 import { dataCompare } from "./dataCompare"
 import { limits } from "../../misc/limits"
 import { limitLogger } from "../../misc/limit-logger"
+import { createRateLimitedErrorLogger } from "../../misc/logger"
+
+// Throttled sink for the per-entity serialization catch blocks below. A value
+// that fails to serialize keeps failing every frame until it is replaced, so an
+// unthrottled console.error would turn one bad peer/scene value into a log flood.
+const logSerializationError = createRateLimitedErrorLogger()
 
 export function incrementTimestamp(entity: Entity, timestamps: Map<Entity, number>): number {
   const newTimestamp = (timestamps.get(entity) || 0) + 1
@@ -196,10 +202,29 @@ export function createGetCrdtMessagesForLww<T>(
     for (const entityId of dirtyIterator) {
       const timestamp = incrementTimestamp(entityId, timestamps)
       updatedAtTick.set(entityId, tick)
-      if (data.has(entityId)) {
-        PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(serde, data.get(entityId)!), }, outBuffer)
-      } else {
-        DeleteComponent.write({ entityId, componentId, timestamp }, outBuffer)
+      try {
+        if (data.has(entityId)) {
+          PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(serde, data.get(entityId)!), }, outBuffer)
+        } else {
+          DeleteComponent.write({ entityId, componentId, timestamp }, outBuffer)
+        }
+      } catch (err: any) {
+        // A serializer can throw on a value that originated in untrusted input
+        // (e.g. PBAvatarEquippedData.encode iterating a peer-announced
+        // `wearables` that is not an array). Drop THAT entity's update only.
+        //
+        // Letting the throw escape used to abort the rest of this component's
+        // dump AND skip `dirtyIterator.clear()` below, while the timestamp/tick
+        // bookkeeping above had already run — so the same failing value was
+        // re-dumped on every subsequent frame, and (via lateUpdate) the frame's
+        // shared buffers were left unreset and its futures unresolved.
+        //
+        // The bookkeeping above already ran for this entity, so it is not
+        // retried; its value is re-emitted on the next mutation. The partial
+        // buffer is safe to send: `serializeToScratch` completes before
+        // PutComponentOperation.write emits its first byte, so the buffer always
+        // holds a whole number of complete messages.
+        logSerializationError(`dumpCrdtUpdates: dropping component ${componentId} of entity ${entityId}`, err)
       }
     }
     dirtyIterator.clear()
@@ -222,10 +247,19 @@ export function createGetCrdtMessagesForLwwWithTick<T>(
       if (tick <= fromTick) continue
       if (biggestTick < tick) biggestTick = tick
       const timestamp = timestamps.get(entityId) ?? 0
-      if (data.has(entityId)) {
-        PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(serde, data.get(entityId)!), }, outBuffer)
-      } else {
-        DeleteComponent.write({ entityId, componentId, timestamp }, outBuffer)
+      try {
+        if (data.has(entityId)) {
+          PutComponentOperation.write({ entityId, componentId, timestamp, data: serializeToScratch(serde, data.get(entityId)!), }, outBuffer)
+        } else {
+          DeleteComponent.write({ entityId, componentId, timestamp }, outBuffer)
+        }
+      } catch (err: any) {
+        // Same containment as createGetCrdtMessagesForLww. Extra reason here: the
+        // caller advances its per-subscription cursor with the RETURNED tick
+        // (`state.set(component, newTick)`), so a throw escaping this function
+        // left that cursor at the stale `fromTick` and the whole delta range was
+        // rescanned and re-attempted on every subsequent frame.
+        logSerializationError(`dumpCrdtDeltas: dropping component ${componentId} of entity ${entityId}`, err)
       }
     }
 
