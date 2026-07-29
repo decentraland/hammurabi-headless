@@ -108,9 +108,11 @@ describe('avatar communication system entity lifecycle', () => {
       expect(hit).toHaveBeenCalledWith('maxSessionsPerPeer', '0xpeer')
     })
 
-    it('should still retire a peer whose tracked sessions were evicted', () => {
-      // Eviction must fail SAFE: a later disconnect finds no recorded session and
-      // retires the peer, rather than keeping a stale one alive forever.
+    it('should still retire a peer normally after unrelated churn', () => {
+      // The peer holds an avatar entity, so eviction must never take ITS record — that
+      // is what keeps its retire decision knowable. Asserted through the observable
+      // consequence: after enough churn to evict the cap several times over, this peer
+      // still retires on its own session's disconnect.
       transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
       for (let i = 0; i < limits.maxTrackedPeerSessions + 1; i++) {
         transport.events.emit('PEER_CONNECTED', { address: `0xchurn${i}`, sid: `session-${i}` })
@@ -119,6 +121,53 @@ describe('avatar communication system entity lifecycle', () => {
       transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
 
       expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+  })
+
+  describe('when tracked sessions are churned out from under a live reconnect', () => {
+    it('should keep the live entity when the old session’s disconnect finally lands', () => {
+      // The reconnect invariant has to survive the cap: a record is only evicted for an
+      // address that holds no avatar entity, and a sid-specific disconnect with no record
+      // is treated conservatively rather than retiring the address. Without both, churning
+      // MAX_TRACKED_PEER_SESSIONS identities between the reconnect and the late disconnect
+      // made an active player invisible again.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-old' })
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-new' })
+      const liveEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+
+      for (let i = 0; i < limits.maxTrackedPeerSessions + 4; i++) {
+        transport.events.emit('PEER_CONNECTED', { address: `0xchurn${i}`, sid: `session-${i}` })
+      }
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-old' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(liveEntity)
+    })
+  })
+
+  describe('when a sid-less connect is followed by a sid-specific disconnect', () => {
+    it('should consume the unidentified session and retire the peer', () => {
+      // The sid that arrives matches nothing tracked, so it belongs to the session the
+      // transport reported without one. Ignoring the disconnect left the entity and its
+      // pool slot live until an address-level disconnect happened to arrive.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).not.toBeNull()
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+
+    it('should still keep a peer whose identified session is the one that ended', () => {
+      // A sid that DOES match must not additionally consume an unidentified session:
+      // connect(sid) + connect(no sid) then disconnect(sid) leaves the sid-less one live.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      const liveEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(liveEntity)
     })
   })
 
@@ -357,12 +406,14 @@ describe('avatar communication system entity lifecycle', () => {
     })
   })
 
-  describe('when a peer this system never adopted disconnects', () => {
+  describe('when no live system holds the departing peer locally', () => {
     it('should still release the global allocator slot instead of leaking it', () => {
-      // Reachable across a hot reload: the system holding the peer in its local mirror
-      // is disposed, the replacement has not seen a packet from it yet, and the peer
-      // then leaves. Nothing would ever free the slot.
-      playerEntityManager.allocateEntityForPlayer('0xorphan', false)
+      // Reachable across a hot reload: the system that had the peer in its local mirror
+      // is disposed, its replacement has not seen a packet from it yet, and the peer then
+      // leaves. The registry outlives the systems, so the slot must still be released.
+      transport.events.emit('position', { address: '0xorphan', data: positionData(1, 2, 3) })
+      expect(playerEntityManager.getEntityForAddress('0xorphan')).not.toBeNull()
+      system.dispose()
 
       transport.events.emit('PEER_DISCONNECTED', { address: '0xorphan', sid: 'session-1' })
 

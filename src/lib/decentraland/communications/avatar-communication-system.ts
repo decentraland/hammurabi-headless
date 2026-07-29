@@ -44,6 +44,16 @@ import { createRateLimitedErrorLogger } from "../../misc/logger"
  */
 type AvatarTransportRegistry = {
   readonly departedPeers: Set<string>
+  /**
+   * Record that this address exists, without claiming any identified live session.
+   *
+   * Called when a system adopts a peer from a data packet: LiveKit emits no
+   * ParticipantConnected for peers already in the room when we joined, so those are
+   * only ever seen this way. Seeding a record makes "no record at all" mean strictly
+   * "never observed" rather than "observed but evicted", which is what lets a
+   * disconnect with no record be treated conservatively instead of destructively.
+   */
+  noteObserved(address: string): void
   onPeerAdopted(callback: (address: string) => void): () => void
   onPeerRetired(callback: (address: string) => void): () => void
 }
@@ -120,6 +130,44 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   // failing on every subsequent departure.
   const logRegistryError = createRateLimitedErrorLogger()
 
+  /**
+   * The session record for `address`, created if absent, evicting another address's
+   * record first when the cap is reached.
+   *
+   * Eviction NEVER takes the record of an address that currently holds an avatar
+   * entity. That is the invariant the retire decision depends on: with a record
+   * present we can tell a stale session's disconnect from a real departure, and
+   * without one we cannot — so losing the record of a LIVE peer would let a stale
+   * sid-specific disconnect retire it and blacklist the address, making an active
+   * player invisible. The allocator holds at most OTHER_PLAYER_ENTITIES (224)
+   * addresses against a cap of 1024, so a protected record can never starve the
+   * eviction scan; the fallback below exists only so a misconfigured cap degrades
+   * instead of looping.
+   */
+  function recordFor(address: string): { sids: Set<string>; unknown: number } {
+    const existing = liveSessions.get(address)
+    if (existing !== undefined) return existing
+
+    if (liveSessions.size >= MAX_TRACKED_PEER_SESSIONS) {
+      let evicted: string | undefined
+      for (const candidate of liveSessions.keys()) {
+        if (playerEntityManager.getEntityForAddress(candidate) === null) {
+          evicted = candidate
+          break
+        }
+      }
+      // Every tracked address holds an entity (only reachable if the cap is set below
+      // the avatar pool size): drop the oldest regardless rather than grow unbounded.
+      if (evicted === undefined) evicted = liveSessions.keys().next().value
+      if (evicted !== undefined) liveSessions.delete(evicted)
+      limitLogger.hit('maxTrackedPeerSessions', address)
+    }
+
+    const created = { sids: new Set<string>(), unknown: 0 }
+    liveSessions.set(address, created)
+    return created
+  }
+
   function dispatch(callbacks: Set<(address: string) => void>, address: string, what: string) {
     for (const callback of callbacks) {
       try {
@@ -144,20 +192,7 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // session, whether or not that peer ever obtains one of the 224 avatar slots, so a
     // hostile or faulty comms source churning identities/sids — or simply losing
     // disconnects — would otherwise grow this for the life of the transport.
-    let sessions = liveSessions.get(address)
-    if (sessions === undefined) {
-      if (liveSessions.size >= MAX_TRACKED_PEER_SESSIONS) {
-        // Drop-oldest (Map preserves insertion order), matching departedPeers and the
-        // per-peer rate map. Evicting a record is the SAFE direction: a later
-        // disconnect for that address then finds no recorded session and retires the
-        // peer immediately, rather than keeping a stale one alive forever.
-        const oldest = liveSessions.keys().next().value
-        if (oldest !== undefined) liveSessions.delete(oldest)
-        limitLogger.hit('maxTrackedPeerSessions', address)
-      }
-      sessions = { sids: new Set<string>(), unknown: 0 }
-      liveSessions.set(address, sessions)
-    }
+    const sessions = recordFor(address)
 
     const trackedForPeer = sessions.sids.size + sessions.unknown
     if (event.sid !== undefined) {
@@ -199,8 +234,29 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // have recorded sessions left the set untouched and returned on `size > 0`, so the
     // peer was never retired and its entity and pool slot leaked.
     const sessions = liveSessions.get(address)
-    if (sessions !== undefined && event.sid !== undefined) {
-      sessions.sids.delete(event.sid)
+    if (event.sid !== undefined) {
+      if (sessions === undefined) {
+        // No record, and a sid-specific disconnect cannot tell us whether any OTHER
+        // session for this address is still live. Because a record is seeded the first
+        // time an address is observed and is never evicted while that address holds an
+        // entity, reaching here means the address has no avatar entity to purge and no
+        // straggler to blacklist — so the conservative choice costs nothing. Retiring
+        // instead would let churn past the cap retire a live reconnect.
+        //
+        // DEFENCE IN DEPTH, deliberately not independently observable: the eviction
+        // protection in recordFor is what actually guarantees a live peer keeps its
+        // record, so no test can distinguish this branch while that holds. It exists so
+        // that if the protection is ever weakened, the failure mode is a leaked pool
+        // slot rather than an active player going invisible.
+        return
+      }
+      if (!sessions.sids.delete(event.sid) && sessions.unknown > 0) {
+        // The sid matches nothing we tracked, so it belongs to a session we could not
+        // identify (a connect that arrived without one). Consume that instead of
+        // ignoring the disconnect, which used to leave the peer live until an
+        // address-level disconnect happened to arrive.
+        sessions.unknown--
+      }
       // Still live if another id remains, or if a session we could not identify does.
       if (sessions.sids.size > 0 || sessions.unknown > 0) return
     }
@@ -238,6 +294,10 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   const registry: RegistryInternals = {
     generation,
     departedPeers,
+    noteObserved(address: string) {
+      if (generation !== avatarSessionGeneration) return
+      recordFor(address)
+    },
     detach() {
       transport.events.off('PEER_CONNECTED', onPeerConnected)
       transport.events.off('PEER_DISCONNECTED', onPeerDisconnected)
@@ -543,6 +603,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       // writes components for that entity, so this system must be able to clean it
       // up on disconnect regardless of which listener runs first (see ownedEntities).
       ownedEntities.set(normalizedAddress, entity)
+      registry.noteObserved(normalizedAddress)
       return entity
     }
 
@@ -562,6 +623,9 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // Initialize with minimal identity data
     PlayerIdentityData.createOrReplace(entity, { address: normalizedAddress, isGuest: true })
     ownedEntities.set(normalizedAddress, entity)
+    // Peers already in the room when we joined get no PEER_CONNECTED, so this is the
+    // only place their existence is recorded (see noteObserved).
+    registry.noteObserved(normalizedAddress)
 
     return entity
   }
