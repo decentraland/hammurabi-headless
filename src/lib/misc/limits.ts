@@ -42,6 +42,8 @@ export interface Limits {
   maxRateEntries: number
   maxAvatarTombstones: number
   maxDepartedPeers: number
+  maxTrackedPeerSessions: number
+  maxSessionsPerPeer: number
   profileFetchCooldownMs: number
   livekitConnectTimeoutMs: number
 
@@ -116,6 +118,8 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxRateEntries', env: 'HAMMURABI_MAX_RATE_ENTRIES', def: 4_096, min: 1 },
   { key: 'maxAvatarTombstones', env: 'HAMMURABI_MAX_AVATAR_TOMBSTONES', def: 4_096, min: 1 },
   { key: 'maxDepartedPeers', env: 'HAMMURABI_MAX_DEPARTED_PEERS', def: 1_024, min: 1 },
+  { key: 'maxTrackedPeerSessions', env: 'HAMMURABI_MAX_TRACKED_PEER_SESSIONS', def: 1_024, min: 1 },
+  { key: 'maxSessionsPerPeer', env: 'HAMMURABI_MAX_SESSIONS_PER_PEER', def: 8, min: 1 },
   { key: 'profileFetchCooldownMs', env: 'HAMMURABI_PROFILE_FETCH_COOLDOWN_MS', def: 10_000, min: 0 },
   { key: 'livekitConnectTimeoutMs', env: 'HAMMURABI_LIVEKIT_CONNECT_TIMEOUT_MS', def: 30_000, min: 1_000 },
 

@@ -30,6 +30,8 @@ const { ReadWriteByteBuffer } = require('../../../../src/lib/decentraland/ByteBu
 const { readAllMessages } = require('../../../../src/lib/decentraland/crdt-wire-protocol')
 const { CrdtMessageType } = require('../../../../src/lib/decentraland/crdt-wire-protocol/types')
 const { robustFetch, readBodyCapped } = require('../../../../src/lib/misc/network')
+const { limitLogger } = require('../../../../src/lib/misc/limit-logger')
+const { limits } = require('../../../../src/lib/misc/limits')
 
 const robustFetchMock = robustFetch as jest.Mock
 const readBodyCappedMock = readBodyCapped as jest.Mock
@@ -75,6 +77,68 @@ describe('avatar communication system entity lifecycle', () => {
   afterEach(() => {
     system.dispose()
     jest.resetAllMocks()
+  })
+
+  describe('when connection churn exceeds the tracked-session bounds', () => {
+    let hit: jest.SpyInstance
+
+    beforeEach(() => {
+      hit = jest.spyOn(limitLogger, 'hit').mockImplementation(() => void 0)
+    })
+
+    afterEach(() => hit.mockRestore())
+
+    it('should evict the oldest tracked address rather than grow without bound', () => {
+      // Every connect records an address whether or not that peer ever gets one of the
+      // 224 avatar slots, so a comms source churning identities could otherwise grow
+      // this for the life of the transport.
+      for (let i = 0; i < limits.maxTrackedPeerSessions + 4; i++) {
+        transport.events.emit('PEER_CONNECTED', { address: `0xchurn${i}`, sid: `session-${i}` })
+      }
+
+      expect(hit).toHaveBeenCalledWith('maxTrackedPeerSessions', expect.any(String))
+    })
+
+    it('should bound the sessions tracked for a single address', () => {
+      // One address reconnecting with an endless supply of new session ids.
+      for (let i = 0; i < limits.maxSessionsPerPeer + 4; i++) {
+        transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: `session-${i}` })
+      }
+
+      expect(hit).toHaveBeenCalledWith('maxSessionsPerPeer', '0xpeer')
+    })
+
+    it('should still retire a peer whose tracked sessions were evicted', () => {
+      // Eviction must fail SAFE: a later disconnect finds no recorded session and
+      // retires the peer, rather than keeping a stale one alive forever.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      for (let i = 0; i < limits.maxTrackedPeerSessions + 1; i++) {
+        transport.events.emit('PEER_CONNECTED', { address: `0xchurn${i}`, sid: `session-${i}` })
+      }
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+  })
+
+  describe('when a transport is reused by a later session', () => {
+    let replacement: any
+
+    afterEach(() => replacement?.dispose())
+
+    it('should detach the retired registry instead of leaving its handlers attached', () => {
+      const listenersFor = (event: string) => (transport.events.all.get(event) ?? []).length
+      const before = listenersFor('PEER_DISCONNECTED')
+
+      resetAvatarSessionState()
+      // Same transport, new session: this replaces the retired registry.
+      replacement = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+
+      // One live registry's handler, not one per session that ever reused the transport:
+      // a retained closure keeps its departed/session maps alive for the transport's life.
+      expect(listenersFor('PEER_DISCONNECTED')).toEqual(before)
+    })
   })
 
   describe('when a stale transport emits a disconnect after the session was reset', () => {

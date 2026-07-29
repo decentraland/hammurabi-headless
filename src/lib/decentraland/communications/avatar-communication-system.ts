@@ -76,13 +76,28 @@ export function resetAvatarSessionState() {
   playerEntityManager.clear()
 }
 
-type RegistryInternals = AvatarTransportRegistry & { readonly generation: number }
+type RegistryInternals = AvatarTransportRegistry & {
+  readonly generation: number
+  /**
+   * Remove this registry's transport subscriptions. Called when a registry from a past
+   * generation is replaced on a transport that is being reused: the generation guard
+   * already makes the old handlers inert, but leaving them attached retains their
+   * closures — and therefore the departed/session maps they capture — for the life of
+   * the transport, once per session that reuses it.
+   */
+  detach(): void
+}
 
 function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTransportRegistry {
   const existing = avatarTransportRegistries.get(transport)
-  // A registry from a previous session is inert (its handlers no-op), so a transport
-  // somehow reused across sessions gets a live one rather than the retired one.
-  if (existing && existing.generation === avatarSessionGeneration) return existing
+  if (existing) {
+    if (existing.generation === avatarSessionGeneration) return existing
+    // A registry from a previous session is inert (its handlers no-op on the generation
+    // check), but leaving it subscribed retains its closures and their maps for the life
+    // of the transport — once per session that reuses it. Detach before replacing.
+    existing.detach()
+    avatarTransportRegistries.delete(transport)
+  }
 
   const generation = avatarSessionGeneration
 
@@ -98,6 +113,8 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   const adoptedCallbacks = new Set<(address: string) => void>()
   const retiredCallbacks = new Set<(address: string) => void>()
   const MAX_DEPARTED_PEERS = limits.maxDepartedPeers // HAMMURABI_MAX_DEPARTED_PEERS
+  const MAX_TRACKED_PEER_SESSIONS = limits.maxTrackedPeerSessions // HAMMURABI_MAX_TRACKED_PEER_SESSIONS
+  const MAX_SESSIONS_PER_PEER = limits.maxSessionsPerPeer // HAMMURABI_MAX_SESSIONS_PER_PEER
   // One scene's callback must never be able to skip another scene's cleanup, so each
   // dispatch is contained. Throttled because a callback that fails once tends to keep
   // failing on every subsequent departure.
@@ -113,7 +130,7 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     }
   }
 
-  transport.events.on('PEER_CONNECTED', (event: { address: string; sid?: string }) => {
+  const onPeerConnected = (event: { address: string; sid?: string }) => {
     // Inert once this session is over: see avatarSessionGeneration.
     if (generation !== avatarSessionGeneration) return
     const address = event.address.toLowerCase()
@@ -123,17 +140,49 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // Register THIS session so a late disconnect belonging to a PREVIOUS session
     // cannot retire it. A transport without per-session ids, or a repeated connect for
     // the same session, is idempotent — it is a Set.
+    // BOUNDED (load-bearing, CLAUDE.md): every connect records an address and a
+    // session, whether or not that peer ever obtains one of the 224 avatar slots, so a
+    // hostile or faulty comms source churning identities/sids — or simply losing
+    // disconnects — would otherwise grow this for the life of the transport.
     let sessions = liveSessions.get(address)
     if (sessions === undefined) {
+      if (liveSessions.size >= MAX_TRACKED_PEER_SESSIONS) {
+        // Drop-oldest (Map preserves insertion order), matching departedPeers and the
+        // per-peer rate map. Evicting a record is the SAFE direction: a later
+        // disconnect for that address then finds no recorded session and retires the
+        // peer immediately, rather than keeping a stale one alive forever.
+        const oldest = liveSessions.keys().next().value
+        if (oldest !== undefined) liveSessions.delete(oldest)
+        limitLogger.hit('maxTrackedPeerSessions', address)
+      }
       sessions = { sids: new Set<string>(), unknown: 0 }
       liveSessions.set(address, sessions)
     }
-    if (event.sid !== undefined) sessions.sids.add(event.sid)
-    else sessions.unknown++
-    dispatch(adoptedCallbacks, address, 'peer-adopted')
-  })
 
-  transport.events.on('PEER_DISCONNECTED', (event: { address: string; sid?: string }) => {
+    const trackedForPeer = sessions.sids.size + sessions.unknown
+    if (event.sid !== undefined) {
+      // Re-announcing a sid we already hold is free; only a NEW one consumes budget.
+      if (!sessions.sids.has(event.sid) && trackedForPeer >= MAX_SESSIONS_PER_PEER) {
+        const oldestSid = sessions.sids.values().next().value
+        if (oldestSid !== undefined) sessions.sids.delete(oldestSid)
+        else if (sessions.unknown > 0) sessions.unknown--
+        limitLogger.hit('maxSessionsPerPeer', address)
+      }
+      sessions.sids.add(event.sid)
+    } else if (trackedForPeer < MAX_SESSIONS_PER_PEER) {
+      sessions.unknown++
+    } else {
+      // Clamp rather than grow. TRADEOFF: with more than MAX_SESSIONS_PER_PEER
+      // concurrent UNIDENTIFIED sessions on one address, retiring the tracked ones can
+      // retire the peer while an untracked one is still live. That needs a transport
+      // that omits `sid` on many simultaneous sessions for a single address; the bound
+      // matters more, and an address-level disconnect clears the record either way.
+      limitLogger.hit('maxSessionsPerPeer', address)
+    }
+    dispatch(adoptedCallbacks, address, 'peer-adopted')
+  }
+
+  const onPeerDisconnected = (event: { address: string; sid?: string }) => {
     // Inert once this session is over. Without this, a late disconnect from the old
     // transport frees an allocator mapping that now belongs to the NEW session.
     if (generation !== avatarSessionGeneration) return
@@ -181,11 +230,24 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
       // `finally` so that nothing a scene does — however it fails — can leak the slot.
       playerEntityManager.freeEntityForPlayer(address)
     }
-  })
+  }
+
+  transport.events.on('PEER_CONNECTED', onPeerConnected)
+  transport.events.on('PEER_DISCONNECTED', onPeerDisconnected)
 
   const registry: RegistryInternals = {
     generation,
     departedPeers,
+    detach() {
+      transport.events.off('PEER_CONNECTED', onPeerConnected)
+      transport.events.off('PEER_DISCONNECTED', onPeerDisconnected)
+      // Drop what the (now unreachable) handlers captured, so a transport reused across
+      // many sessions does not accumulate a retired registry's maps per session.
+      adoptedCallbacks.clear()
+      retiredCallbacks.clear()
+      departedPeers.clear()
+      liveSessions.clear()
+    },
     onPeerAdopted(callback) {
       adoptedCallbacks.add(callback)
       return () => adoptedCallbacks.delete(callback)
