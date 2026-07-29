@@ -121,15 +121,15 @@ describe('avatar communication system entity lifecycle', () => {
     let liveEntity: number
 
     beforeEach(() => {
-      // Session 1 connects.
-      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+      // Session 1 connects. The address is identical across a reconnect, so only the
+      // transport's per-session id can tell the two sessions apart.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
       liveEntity = playerEntityManager.getEntityForAddress('0xpeer')!
-      // The reconnect (session 2) is observed BEFORE session 1's disconnect: both
-      // events carry only the LiveKit identity, which is identical across a
-      // reconnect, and their relative order is not guaranteed.
-      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+      // The reconnect (session 2) is observed BEFORE session 1's disconnect: their
+      // relative order is not guaranteed.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-2' })
       // Session 1's disconnect finally lands.
-      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
     })
 
     it('should keep the entity of the session that is still live', () => {
@@ -139,9 +139,87 @@ describe('avatar communication system entity lifecycle', () => {
     })
 
     it('should remove the entity once the last live session also disconnects', () => {
-      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-2' })
 
       expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+
+    it('should ignore a repeated disconnect for a session already retired', () => {
+      // Session IDS in a Set, not a counter: re-delivering session 1's disconnect must
+      // not retire session 2 as collateral.
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(liveEntity)
+    })
+  })
+
+  describe('when a peer adopted from a data packet reconnects and the old disconnect is late', () => {
+    let liveEntity: number
+
+    beforeEach(() => {
+      // LiveKit emits no ParticipantConnected for peers already in the room when we
+      // joined, so this peer is known ONLY from its first data packet and has no
+      // recorded session. A live-session COUNTER reads zero here and lets the stale
+      // disconnect below purge the live session.
+      transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
+      liveEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-2' })
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+    })
+
+    it('should keep the entity belonging to the live session', () => {
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(liveEntity)
+    })
+  })
+
+  describe('when a peer this system never adopted disconnects', () => {
+    it('should still release the global allocator slot instead of leaking it', () => {
+      // Reachable across a hot reload: the system holding the peer in its local mirror
+      // is disposed, the replacement has not seen a packet from it yet, and the peer
+      // then leaves. Nothing would ever free the slot.
+      playerEntityManager.allocateEntityForPlayer('0xorphan', false)
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xorphan', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xorphan')).toBeNull()
+    })
+  })
+
+  describe('when a straggler packet arrives for a departed peer whose global mapping survives', () => {
+    it('should not adopt the departed peer through the still-present mapping', () => {
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+      // A sibling system that has not processed the departure yet — or any other
+      // holder — leaves a global mapping in place.
+      const resurrected = playerEntityManager.allocateEntityForPlayer('0xpeer', false)!
+      const subscription = system.createSubscription()
+
+      transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
+      system.update()
+
+      // departedPeers must be consulted BEFORE the allocator, or the straggler adopts
+      // the peer through the back door and writes components for it again.
+      expect(identityPutsFor(subscription, resurrected)).toHaveLength(0)
+    })
+  })
+
+  describe('when a subscription is created after an entity has already been purged', () => {
+    it('should not emit DELETE_ENTITY for a tombstone it was never told about', () => {
+      // An incumbent subscription that has NOT consumed the tombstone yet is what keeps
+      // it retained: with no live subscription, pruneEmittedTombstones drops it and this
+      // assertion would hold no matter how the latecomer's cursor is initialized.
+      system.createSubscription()
+
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+      system.update()
+
+      // A subscription created now starts from a state dump that never contained the
+      // purged entity, so the retained tombstone is not its business.
+      const latecomer = system.createSubscription()
+
+      expect(pullMessages(latecomer).filter((message) => message.type === CrdtMessageType.DELETE_ENTITY)).toHaveLength(0)
     })
   })
 
