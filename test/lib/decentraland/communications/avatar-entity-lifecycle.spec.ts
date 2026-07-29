@@ -610,3 +610,44 @@ describe('avatar communication system entity lifecycle', () => {
     })
   })
 })
+
+describe('avatar communication system with a tracked-session cap below the avatar pool', () => {
+  let transport: { events: any }
+  let system: any
+  let configuredMaxTrackedPeerSessions: number
+
+  beforeEach(() => {
+    configuredMaxTrackedPeerSessions = limits.maxTrackedPeerSessions
+    // Bypass readLimits deliberately to exercise recordFor's defence in depth.
+    limits.maxTrackedPeerSessions = 1
+    playerEntityManager.clear()
+    robustFetchMock.mockResolvedValue({ ok: true })
+    readBodyCappedMock.mockResolvedValue('[]')
+    transport = { events: makeEmitter() }
+    system = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+
+    transport.events.emit('PEER_CONNECTED', { address: '0xpeer-a', sid: 'session-a' })
+    const peerEntity = playerEntityManager.getEntityForAddress('0xpeer-a')
+    if (peerEntity === null) {
+      throw new TypeError('peer A must allocate an entity before session-record churn')
+    }
+
+    // These peers are live too, so none of their records may be selected for eviction.
+    transport.events.emit('PEER_CONNECTED', { address: '0xpeer-b', sid: 'session-b' })
+    transport.events.emit('PEER_CONNECTED', { address: '0xpeer-c', sid: 'session-c' })
+  })
+
+  afterEach(() => {
+    system.dispose()
+    limits.maxTrackedPeerSessions = configuredMaxTrackedPeerSessions
+    jest.resetAllMocks()
+  })
+
+  describe('when the first live peer disconnects by session id after record churn', () => {
+    it('should retire its entity and release the pool slot', () => {
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer-a', sid: 'session-a' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer-a')).toBeNull()
+    })
+  })
+})

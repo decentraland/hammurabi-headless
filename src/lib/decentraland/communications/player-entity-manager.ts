@@ -18,6 +18,7 @@ export namespace EntityUtils {
 const PLAYER_ENTITY = 1
 const OTHER_PLAYER_ENTITIES_FROM = 32
 const OTHER_PLAYER_ENTITIES_TO = 256
+export const REMOTE_PLAYER_ENTITY_CAPACITY = OTHER_PLAYER_ENTITIES_TO - OTHER_PLAYER_ENTITIES_FROM
 
 export class PlayerEntityManager {
   // Set of allocated entities for efficient checking

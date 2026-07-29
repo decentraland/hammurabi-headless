@@ -139,10 +139,14 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
    * present we can tell a stale session's disconnect from a real departure, and
    * without one we cannot — so losing the record of a LIVE peer would let a stale
    * sid-specific disconnect retire it and blacklist the address, making an active
-   * player invisible. The allocator holds at most OTHER_PLAYER_ENTITIES (224)
-   * addresses against a cap of 1024, so a protected record can never starve the
-   * eviction scan; the fallback below exists only so a misconfigured cap degrades
-   * instead of looping.
+   * player invisible. Configuration requires one more tracked record than the remote
+   * avatar capacity, so a protected record cannot starve the eviction scan.
+   *
+   * The no-candidate path remains load-bearing defence in depth for tests, embedding,
+   * or future configuration changes that bypass readLimits: it permits a bounded
+   * overage instead of evicting a live record. At most the avatar capacity plus one
+   * records can then survive—the extra record belongs to the peer whose allocation
+   * fails, and the next insertion can evict it.
    */
   function recordFor(address: string): { sids: Set<string>; unknown: number } {
     const existing = liveSessions.get(address)
@@ -156,9 +160,10 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
           break
         }
       }
-      // Every tracked address holds an entity (only reachable if the cap is set below
-      // the avatar pool size): drop the oldest regardless rather than grow unbounded.
-      if (evicted === undefined) evicted = liveSessions.keys().next().value
+      // Never evict a live peer. If the configured invariant was bypassed and every
+      // record is protected, allow this insertion to exceed that invalid cap. The
+      // remote-player pool is the hard bound: once full, this new address cannot
+      // allocate an entity and becomes the evictable candidate for the next insertion.
       if (evicted !== undefined) liveSessions.delete(evicted)
       limitLogger.hit('maxTrackedPeerSessions', address)
     }
