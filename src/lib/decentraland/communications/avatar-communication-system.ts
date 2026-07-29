@@ -51,6 +51,39 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // vector; log at most once per second regardless of how many packets are dropped.
   let lastPoolExhaustedLogAt = 0
 
+  // Addresses of peers we have SEEN DEPART. Data packets and participant events are
+  // delivered on different LiveKit paths, so a position/movement/profile packet
+  // routinely lands AFTER that peer's PEER_DISCONNECTED. Without this, such a
+  // straggler re-enters the allocation path below and resurrects the departed peer
+  // as a permanent frozen "corpse" avatar: nothing ever moves it again, and because
+  // a departed address never disconnects a second time nothing ever frees it — so it
+  // holds one of the 224 remote-player pool slots for the rest of the session. Enough
+  // churn exhausts the pool and then genuinely-connected players get no entity at all.
+  //
+  // CORRECTNESS: this refuses only KNOWN-DEPARTED addresses, never unknown ones.
+  // LiveKit does NOT emit ParticipantConnected for peers that were already in the
+  // room when we joined (they arrive in the room's participant snapshot instead), so
+  // those peers are discovered ONLY from their first data packet and must still be
+  // allowed to allocate. Inverting this into an allowlist ("refuse unless we saw a
+  // connect") would make every peer who joined before us permanently invisible.
+  const departedPeers = new Set<string>()
+  const MAX_DEPARTED_PEERS = limits.maxDepartedPeers // HAMMURABI_MAX_DEPARTED_PEERS
+
+  // Live sessions per peer identity. PEER_CONNECTED/PEER_DISCONNECTED carry only the
+  // LiveKit identity (the wallet address), which is IDENTICAL across a reconnect, and
+  // their relative order is NOT guaranteed: a client that drops and re-joins can
+  // produce connect(session N+1) before disconnect(session N). Acting on that late
+  // disconnect would purge the entity of the session that is currently live, and a
+  // stationary client (one not sending movement packets that would re-allocate it)
+  // then stays invisible for the rest of the session. Counting live sessions lets the
+  // late disconnect retire its own session without touching the newer one.
+  //
+  // The durable fix is to forward `participant.sid` from `transports/livekit.ts` on
+  // both events so sessions are DISTINGUISHABLE rather than merely counted; a count
+  // cannot tell a genuine reconnect from a transport that double-fires for one
+  // session.
+  const sessionCount = new Map<string, number>()
+
   // One tracker per live subscription: its highest emitted deletion sequence.
   const subscriptionTrackers = new Set<{ emittedSeq: number }>()
   let lastPrunedMinSeq = 0
@@ -253,10 +286,25 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // First check if we already have an entity allocated for this address
     let entity = playerEntityManager.getEntityForAddress(normalizedAddress)
     if (entity !== null) {
+      // The allocation may have been made by ANOTHER avatar system sharing the
+      // process-global playerEntityManager (there is one system per scene, all wired
+      // to the same comms transport), in which case only THAT system's store holds
+      // the identity. Backfill ours, or this scene writes a 30Hz Transform for an
+      // entity that has no PlayerIdentityData here — a moving avatar belonging to no
+      // player. Guarded by `has` so we don't rewrite (and re-dirty) the component on
+      // every inbound packet.
+      if (!PlayerIdentityData.has(entity)) {
+        PlayerIdentityData.createOrReplace(entity, { address: normalizedAddress, isGuest: true })
+      }
       return entity
     }
 
     if (!createIfMissing) return null
+
+    // Never re-allocate a peer we already saw depart: a straggler packet arriving
+    // after PEER_DISCONNECTED would otherwise resurrect it as a permanently leaked
+    // corpse avatar (see departedPeers).
+    if (departedPeers.has(normalizedAddress)) return null
 
     // Allocate a new entity for this remote player
     entity = playerEntityManager.allocateEntityForPlayer(normalizedAddress, false)
@@ -280,6 +328,14 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     console.log('peer connected', event)
     const address = normalizeAddress(event.address)
 
+    // A reconnecting peer must be allowed to allocate again, so drop the departed
+    // marker BEFORE the allocation below (which refuses known-departed addresses).
+    departedPeers.delete(address)
+
+    // Register this session so a LATE disconnect belonging to a PREVIOUS session
+    // cannot purge it (see sessionCount).
+    sessionCount.set(address, (sessionCount.get(address) ?? 0) + 1)
+
     // Allocate entity for the new participant
     const entity = findPlayerEntityByAddress(address, true)
     if (entity) {
@@ -295,9 +351,39 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
   const handlePeerDisconnected = (event: { address: string }) => {
     console.log('[PEER_DISCONNECTED]', event)
+    const normalizedAddress = normalizeAddress(event.address)
+
+    // Retire one live session. If a NEWER session is still live — the reconnect's
+    // PEER_CONNECTED already arrived, out of order, ahead of this disconnect — keep
+    // the entity: purging it here would make the live, reconnected client invisible
+    // until it happens to send a movement packet (never, if it is standing still).
+    // A peer with no counted session (already in the room when we joined, so we never
+    // saw its connect) yields a non-positive remainder and falls through to removal.
+    const remainingSessions = (sessionCount.get(normalizedAddress) ?? 0) - 1
+    if (remainingSessions > 0) {
+      sessionCount.set(normalizedAddress, remainingSessions)
+      return
+    }
+    sessionCount.delete(normalizedAddress)
+
     const entity = findPlayerEntityByAddress(event.address, false)
     if (entity) {
       removePlayerEntity(entity, event.address)
+    }
+
+    // Remember the departure AFTER the removal above, so straggler packets can no
+    // longer resurrect this peer (see departedPeers). Oldest markers are evicted once
+    // the set is full.
+    // TRADEOFF: eviction can un-remember a very old departure, which at worst lets a
+    // straggler resurrect one corpse — but stragglers land within seconds of the
+    // departure, so re-admitting a peer that departed 1024 distinct departures ago is
+    // strictly better than an unbounded set (a load-bearing memory bound, CLAUDE.md).
+    departedPeers.add(normalizedAddress)
+    if (departedPeers.size > MAX_DEPARTED_PEERS) limitLogger.hit('maxDepartedPeers')
+    while (departedPeers.size > MAX_DEPARTED_PEERS) {
+      const oldest = departedPeers.values().next().value
+      if (oldest === undefined) break
+      departedPeers.delete(oldest)
     }
   }
 
@@ -403,13 +489,29 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       return {
         range: [32, 256] as [number, number],
         dispose() {
+          // ONE subscription is going away: tear down only what belongs to it — its
+          // tracker and its per-component tick cursors.
+          //
+          // Deliberately does NOT clear playerEntityManager / profileCache /
+          // profileFetchState / deletedEntities. `playerEntityManager` is a
+          // process-global singleton and the other three belong to the SYSTEM, shared
+          // by every subscription it hands out, so clearing them from one
+          // subscription's teardown drops other scenes' live peer mappings and
+          // destroys sibling subscriptions' pending DELETE_ENTITY tombstones (which,
+          // since removePlayerEntity purges the components, are the ONLY removal
+          // signal — so their avatars linger as ghosts).
+          //
+          // Worse, playerEntityManager.clear() also resets `nextEntityNumber` and
+          // `entityVersions`, so a later allocation can hand a DIFFERENT address an
+          // entity id a surviving scene's VM still holds. That is not merely cosmetic:
+          // `@dcl/ecs` treats entities < 512 as Reserved and KEEPS their LWW
+          // timestamps across `entityDeleted`, while our purgeEntity resets ours to 0.
+          // The reissued id's one-shot PlayerIdentityData PUT (timestamp 1) is then
+          // rejected as outdated while its 30Hz Transform PUTs eventually win — so the
+          // entity keeps the OLD player's address while tracking the NEW player's
+          // movement.
           subscriptionTrackers.delete(tracker)
           state.clear()
-          // Clear player entity manager and profile cache
-          playerEntityManager.clear()
-          profileCache.clear()
-          profileFetchState.clear()
-          deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {
           // Write DELETE_ENTITY messages for players removed since we last ran.
@@ -444,6 +546,8 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       playerEntityManager.clear()
       profileCache.clear()
       deletedEntities.clear()
+      departedPeers.clear()
+      sessionCount.clear()
     }
   }
 }

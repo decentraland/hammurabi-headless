@@ -171,6 +171,7 @@ truth is [`src/lib/misc/limits.ts`](src/lib/misc/limits.ts).
 | `HAMMURABI_MAX_MESSAGES_PER_WINDOW` | `300` | Max inbound packets per peer per window. |
 | `HAMMURABI_MAX_RATE_ENTRIES` | `4096` | Max entries in the per-peer rate-limit map. |
 | `HAMMURABI_MAX_AVATAR_TOMBSTONES` | `4096` | Max avatar delete-tombstones retained. |
+| `HAMMURABI_MAX_DEPARTED_PEERS` | `1024` | Max departed-peer addresses remembered so straggler packets can't resurrect them. |
 | `HAMMURABI_PROFILE_FETCH_COOLDOWN_MS` | `10000` | Per-peer cooldown between Catalyst profile fetches (`0` disables the cooldown). |
 | `HAMMURABI_LIVEKIT_CONNECT_TIMEOUT_MS` | `30000` | Max time to establish a LiveKit connection (minimum 1000). |
 

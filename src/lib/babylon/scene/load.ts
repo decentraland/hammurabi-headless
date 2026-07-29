@@ -64,7 +64,16 @@ export async function loadSceneContextFromLocal(sceneContext: Atom<SceneContext>
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, options.isGlobal, virtualScene))
 
   async function reloadScene() {
-    unloadScene(entityId)
+    // Unload EVERY loaded scene, not the `entityId` this closure captured. For a
+    // local scene the entity id is the content hash of the scene files, so the first
+    // code change mints a new id: from the second reload onward `unloadScene(entityId)`
+    // looked up an id that was no longer registered, did nothing, and leaked the live
+    // SceneContext — along with its avatar communication system, which stays
+    // subscribed to the shared (still-connected) comms transport and keeps writing
+    // avatar state for a dead scene. One leaked context and system per reload.
+    for (const id of Array.from(loadedScenesByEntityId.keys())) {
+      unloadScene(id)
+    }
     await sleep(100)
     options.withoutHotReload = true
     loadSceneContextFromLocal(sceneContext, engineScene, options)
