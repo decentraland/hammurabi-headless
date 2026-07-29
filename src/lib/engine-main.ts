@@ -12,7 +12,7 @@ import { createCharacterControllerSystem } from './babylon/avatars/CharacterCont
 import { createCameraFollowsPlayerSystem } from './babylon/scene/logic/camera-follows-player'
 import { createLocalAvatarSceneSystem } from './babylon/scene/logic/local-avatar-scene'
 import { createSceneComms } from './decentraland/communications/scene-comms'
-import { playerEntityManager } from './decentraland/communications/player-entity-manager'
+import { resetAvatarSessionState } from './decentraland/communications/avatar-communication-system'
 import { commsLogger } from './decentraland/communications/types'
 import { SceneContext } from './babylon/scene/scene-context'
 import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/avatar'
@@ -133,7 +133,7 @@ export function resetEngine() {
   //
   // NOT done in disposeSession: that also runs for a startup superseded mid-flight,
   // where the replacement session is already live and owns these mappings.
-  playerEntityManager.clear()
+  resetAvatarSessionState()
 
   // Reset the initialization flag
   initialized = false

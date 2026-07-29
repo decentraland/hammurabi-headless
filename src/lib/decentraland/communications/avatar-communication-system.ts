@@ -44,20 +44,57 @@ import { createRateLimitedErrorLogger } from "../../misc/logger"
  */
 type AvatarTransportRegistry = {
   readonly departedPeers: Set<string>
-  readonly liveSessions: Map<string, Set<string>>
   onPeerAdopted(callback: (address: string) => void): () => void
   onPeerRetired(callback: (address: string) => void): () => void
 }
 
 // Keyed weakly so a discarded transport takes its registry with it.
-const avatarTransportRegistries = new WeakMap<CommsTransportWrapper, AvatarTransportRegistry>()
+const avatarTransportRegistries = new WeakMap<CommsTransportWrapper, RegistryInternals>()
+
+/**
+ * Which engine/comms session the avatar state belongs to.
+ *
+ * A registry keeps its transport subscriptions for the life of that transport and
+ * deliberately never removes them, so they can outlive the session that created them:
+ * `resetEngine` starts `transport.disconnect()` WITHOUT awaiting it, clears the
+ * allocator and unblocks a restart, so a late PEER_DISCONNECTED from the OLD transport
+ * can land after a NEW session has already allocated the same address — and the old
+ * registry would then free a mapping that now belongs to the new session. Stamping each
+ * registry with the generation it was built in, and no-oping its handlers once that
+ * generation is over, closes that without having to chase down listeners.
+ */
+let avatarSessionGeneration = 0
+
+/**
+ * Ends the current avatar session: retires every registry built in it and releases the
+ * process-global remote-player allocator. Called by the session owner (`resetEngine`)
+ * once every scene is disposed and the transport is disconnecting — never from a scene
+ * or subscription teardown, which share this state with live siblings.
+ */
+export function resetAvatarSessionState() {
+  avatarSessionGeneration++
+  playerEntityManager.clear()
+}
+
+type RegistryInternals = AvatarTransportRegistry & { readonly generation: number }
 
 function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTransportRegistry {
   const existing = avatarTransportRegistries.get(transport)
-  if (existing) return existing
+  // A registry from a previous session is inert (its handlers no-op), so a transport
+  // somehow reused across sessions gets a live one rather than the retired one.
+  if (existing && existing.generation === avatarSessionGeneration) return existing
+
+  const generation = avatarSessionGeneration
 
   const departedPeers = new Set<string>()
-  const liveSessions = new Map<string, Set<string>>()
+  // Per address: the ids of live sessions, plus a count of live sessions whose id the
+  // transport did not give us. `sid` is optional on the transport contract, so a
+  // reconnect can arrive without one; recording nothing for it let a stale disconnect
+  // for an OLD sid drain the set and retire the currently-live sid-less session.
+  // Counted rather than flagged so connect(no sid) twice is not indistinguishable from
+  // once — and an address-level (sid-less) disconnect clears both, so it cannot inflate
+  // without bound.
+  const liveSessions = new Map<string, { sids: Set<string>; unknown: number }>()
   const adoptedCallbacks = new Set<(address: string) => void>()
   const retiredCallbacks = new Set<(address: string) => void>()
   const MAX_DEPARTED_PEERS = limits.maxDepartedPeers // HAMMURABI_MAX_DEPARTED_PEERS
@@ -77,6 +114,8 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   }
 
   transport.events.on('PEER_CONNECTED', (event: { address: string; sid?: string }) => {
+    // Inert once this session is over: see avatarSessionGeneration.
+    if (generation !== avatarSessionGeneration) return
     const address = event.address.toLowerCase()
     // A reconnect makes the peer allocatable again. Done here, not in a system, so a
     // reconnect that lands while no system exists still clears the marker.
@@ -84,15 +123,20 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // Register THIS session so a late disconnect belonging to a PREVIOUS session
     // cannot retire it. A transport without per-session ids, or a repeated connect for
     // the same session, is idempotent — it is a Set.
-    if (event.sid !== undefined) {
-      const sessions = liveSessions.get(address)
-      if (sessions) sessions.add(event.sid)
-      else liveSessions.set(address, new Set([event.sid]))
+    let sessions = liveSessions.get(address)
+    if (sessions === undefined) {
+      sessions = { sids: new Set<string>(), unknown: 0 }
+      liveSessions.set(address, sessions)
     }
+    if (event.sid !== undefined) sessions.sids.add(event.sid)
+    else sessions.unknown++
     dispatch(adoptedCallbacks, address, 'peer-adopted')
   })
 
   transport.events.on('PEER_DISCONNECTED', (event: { address: string; sid?: string }) => {
+    // Inert once this session is over. Without this, a late disconnect from the old
+    // transport frees an allocator mapping that now belongs to the NEW session.
+    if (generation !== avatarSessionGeneration) return
     const address = event.address.toLowerCase()
 
     // Retire THIS session. If any OTHER session for the same address is still live —
@@ -107,8 +151,9 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // peer was never retired and its entity and pool slot leaked.
     const sessions = liveSessions.get(address)
     if (sessions !== undefined && event.sid !== undefined) {
-      sessions.delete(event.sid)
-      if (sessions.size > 0) return
+      sessions.sids.delete(event.sid)
+      // Still live if another id remains, or if a session we could not identify does.
+      if (sessions.sids.size > 0 || sessions.unknown > 0) return
     }
     liveSessions.delete(address)
 
@@ -138,9 +183,9 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     }
   })
 
-  const registry: AvatarTransportRegistry = {
+  const registry: RegistryInternals = {
+    generation,
     departedPeers,
-    liveSessions,
     onPeerAdopted(callback) {
       adoptedCallbacks.add(callback)
       return () => adoptedCallbacks.delete(callback)

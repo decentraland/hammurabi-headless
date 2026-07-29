@@ -21,7 +21,8 @@ jest.mock('../../../../src/lib/misc/network', () => ({
 }))
 
 const {
-  createAvatarCommunicationSystem
+  createAvatarCommunicationSystem,
+  resetAvatarSessionState
 } = require('../../../../src/lib/decentraland/communications/avatar-communication-system')
 const { playerEntityManager } = require('../../../../src/lib/decentraland/communications/player-entity-manager')
 const { playerIdentityDataComponent } = require('../../../../src/lib/decentraland/sdk-components/player-identity-data')
@@ -74,6 +75,53 @@ describe('avatar communication system entity lifecycle', () => {
   afterEach(() => {
     system.dispose()
     jest.resetAllMocks()
+  })
+
+  describe('when a stale transport emits a disconnect after the session was reset', () => {
+    it('should not free a mapping that now belongs to the new session', () => {
+      // A registry keeps its transport subscriptions for the life of that transport and
+      // never removes them, and resetEngine does not await transport.disconnect() before
+      // clearing the allocator and unblocking a restart — so a late departure from the
+      // OLD transport can land after a NEW session has already re-allocated the same
+      // address. Unguarded, the old registry frees the new session's mapping.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).not.toBeNull()
+
+      resetAvatarSessionState()
+
+      // The fresh session allocates the same address.
+      const reallocated = playerEntityManager.allocateEntityForPlayer('0xpeer', false)!
+
+      // The old transport finally reports the old session's departure.
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(reallocated)
+    })
+  })
+
+  describe('when a reconnect arrives without a session id', () => {
+    it('should keep the peer when a stale disconnect for the old session lands', () => {
+      // `sid` is optional on the transport contract, so a reconnect can arrive without
+      // one. Recording nothing for it let the stale disconnect below drain the set and
+      // retire the session that is actually live.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      const liveEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(liveEntity)
+    })
+
+    it('should still retire the peer on an address-level disconnect', () => {
+      // The sid-less live marker must not turn into a peer that can never be retired.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
   })
 
   describe('when a disconnect arrives without a session id', () => {
