@@ -15,6 +15,7 @@ import { getAssetBundleRegistryUrl } from "../environment"
 import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
 import { limits } from "../../misc/limits"
 import { limitLogger } from "../../misc/limit-logger"
+import { createRateLimitedErrorLogger } from "../../misc/logger"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -60,6 +61,20 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   const adoptedCallbacks = new Set<(address: string) => void>()
   const retiredCallbacks = new Set<(address: string) => void>()
   const MAX_DEPARTED_PEERS = limits.maxDepartedPeers // HAMMURABI_MAX_DEPARTED_PEERS
+  // One scene's callback must never be able to skip another scene's cleanup, so each
+  // dispatch is contained. Throttled because a callback that fails once tends to keep
+  // failing on every subsequent departure.
+  const logRegistryError = createRateLimitedErrorLogger()
+
+  function dispatch(callbacks: Set<(address: string) => void>, address: string, what: string) {
+    for (const callback of callbacks) {
+      try {
+        callback(address)
+      } catch (error: any) {
+        logRegistryError(`avatar registry: a scene's ${what} handler failed for ${address}`, error)
+      }
+    }
+  }
 
   transport.events.on('PEER_CONNECTED', (event: { address: string; sid?: string }) => {
     const address = event.address.toLowerCase()
@@ -74,7 +89,7 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
       if (sessions) sessions.add(event.sid)
       else liveSessions.set(address, new Set([event.sid]))
     }
-    for (const callback of adoptedCallbacks) callback(address)
+    dispatch(adoptedCallbacks, address, 'peer-adopted')
   })
 
   transport.events.on('PEER_DISCONNECTED', (event: { address: string; sid?: string }) => {
@@ -85,9 +100,16 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // disconnect — keep the peer: retiring it would make the live, reconnected client
     // invisible until it happens to send a movement packet, i.e. never if it is
     // standing still.
+    // A disconnect WITHOUT a session id is an address-level departure — the transport
+    // is telling us the peer is gone but cannot say which session, so every recorded
+    // session for it is over. Without this, a sid-less disconnect for a peer that DOES
+    // have recorded sessions left the set untouched and returned on `size > 0`, so the
+    // peer was never retired and its entity and pool slot leaked.
     const sessions = liveSessions.get(address)
-    if (sessions !== undefined && event.sid !== undefined) sessions.delete(event.sid)
-    if (sessions !== undefined && sessions.size > 0) return
+    if (sessions !== undefined && event.sid !== undefined) {
+      sessions.delete(event.sid)
+      if (sessions.size > 0) return
+    }
     liveSessions.delete(address)
 
     // Mark departed BEFORE notifying, so a straggler packet racing the callbacks is
@@ -104,13 +126,16 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
       departedPeers.delete(oldest)
     }
 
-    // Let every live system purge its own components and emit its own tombstone
-    // first; they read their local mirrors, not the allocator.
-    for (const callback of retiredCallbacks) callback(address)
-
-    // Then release the pool slot, unconditionally and exactly once per departure —
-    // never dependent on some system happening to still hold the peer locally.
-    playerEntityManager.freeEntityForPlayer(address)
+    try {
+      // Let every live system purge its own components and emit its own tombstone
+      // first; they read their local mirrors, not the allocator. Contained per scene:
+      // one scene throwing must not skip its siblings' cleanup.
+      dispatch(retiredCallbacks, address, 'peer-retired')
+    } finally {
+      // Release the pool slot unconditionally and exactly once per departure. In a
+      // `finally` so that nothing a scene does — however it fails — can leak the slot.
+      playerEntityManager.freeEntityForPlayer(address)
+    }
   })
 
   const registry: AvatarTransportRegistry = {

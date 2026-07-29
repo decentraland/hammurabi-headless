@@ -76,6 +76,78 @@ describe('avatar communication system entity lifecycle', () => {
     jest.resetAllMocks()
   })
 
+  describe('when a disconnect arrives without a session id', () => {
+    it('should retire the peer even though it has recorded sessions', () => {
+      // `sid` is optional on the event, so a transport can report a departure without
+      // saying which session ended. Deleting nothing and returning on `size > 0` left
+      // the peer live forever, leaking its entity and its pool slot.
+      transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).not.toBeNull()
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+  })
+
+  describe("when one scene's retire handler throws", () => {
+    let secondSystem: any
+    let secondSubscription: any
+    let peerEntity: number
+    let consoleError: jest.SpyInstance
+    let freeEntityForPlayer: jest.SpyInstance
+
+    beforeEach(() => {
+      secondSystem = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+      const firstSubscription = system.createSubscription()
+      secondSubscription = secondSystem.createSubscription()
+
+      transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
+      system.update()
+      secondSystem.update()
+      peerEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+      pullMessages(firstSubscription)
+      pullMessages(secondSubscription)
+
+      consoleError = jest.spyOn(console, 'error').mockImplementation(() => void 0)
+      // Fail BOTH scenes' teardown, so only a path that cannot be skipped by a failing
+      // scene is left to release the slot. jest.spyOn calls through once the queued
+      // one-off implementations are exhausted.
+      freeEntityForPlayer = jest
+        .spyOn(playerEntityManager, 'freeEntityForPlayer')
+        .mockImplementationOnce(() => {
+          throw new TypeError("first scene's teardown failed")
+        })
+        .mockImplementationOnce(() => {
+          throw new TypeError("second scene's teardown failed")
+        })
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-1' })
+      system.update()
+      secondSystem.update()
+    })
+
+    afterEach(() => {
+      freeEntityForPlayer.mockRestore()
+      consoleError.mockRestore()
+      secondSystem.dispose()
+    })
+
+    it('should still run the sibling scene’s cleanup', () => {
+      // Iterating the callbacks bare meant the first scene's throw skipped every
+      // later scene, leaving those scenes with a frozen ghost avatar.
+      const tombstones = pullMessages(secondSubscription)
+        .filter((message) => message.type === CrdtMessageType.DELETE_ENTITY)
+        .map((message) => message.entityId)
+
+      expect(tombstones).toEqual([peerEntity])
+    })
+
+    it('should still release the pool slot', () => {
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+    })
+  })
+
   describe('when a packet from a peer arrives after that peer disconnected', () => {
     beforeEach(() => {
       transport.events.emit('PEER_CONNECTED', { address: '0xpeer' })
