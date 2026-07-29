@@ -84,6 +84,22 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // session.
   const sessionCount = new Map<string, number>()
 
+  // THIS system's own address→entity mirror of the process-global allocator.
+  //
+  // `playerEntityManager` is shared by every avatar system in the process (one per
+  // scene, all wired to the same transport), but the LWW stores and the
+  // `deletedEntities` tombstones are per-system. Resolving a departing peer through
+  // the global allocator therefore only works for whichever system's
+  // PEER_DISCONNECTED listener happens to run FIRST: it calls removePlayerEntity,
+  // which frees the global mapping, and every sibling system then resolves `null`,
+  // purges nothing and emits no DELETE_ENTITY — leaving a ghost avatar frozen in
+  // those scenes forever.
+  //
+  // Mirroring locally makes each system's cleanup independent of listener order.
+  // Freeing the global slot stays safe: freeEntityForPlayer early-exits once the
+  // address is gone, so several systems calling it is harmless.
+  const ownedEntities = new Map<string, Entity>()
+
   // One tracker per live subscription: its highest emitted deletion sequence.
   const subscriptionTrackers = new Set<{ emittedSeq: number }>()
   let lastPrunedMinSeq = 0
@@ -271,13 +287,15 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       deletedEntities.delete(oldest)
     }
 
-    // Free the entity in the player entity manager
+    // Free the entity in the player entity manager. Idempotent across systems: a
+    // sibling may already have freed this address, in which case this is a no-op.
     playerEntityManager.freeEntityForPlayer(address)
 
     // Clear from profile cache and per-peer fetch state
     const normalizedAddress = normalizeAddress(address)
     profileCache.delete(normalizedAddress)
     profileFetchState.delete(normalizedAddress)
+    ownedEntities.delete(normalizedAddress)
   }
 
   function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
@@ -296,6 +314,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       if (!PlayerIdentityData.has(entity)) {
         PlayerIdentityData.createOrReplace(entity, { address: normalizedAddress, isGuest: true })
       }
+      // Mirror it locally even though another system allocated it: this system now
+      // writes components for that entity, so this system must be able to clean it
+      // up on disconnect regardless of which listener runs first (see ownedEntities).
+      ownedEntities.set(normalizedAddress, entity)
       return entity
     }
 
@@ -319,6 +341,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
     // Initialize with minimal identity data
     PlayerIdentityData.createOrReplace(entity, { address: normalizedAddress, isGuest: true })
+    ownedEntities.set(normalizedAddress, entity)
 
     return entity
   }
@@ -366,8 +389,11 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     }
     sessionCount.delete(normalizedAddress)
 
-    const entity = findPlayerEntityByAddress(event.address, false)
-    if (entity) {
+    // Resolve from THIS system's mirror, not the global allocator: a sibling system's
+    // listener may already have freed the global mapping, and we still have to purge
+    // our own stores and emit our own DELETE_ENTITY (see ownedEntities).
+    const entity = ownedEntities.get(normalizedAddress) ?? null
+    if (entity !== null) {
       removePlayerEntity(entity, event.address)
     }
 
@@ -543,11 +569,25 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       transport.events.off('profileMessage', handleProfileMessage)
       transport.events.off('chatMessage', handleChatMessage)
 
-      playerEntityManager.clear()
+      // Clear only what THIS system owns. playerEntityManager is a process-global
+      // singleton: clearing it here would drop sibling systems' live peer mappings
+      // and reset nextEntityNumber/entityVersions while they are still serving those
+      // peers — the same ownership bug this file fixes for subscription teardown, and
+      // the reset is what lets a later allocation hand a different address an entity
+      // id a surviving scene's VM still holds.
+      //
+      // Not a leak: pool slots are released on PEER_DISCONNECTED, which is a
+      // transport-level event every system sees, not on system teardown. A system
+      // disposed while peers are still connected SHOULD leave their global mappings
+      // intact, and a replacement system re-adopts them (findPlayerEntityByAddress
+      // backfills PlayerIdentityData and re-mirrors). Freeing the allocator wholesale
+      // needs an explicit transport/session owner, which does not exist yet.
       profileCache.clear()
+      profileFetchState.clear()
       deletedEntities.clear()
       departedPeers.clear()
       sessionCount.clear()
+      ownedEntities.clear()
     }
   }
 }

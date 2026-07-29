@@ -201,4 +201,52 @@ describe('avatar communication system entity lifecycle', () => {
       expect(identityPutsFor(subscription, preAllocatedEntity)).toHaveLength(1)
     })
   })
+
+  describe('when several avatar systems share one transport and a peer disconnects', () => {
+    let secondSystem: any
+    let firstSubscription: any
+    let secondSubscription: any
+    let peerEntity: number
+
+    const tombstonesFrom = (subscription: any) =>
+      pullMessages(subscription)
+        .filter((message) => message.type === CrdtMessageType.DELETE_ENTITY)
+        .map((message) => message.entityId)
+
+    beforeEach(() => {
+      // One avatar system per scene, every one wired to the SAME transport and sharing
+      // the process-global playerEntityManager, but each owning its own component
+      // stores and tombstones.
+      secondSystem = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+      firstSubscription = system.createSubscription()
+      secondSubscription = secondSystem.createSubscription()
+
+      transport.events.emit('position', { address: '0xpeer', data: positionData(1, 2, 3) })
+      system.update()
+      secondSystem.update()
+      peerEntity = playerEntityManager.getEntityForAddress('0xpeer')!
+      // Both subscriptions observe the entity before the departure, so a tombstone
+      // afterwards is genuinely new to each of them.
+      pullMessages(firstSubscription)
+      pullMessages(secondSubscription)
+
+      transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer' })
+      system.update()
+      secondSystem.update()
+    })
+
+    afterEach(() => secondSystem.dispose())
+
+    it('should emit DELETE_ENTITY from the system whose listener ran first', () => {
+      expect(tombstonesFrom(firstSubscription)).toEqual([peerEntity])
+    })
+
+    it('should emit DELETE_ENTITY from every sibling system too, not only the first', () => {
+      // The first listener frees the global address mapping, so a sibling resolving the
+      // departing peer through the allocator got `null`: it purged none of its own
+      // components and emitted no tombstone, leaving that scene with a frozen ghost
+      // avatar for the rest of the session.
+      expect(tombstonesFrom(secondSubscription)).toEqual([peerEntity])
+    })
+  })
 })
