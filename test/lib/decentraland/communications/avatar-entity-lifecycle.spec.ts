@@ -99,8 +99,9 @@ describe('avatar communication system entity lifecycle', () => {
       expect(hit).toHaveBeenCalledWith('maxTrackedPeerSessions', expect.any(String))
     })
 
-    it('should bound the sessions tracked for a single address', () => {
-      // One address reconnecting with an endless supply of new session ids.
+    it('should bound the exact session ids retained for a single address', () => {
+      // One address reconnecting with an endless supply of new session ids. Older
+      // sessions collapse into scalar liveness instead of retaining their strings.
       for (let i = 0; i < limits.maxSessionsPerPeer + 4; i++) {
         transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: `session-${i}` })
       }
@@ -386,6 +387,41 @@ describe('avatar communication system entity lifecycle', () => {
     })
   })
 
+  describe('when identified sessions exceed the per-peer SID retention cap', () => {
+    let liveEntity: number
+
+    beforeEach(() => {
+      for (let i = 0; i <= limits.maxSessionsPerPeer; i++) {
+        transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: `session-${i}` })
+      }
+
+      const entity = playerEntityManager.getEntityForAddress('0xpeer')
+      if (entity === null) {
+        throw new TypeError('the peer must have an entity before its retained sessions disconnect')
+      }
+      liveEntity = entity
+
+      // session-0 was collapsed out of the exact SID set. End every retained session.
+      for (let i = 1; i <= limits.maxSessionsPerPeer; i++) {
+        transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: `session-${i}` })
+      }
+    })
+
+    it('should keep the entity while the collapsed session is still live', () => {
+      expect(playerEntityManager.getEntityForAddress('0xpeer')).toEqual(liveEntity)
+    })
+
+    describe('and the collapsed session also disconnects', () => {
+      beforeEach(() => {
+        transport.events.emit('PEER_DISCONNECTED', { address: '0xpeer', sid: 'session-0' })
+      })
+
+      it('should retire the entity and release the pool slot', () => {
+        expect(playerEntityManager.getEntityForAddress('0xpeer')).toBeNull()
+      })
+    })
+  })
+
   describe('when a peer adopted from a data packet reconnects and the old disconnect is late', () => {
     let liveEntity: number
 
@@ -465,6 +501,29 @@ describe('avatar communication system entity lifecycle', () => {
     let replacement: any
 
     afterEach(() => replacement?.dispose())
+
+    describe('and an observed peer remains live without sending another packet', () => {
+      let replacementSubscription: { getUpdates(writer: any): void }
+      let liveEntity: number
+
+      beforeEach(() => {
+        transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })
+        const entity = playerEntityManager.getEntityForAddress('0xpeer')
+        if (entity === null) {
+          throw new TypeError('the peer must have an entity before the system is replaced')
+        }
+        liveEntity = entity
+
+        system.dispose()
+        replacement = createAvatarCommunicationSystem(transport as any, (position: any) => position)
+        replacementSubscription = replacement.createSubscription()
+        replacement.update()
+      })
+
+      it('should replay identity state into the replacement system', () => {
+        expect(identityPutsFor(replacementSubscription, liveEntity)).toHaveLength(1)
+      })
+    })
 
     it('should refuse a straggler for a peer that departed before the reload', () => {
       transport.events.emit('PEER_CONNECTED', { address: '0xpeer', sid: 'session-1' })

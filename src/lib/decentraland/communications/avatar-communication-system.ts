@@ -54,6 +54,12 @@ type AvatarTransportRegistry = {
    * disconnect with no record be treated conservatively instead of destructively.
    */
   noteObserved(address: string): void
+  /**
+   * Visit every address the registry currently considers observed and not departed.
+   * Used by a newly attached system to rebuild its per-scene component stores without
+   * waiting for each stationary peer to send another packet.
+   */
+  forEachObservedPeer(callback: (address: string) => void): void
   onPeerAdopted(callback: (address: string) => void): () => void
   onPeerRetired(callback: (address: string) => void): () => void
 }
@@ -112,14 +118,17 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   const generation = avatarSessionGeneration
 
   const departedPeers = new Set<string>()
-  // Per address: the ids of live sessions, plus a count of live sessions whose id the
-  // transport did not give us. `sid` is optional on the transport contract, so a
-  // reconnect can arrive without one; recording nothing for it let a stale disconnect
-  // for an OLD sid drain the set and retire the currently-live sid-less session.
-  // Counted rather than flagged so connect(no sid) twice is not indistinguishable from
-  // once — and an address-level (sid-less) disconnect clears both, so it cannot inflate
-  // without bound.
-  const liveSessions = new Map<string, { sids: Set<string>; unknown: number }>()
+  // Per address: a bounded set of exact live session ids, plus a scalar count for
+  // sessions whose identity is unavailable. That includes genuinely sid-less connects
+  // and exact ids collapsed out of the bounded set. Keeping collapsed liveness prevents
+  // the remaining exact disconnects from retiring a peer whose forgotten session is
+  // still live, without retaining attacker-controlled strings beyond the configured cap.
+  type PeerSessions = {
+    sids: Set<string>
+    untracked: number
+    untrackedSaturated: boolean
+  }
+  const liveSessions = new Map<string, PeerSessions>()
   const adoptedCallbacks = new Set<(address: string) => void>()
   const retiredCallbacks = new Set<(address: string) => void>()
   const MAX_DEPARTED_PEERS = limits.maxDepartedPeers // HAMMURABI_MAX_DEPARTED_PEERS
@@ -148,7 +157,7 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
    * records can then survive—the extra record belongs to the peer whose allocation
    * fails, and the next insertion can evict it.
    */
-  function recordFor(address: string): { sids: Set<string>; unknown: number } {
+  function recordFor(address: string): PeerSessions {
     const existing = liveSessions.get(address)
     if (existing !== undefined) return existing
 
@@ -168,9 +177,20 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
       limitLogger.hit('maxTrackedPeerSessions', address)
     }
 
-    const created = { sids: new Set<string>(), unknown: 0 }
+    const created: PeerSessions = { sids: new Set<string>(), untracked: 0, untrackedSaturated: false }
     liveSessions.set(address, created)
     return created
+  }
+
+  function addUntrackedSession(sessions: PeerSessions) {
+    if (sessions.untracked < Number.MAX_SAFE_INTEGER) {
+      sessions.untracked++
+    } else {
+      // Once the scalar count cannot represent another session exactly, fail
+      // conservatively: sid-specific disconnects can no longer prove that every
+      // collapsed session ended. An address-level disconnect still clears the record.
+      sessions.untrackedSaturated = true
+    }
   }
 
   function dispatch(callbacks: Set<(address: string) => void>, address: string, what: string) {
@@ -199,25 +219,27 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     // disconnects — would otherwise grow this for the life of the transport.
     const sessions = recordFor(address)
 
-    const trackedForPeer = sessions.sids.size + sessions.unknown
     if (event.sid !== undefined) {
-      // Re-announcing a sid we already hold is free; only a NEW one consumes budget.
-      if (!sessions.sids.has(event.sid) && trackedForPeer >= MAX_SESSIONS_PER_PEER) {
+      // Re-announcing a sid we already hold is free; only a NEW exact id consumes
+      // string-storage budget.
+      if (!sessions.sids.has(event.sid) && sessions.sids.size >= MAX_SESSIONS_PER_PEER) {
         const oldestSid = sessions.sids.values().next().value
-        if (oldestSid !== undefined) sessions.sids.delete(oldestSid)
-        else if (sessions.unknown > 0) sessions.unknown--
+        if (oldestSid !== undefined) {
+          sessions.sids.delete(oldestSid)
+          // The evicted sid may still be live. Collapse it into scalar liveness so
+          // disconnecting the retained ids cannot retire the address prematurely.
+          addUntrackedSession(sessions)
+        }
         limitLogger.hit('maxSessionsPerPeer', address)
       }
       sessions.sids.add(event.sid)
-    } else if (trackedForPeer < MAX_SESSIONS_PER_PEER) {
-      sessions.unknown++
     } else {
-      // Clamp rather than grow. TRADEOFF: with more than MAX_SESSIONS_PER_PEER
-      // concurrent UNIDENTIFIED sessions on one address, retiring the tracked ones can
-      // retire the peer while an untracked one is still live. That needs a transport
-      // that omits `sid` on many simultaneous sessions for a single address; the bound
-      // matters more, and an address-level disconnect clears the record either way.
-      limitLogger.hit('maxSessionsPerPeer', address)
+      // A number is fixed-size state, so count every sid-less session rather than
+      // dropping liveness merely to enforce the cap on attacker-controlled SID strings.
+      if (sessions.untracked >= MAX_SESSIONS_PER_PEER || sessions.untrackedSaturated) {
+        limitLogger.hit('maxSessionsPerPeer', address)
+      }
+      addUntrackedSession(sessions)
     }
     dispatch(adoptedCallbacks, address, 'peer-adopted')
   }
@@ -255,15 +277,15 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
         // slot rather than an active player going invisible.
         return
       }
-      if (!sessions.sids.delete(event.sid) && sessions.unknown > 0) {
+      if (!sessions.sids.delete(event.sid) && !sessions.untrackedSaturated && sessions.untracked > 0) {
         // The sid matches nothing we tracked, so it belongs to a session we could not
-        // identify (a connect that arrived without one). Consume that instead of
-        // ignoring the disconnect, which used to leave the peer live until an
-        // address-level disconnect happened to arrive.
-        sessions.unknown--
+        // identify or whose exact id was collapsed. Consume that scalar liveness
+        // instead of ignoring the disconnect, which would retain the peer forever.
+        sessions.untracked--
       }
-      // Still live if another id remains, or if a session we could not identify does.
-      if (sessions.sids.size > 0 || sessions.unknown > 0) return
+      // Still live if another exact id remains, if a collapsed session remains, or if
+      // the collapsed count saturated and can no longer be retired safely by id.
+      if (sessions.sids.size > 0 || sessions.untracked > 0 || sessions.untrackedSaturated) return
     }
     liveSessions.delete(address)
 
@@ -302,6 +324,19 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
     noteObserved(address: string) {
       if (generation !== avatarSessionGeneration) return
       recordFor(address)
+    },
+    forEachObservedPeer(callback) {
+      if (generation !== avatarSessionGeneration) return
+      // The callback may mirror an existing allocation and call noteObserved again,
+      // but it does not add a new address. Iterating the map directly is therefore safe
+      // and avoids allocating a snapshot proportional to the registry cap.
+      for (const address of liveSessions.keys()) {
+        try {
+          callback(address)
+        } catch (error: any) {
+          logRegistryError(`avatar registry: a scene's peer-replay handler failed for ${address}`, error)
+        }
+      }
     },
     detach() {
       transport.events.off('PEER_CONNECTED', onPeerConnected)
@@ -733,6 +768,11 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   transport.events.on('movement', handleMovement)
   transport.events.on('profileMessage', handleProfileMessage)
   transport.events.on('chatMessage', handleChatMessage)
+  // The registry outlives systems across hot reloads and late scene attachment.
+  // Rebuild this system's local stores now; stationary peers may send no future packet
+  // that would otherwise trigger adoption. Run after every transport handler is wired
+  // because adoption emits the initial profileMessage synchronously.
+  registry.forEachObservedPeer(handlePeerAdopted)
 
   // Public API for managing the avatar system
   return {
@@ -833,9 +873,8 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       // transport registry is touched: they are shared with sibling scenes and must
       // outlive this system, which is exactly what lets the departed-peer guard and
       // the pool slots survive a hot reload. Pool slots are released by the registry
-      // on PEER_DISCONNECTED, not by system teardown, and a replacement system
-      // re-adopts live peers on their next packet (findPlayerEntityByAddress backfills
-      // PlayerIdentityData and re-mirrors).
+      // on PEER_DISCONNECTED, not by system teardown, and a replacement system replays
+      // the registry's observed peers when it attaches.
       profileCache.clear()
       profileFetchState.clear()
       deletedEntities.clear()
