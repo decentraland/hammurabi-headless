@@ -51,6 +51,7 @@ import {
   createAvatarCommunicationSystem,
   AvatarCommunicationSystem
 } from '../../decentraland/communications/avatar-communication-system'
+import { createObservableEventQueue, SDK_OBSERVABLE_EVENTS } from './logic/observable-events'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
 import { createRateLimitedErrorLogger } from '../../misc/logger'
@@ -553,6 +554,10 @@ export class SceneContext implements EngineApiInterface {
       this._avatarSystem.update()
     }
 
+    // Derive the peer-driven observable events from this frame's peer set.
+    // After the avatar system's update, so positions are this tick's.
+    this.syncObservablePeerEvents()
+
     // mark the frame as processed. this signals the lateUpdate to respond to the scene with updates
     this.finishedProcessingIncomingMessagesOfTick = true
     return true
@@ -600,6 +605,16 @@ export class SceneContext implements EngineApiInterface {
         }
       }
       this.log('\n\n\n\n======================= Starting Scene Logs: ======================= \n\n')
+    }
+
+    // `sceneStart` fires once the first frame is actually being delivered — the
+    // same point ADR-148 defines as "assets loaded, the scene may now observe a
+    // consistent world". Guarded by its own flag rather than `currentTick === 0`
+    // because the block above returns early while assets are still loading, so
+    // tick 0 can be reached many times.
+    if (!this.emittedSceneStart) {
+      this.emittedSceneStart = true
+      this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.sceneStart, {})
     }
 
     const outMessages: Uint8Array[] = []
@@ -858,7 +873,101 @@ export class SceneContext implements EngineApiInterface {
     return this._avatarSystem
   }
 
+  /**
+   * Derives the peer-driven SDK observable events by diffing this frame's peers
+   * against the last frame's.
+   *
+   * Polling rather than hooking the avatar system's callbacks: connected,
+   * disconnected, enter-scene, leave-scene and profile-changed all fall out of
+   * the same diff, and a peer that is adopted from a data packet (LiveKit emits
+   * no ParticipantConnected for peers already in the room when we joined) would
+   * be missed by a connect-event hook.
+   */
+  private syncObservablePeerEvents() {
+    const system = this._avatarSystem
+    if (!system) return
+
+    // Every event this produces is peer-derived; if the scene wants none of
+    // them, skip the walk entirely rather than diffing for nothing.
+    const wantsAny =
+      this.observableEvents.isSubscribed(SDK_OBSERVABLE_EVENTS.playerConnected) ||
+      this.observableEvents.isSubscribed(SDK_OBSERVABLE_EVENTS.playerDisconnected) ||
+      this.observableEvents.isSubscribed(SDK_OBSERVABLE_EVENTS.enterScene) ||
+      this.observableEvents.isSubscribed(SDK_OBSERVABLE_EVENTS.leaveScene) ||
+      this.observableEvents.isSubscribed(SDK_OBSERVABLE_EVENTS.profileChanged)
+
+    const peers = system.listKnownPeers()
+
+    if (!wantsAny) {
+      // Still track the current set, so subscribing mid-session does not
+      // immediately replay every already-present peer as a fresh connect.
+      this.observedPeers.clear()
+      for (const peer of peers) {
+        this.observedPeers.set(peer.address, {
+          inScene: peer.worldPosition !== null && this.isWorldPositionInsideScene(peer.worldPosition),
+          profileVersion: Number.isFinite(peer.profile?.version) ? peer.profile.version : -1
+        })
+      }
+      return
+    }
+
+    const seen = new Set<string>()
+
+    for (const peer of peers) {
+      seen.add(peer.address)
+      const inScene = peer.worldPosition !== null && this.isWorldPositionInsideScene(peer.worldPosition)
+      const profileVersion = Number.isFinite(peer.profile?.version) ? peer.profile.version : -1
+      const previous = this.observedPeers.get(peer.address)
+
+      if (!previous) {
+        this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.playerConnected, { userId: peer.address })
+        if (inScene) {
+          this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.enterScene, { userId: peer.address })
+        }
+      } else {
+        if (inScene !== previous.inScene) {
+          this.observableEvents.emit(
+            inScene ? SDK_OBSERVABLE_EVENTS.enterScene : SDK_OBSERVABLE_EVENTS.leaveScene,
+            { userId: peer.address }
+          )
+        }
+        // Only forward a version that moved FORWARD: profile announcements are
+        // peer-controlled and an out-of-order or replayed lower version is not a
+        // change the scene should see.
+        if (profileVersion > previous.profileVersion) {
+          this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.profileChanged, {
+            ethAddress: peer.address,
+            version: profileVersion
+          })
+        }
+      }
+
+      this.observedPeers.set(peer.address, { inScene, profileVersion })
+    }
+
+    for (const [address, previous] of this.observedPeers) {
+      if (seen.has(address)) continue
+      // A peer that leaves while inside the scene leaves the scene first, so a
+      // scene tracking occupancy does not end up with a stale occupant.
+      if (previous.inScene) {
+        this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.leaveScene, { userId: address })
+      }
+      this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.playerDisconnected, { userId: address })
+      this.observedPeers.delete(address)
+    }
+  }
+
   private incomingNetworkMessages: Uint8Array[] = []
+  /**
+   * SDK observable events (`EngineApi.subscribe` / `sendBatch`). Per scene, so a
+   * hot reload starts with no subscriptions and no backlog.
+   */
+  readonly observableEvents = createObservableEventQueue()
+  // Peer state as of the last observable-event sync, for diffing. Only holds
+  // peers the avatar system currently owns an entity for, so it is bounded by
+  // the remote-player pool.
+  private readonly observedPeers = new Map<string, { inScene: boolean; profileVersion: number }>()
+  private emittedSceneStart = false
   // kept so dispose() can unsubscribe it — without this, every hot reload leaked
   // a handler that kept filling its dead context's queue (same entityId check
   // passes for the reloaded scene)
@@ -875,7 +984,19 @@ export class SceneContext implements EngineApiInterface {
     this._transport = transport
 
     // Create avatar communication system for this scene
-    this._avatarSystem = createAvatarCommunicationSystem(transport, (position) => globalCoordinatesToSceneCoordinates(this, position))
+    // A replacement avatar system starts with no peers and re-adopts them from
+    // scratch, so last session's peer snapshot must not survive: it would
+    // suppress the playerConnected/onEnterScene events for every peer that is
+    // still there, and those peers' entities are genuinely new.
+    this.observedPeers.clear()
+
+    this._avatarSystem = createAvatarCommunicationSystem(
+      transport,
+      (position) => globalCoordinatesToSceneCoordinates(this, position),
+      undefined,
+      (address, emoteUrn) =>
+        this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.playerExpression, { expressionId: emoteUrn })
+    )
 
     // Add the avatar system subscription to this scene's subscriptions
     this.subscriptions.push(this._avatarSystem.createSubscription())
@@ -883,7 +1004,19 @@ export class SceneContext implements EngineApiInterface {
     this.sceneMessageBusHandler = (event) => {
       if (event.data.sceneId === this.entityId) {
         if (event.data.data.byteLength) {
-          const [_, data] = decodeMessage(event.data.data)
+          const [msgType, data] = decodeMessage(event.data.data)
+
+          // The `comms` observable carries the STRING message-bus payload only
+          // (the reference client's SDKMessageBus path). Binary MessageBus
+          // traffic is the SDK's own network protocol, not scene-authored chat,
+          // and decoding it as text would hand scenes mojibake.
+          if (msgType === MsgType.String && this.observableEvents.isSubscribed(SDK_OBSERVABLE_EVENTS.comms)) {
+            this.observableEvents.emit(SDK_OBSERVABLE_EVENTS.comms, {
+              sender: event.address,
+              message: textDecoder.decode(data)
+            })
+          }
+
           const senderBytes = textEncoder.encode(event.address)
           // The sender length is framed in a single byte; a peer-controlled
           // identity longer than that would wrap and corrupt the framing scene
@@ -909,6 +1042,7 @@ export class SceneContext implements EngineApiInterface {
 }
 
 const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
 
 /**
  * MsgType utils to diff between old string messages, and new uint8Array messages.

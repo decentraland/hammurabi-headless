@@ -62,6 +62,7 @@ export interface Limits {
   maxSendMessages: number
   maxCommsMessageBytes: number
   maxSignedFetchRedirects: number
+  maxObservableEventQueue: number
 
   // --- Fetch / network / assets / WebSocket ---
   fetchTimeoutMs: number
@@ -194,6 +195,10 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxSendMessages', env: 'HAMMURABI_MAX_SEND_MESSAGES', def: 512, min: 1 },
   { key: 'maxCommsMessageBytes', env: 'HAMMURABI_MAX_COMMS_MESSAGE_BYTES', def: 30_000, min: 1 },
   { key: 'maxSignedFetchRedirects', env: 'HAMMURABI_MAX_SIGNED_FETCH_REDIRECTS', def: 5, min: 0 },
+  // Queued SDK observable events awaiting EngineApi.sendBatch. A scene can
+  // subscribe and then never poll (the SDK only polls while an observable has
+  // listeners), so peer churn and chat would otherwise grow this without bound.
+  { key: 'maxObservableEventQueue', env: 'HAMMURABI_MAX_OBSERVABLE_EVENT_QUEUE', def: 1_024, min: 1 },
 
   // Fetch / network / assets / WS
   { key: 'fetchTimeoutMs', env: 'HAMMURABI_FETCH_TIMEOUT_MS', def: 15_000, min: 100 },

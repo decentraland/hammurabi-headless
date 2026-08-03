@@ -382,7 +382,17 @@ export function createAvatarCommunicationSystem(
   // Injectable so a test can drive a resolver whose cache/debounce/in-flight state it
   // owns. The default is process-wide on purpose (emote urns repeat across peers and
   // scenes), which is exactly what makes it unusable as shared test state.
-  metadataResolver: EmoteMetadataResolver = emoteMetadataResolver
+  metadataResolver: EmoteMetadataResolver = emoteMetadataResolver,
+  /**
+   * Fired for every accepted remote emote, after validation and entity
+   * resolution but BEFORE the loop-metadata lookup — the SDK's
+   * `playerExpression` observable carries only the expression id, so making it
+   * wait on a registry round-trip (which can be a cooldown or ceiling miss)
+   * would delay or drop an event that does not depend on the answer.
+   *
+   * Optional so the avatar system stays usable without an owning SceneContext.
+   */
+  onPlayerExpression?: (address: string, emoteUrn: string) => void
 ) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
@@ -949,6 +959,18 @@ export function createAvatarCommunicationSystem(
     const normalizedAddress = normalizeAddress(event.address)
     const entity = findPlayerEntityByNormalizedAddress(normalizedAddress, true)
     if (!entity) return
+
+    // Contained: this dispatches into scene-owned code, and a throw here would
+    // abort the transport emit for this packet (skipping every later listener)
+    // and log unthrottled once per packet — the same peer-triggerable stderr
+    // flood the thenable check below guards against.
+    if (onPlayerExpression) {
+      try {
+        onPlayerExpression(normalizedAddress, emoteUrn)
+      } catch (error: any) {
+        logEmoteError('player expression observer threw', error)
+      }
+    }
 
     const loop = metadataResolver.resolveLoop(emoteUrn, normalizedAddress)
     if (typeof loop === 'boolean') {
