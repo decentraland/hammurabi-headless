@@ -2,10 +2,10 @@ import { Quaternion, Vector3 } from "@babylonjs/core"
 import { ReadWriteByteBuffer } from "../ByteBuffer"
 import { ComponentDefinition } from "../crdt-internal/components"
 import { createLwwStore } from "../crdt-internal/last-write-win-element-set"
-import { DeleteEntity } from "../crdt-wire-protocol"
+import { AppendValueOperation, DeleteEntity } from "../crdt-wire-protocol"
 import { playerIdentityDataComponent } from "../sdk-components/player-identity-data"
 import { avatarBaseComponent } from "../sdk-components/avatar-base"
-import { avatarEquippedDataComponent } from "../sdk-components/avatar-customizations"
+import { avatarEmoteCommandComponent, avatarEquippedDataComponent } from "../sdk-components/avatar-customizations"
 import { transformComponent } from "../sdk-components/transform-component"
 import { Entity } from "../types"
 import { CommsTransportWrapper } from "./CommsTransportWrapper"
@@ -16,6 +16,8 @@ import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } fr
 import { limits } from "../../misc/limits"
 import { limitLogger } from "../../misc/limit-logger"
 import { createRateLimitedErrorLogger } from "../../misc/logger"
+import { createEmoteAppendLog } from "./emote-append-log"
+import { EmoteMetadataResolver, emoteMetadataResolver } from "./emote-metadata"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -361,7 +363,14 @@ function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTra
   return registry
 }
 
-export function createAvatarCommunicationSystem(transport: CommsTransportWrapper, worldToScene: (position: Vector3) => Vector3) {
+export function createAvatarCommunicationSystem(
+  transport: CommsTransportWrapper,
+  worldToScene: (position: Vector3) => Vector3,
+  // Injectable so a test can drive a resolver whose cache/debounce/in-flight state it
+  // owns. The default is process-wide on purpose (emote urns repeat across peers and
+  // scenes), which is exactly what makes it unusable as shared test state.
+  metadataResolver: EmoteMetadataResolver = emoteMetadataResolver
+) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
   const AvatarEquippedData = createLwwStore(avatarEquippedDataComponent)
@@ -417,9 +426,54 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // address is gone, so several systems calling it is harmless.
   const ownedEntities = new Map<string, Entity>()
 
-  // One tracker per live subscription: its highest emitted deletion sequence.
-  const subscriptionTrackers = new Set<{ emittedSeq: number }>()
+  // Pending AvatarEmoteCommand appends. NOT a component store: 1088 is a GrowOnly
+  // value set whose only drain empties one shared queue, which the several
+  // subscriptions this system hands out would fight over (see emote-append-log).
+  const emoteAppendLog = createEmoteAppendLog()
+  // Scratch for serializing one emote payload. The bytes are COPIED into the log, so
+  // one buffer is reused instead of allocating per emote.
+  const emoteSerializationScratch = new ReadWriteByteBuffer()
+  // Monotonic counter for PBAvatarEmoteCommand.timestamp, which the proto documents as
+  // exactly that. Deliberately host-side: the reference client fills the field with its
+  // own scene tick, `PlayerEmote.incrementalId` is never set by that client (it would
+  // always be 0), and `PlayerEmote.timestamp` is peer-controlled client uptime — none of
+  // which belong in the key the scene's value set sorts and trims by. The field is a
+  // proto uint32, so protobufjs wraps it (`value >>> 0`); reaching that needs ~4 billion
+  // appends in one process, and the only consequence is one ordering glitch at the wrap.
+  //
+  // Stamped when the append is QUEUED, which is also when the reference client stamps it
+  // (it writes its current scene tick, and only once the emote has finished loading).
+  //
+  // The alternative — stamping on packet arrival — reads better for two emotes played back
+  // to back whose lookups resolve out of order, but a value set is the wrong place for a
+  // non-monotonic key. `gotUpdated` (crdt-internal/grow-only-set.ts, which mirrors the
+  // SDK's implementation) re-sorts a row as soon as its newest key is <= its predecessor
+  // and then trims with `shift()` from the FRONT, so an out-of-order lower key arriving at
+  // a full row is precisely what gets discarded — the emote would be dropped outright.
+  // Short of that it still sorts behind values the scene has already consumed, so a scene
+  // tracking the highest key it processed never observes it. Queue-time stamping keeps the
+  // key monotonic in delivery order, at the cost of an emote delayed by a metadata lookup
+  // sorting after one played just behind it.
+  //
+  // Derived from the log's own sequence rather than a second counter of its own: the two
+  // would be equal by construction today, and a second push site added later would
+  // silently desynchronise the sort key from delivery order — which is the bug this
+  // paragraph exists to prevent.
+  const nextEmoteTimestamp = () => emoteAppendLog.sequence + 1
+  // Appends are only drained up to here. Raised in update() once the LWW stores have
+  // committed their dirty state, because that is what makes their deltas dumpable — an
+  // append is dumpable the instant it is pushed, so without this gate a packet landing
+  // after update() would deliver its APPEND_VALUE a frame BEFORE the PlayerIdentityData
+  // PUT of the very entity it names.
+  let committedEmoteSeq = 0
+  const MAX_EMOTE_URN_BYTES = limits.maxEmoteUrnBytes // HAMMURABI_MAX_EMOTE_URN_BYTES
+  const logEmoteError = createRateLimitedErrorLogger()
+
+  // One tracker per live subscription: its highest emitted deletion sequence and its
+  // highest emitted emote-append sequence.
+  const subscriptionTrackers = new Set<{ emittedSeq: number; emittedEmoteSeq: number }>()
   let lastPrunedMinSeq = 0
+  let lastPrunedEmoteSeq = 0
 
   // Drop tombstones every live subscription has already emitted. A tombstone
   // only exists to deliver DELETE_ENTITY to subscriptions that saw the entity;
@@ -441,6 +495,21 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     for (const [entity, seq] of deletedEntities) {
       if (seq <= minEmitted) deletedEntities.delete(entity)
     }
+  }
+
+  // Drop emote appends every live subscription has already emitted. Same low-water-mark
+  // reasoning (and the same stalled-subscription short-circuit) as the tombstone prune
+  // above; a subscription created later starts at the current sequence, so it never
+  // needs older entries.
+  function pruneEmittedEmotes() {
+    if (emoteAppendLog.size === 0) return
+    let minEmitted = emoteAppendLog.sequence
+    for (const tracker of subscriptionTrackers) {
+      if (tracker.emittedEmoteSeq < minEmitted) minEmitted = tracker.emittedEmoteSeq
+    }
+    if (minEmitted <= lastPrunedEmoteSeq) return
+    lastPrunedEmoteSeq = minEmitted
+    emoteAppendLog.pruneUpTo(minEmitted)
   }
 
   // Cache for profiles fetched from Catalyst
@@ -575,6 +644,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   function removePlayerEntity(entity: Entity, address: string) {
+    // An append still queued behind this entity's DELETE_ENTITY describes an entity the
+    // scene is about to be told is gone. First, because it cannot throw.
+    emoteAppendLog.purgeEntity(entity)
+
     for (const component of listOfComponentsToSynchronize) {
       // purge (not just delete): peer entity ids are generationally versioned so
       // this id never comes back, these stores receive no remote CRDT updates
@@ -746,6 +819,67 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     }
   }
 
+  // Serialize + queue one AvatarEmoteCommand append for this entity. Serialization
+  // happens ONCE here (not per subscription) and the bytes are shared by every
+  // subscription that has yet to drain them.
+  const appendEmote = (entity: Entity, emoteUrn: string, loop: boolean) => {
+    emoteSerializationScratch.resetBuffer()
+    avatarEmoteCommandComponent.serialize(
+      { emoteUrn, loop, timestamp: nextEmoteTimestamp() },
+      emoteSerializationScratch
+    )
+    emoteAppendLog.push(entity, emoteSerializationScratch.toCopiedBinary())
+  }
+
+  const handlePlayerEmote = (event: { address: string, data: any }) => {
+    const d = event.data
+    // A stop is not a playback event: the reference client tears the animation down and
+    // writes no component for it, and the SDK component cannot express "stopped".
+    if (d?.isStopping === true) return
+
+    const emoteUrn = d?.urn
+    if (typeof emoteUrn !== 'string' || emoteUrn.length === 0) return
+    // Peer-controlled string headed for every scene's CRDT — bound it before it gets
+    // there. Throttled log: a peer could otherwise spam this at its full packet rate.
+    if (Buffer.byteLength(emoteUrn) > MAX_EMOTE_URN_BYTES) {
+      limitLogger.hit('maxEmoteUrnBytes', event.address)
+      return
+    }
+
+    const entity = findPlayerEntityByAddress(event.address, true)
+    if (!entity) return
+
+    const normalizedAddress = normalizeAddress(event.address)
+    const loop = metadataResolver.resolveLoop(emoteUrn, normalizedAddress)
+    if (typeof loop === 'boolean') {
+      appendEmote(entity, emoteUrn, loop)
+      return
+    }
+    // Anything that is neither a boolean nor a thenable would throw below, and a throw
+    // here aborts the whole transport emit (skipping every later listener) and logs
+    // unthrottled once per packet — a peer-triggerable stderr flood. resolveLoop is
+    // typed to return only these two shapes; this is the belt to that braces.
+    if (typeof loop?.then !== 'function') {
+      logEmoteError('emote loop resolver returned an unexpected value', new Error(typeof loop))
+      return
+    }
+
+    // A metadata lookup is in flight. resolveLoop never rejects (it resolves `false` on
+    // failure), but keep the chain guarded so a surprise can never surface as an
+    // unhandled rejection out of a transport event handler.
+    loop
+      .then((resolved) => {
+        // The peer may have departed — or reconnected onto a fresh entity — while the
+        // lookup was in flight. Consult THIS system's mirror rather than the global
+        // allocator: `ownedEntities` is what the rest of this system trusts for the
+        // mapping (see its declaration), and it cannot be confused by an id reissued
+        // after a session reset.
+        if (ownedEntities.get(normalizedAddress) !== entity) return
+        appendEmote(entity, emoteUrn, resolved)
+      })
+      .catch((error) => logEmoteError('Failed to append avatar emote command', error))
+  }
+
   // ADR-204: Use profileMessage for profile version announcements
   const handleProfileMessage = async (event: { address: string, data: any }) => {
     const address = normalizeAddress(event.address)
@@ -766,6 +900,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   const unsubscribePeerRetired = registry.onPeerRetired(handlePeerRetired)
   transport.events.on('position', handlePosition)
   transport.events.on('movement', handleMovement)
+  transport.events.on('playerEmote', handlePlayerEmote)
   transport.events.on('profileMessage', handleProfileMessage)
   transport.events.on('chatMessage', handleChatMessage)
   // The registry outlives systems across hot reloads and late scene attachment.
@@ -791,7 +926,18 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       // Once per tick (not per subscription in getUpdates): the prune scans
       // all trackers + all tombstones, and the emittedSeq values it needs only
       // advance once per frame anyway — pruning here just trails by one frame.
+      // Only NOW may the appends queued so far be drained: the commits above are what
+      // make the LWW deltas of the same entities dumpable (see committedEmoteSeq).
+      committedEmoteSeq = emoteAppendLog.sequence
       pruneEmittedTombstones()
+      pruneEmittedEmotes()
+    },
+
+    // Diagnostics: emote appends still awaiting delivery. Should return to 0 once every
+    // live subscription has drained and a tick has pruned — i.e. the log does not
+    // accumulate over a session.
+    pendingEmoteAppends() {
+      return emoteAppendLog.size
     },
 
     // Create subscription for CRDT synchronization
@@ -809,7 +955,10 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       // Starting at 0 made a fresh subscription's first getUpdates emit a
       // DELETE_ENTITY for every retained tombstone — deletes for entities that
       // subscription had never been told about.
-      const tracker = { emittedSeq: deletionSequence }
+      // Emote appends start at the CURRENT sequence for the same reason: this
+      // subscription begins from a state dump that never contained those emotes, and
+      // emotes are events — there is no backlog to re-synchronize.
+      const tracker = { emittedSeq: deletionSequence, emittedEmoteSeq: emoteAppendLog.sequence }
       subscriptionTrackers.add(tracker)
 
       return {
@@ -855,6 +1004,34 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
             const newTick = component.dumpCrdtDeltas(writer, tick)
             state.set(component, newTick)
           }
+
+          // Emote appends go LAST, after the component deltas above: a peer adopted by
+          // its own emote packet has its PlayerIdentityData PUT in this same buffer, and
+          // that must reach the scene before an APPEND_VALUE for the entity. Bounded by
+          // committedEmoteSeq so an append can never outrun the commit that made those
+          // deltas dumpable.
+          emoteAppendLog.forEachAfter(tracker.emittedEmoteSeq, committedEmoteSeq, (entry) => {
+            AppendValueOperation.write(
+              {
+                entityId: entry.entityId,
+                componentId: avatarEmoteCommandComponent.componentId,
+                // Lamport timestamp is unused for GrowOnly sets (the value carries its
+                // own ordering key), so the wire header stays 0 — same as the GOS store.
+                timestamp: 0,
+                data: entry.data
+              },
+              writer
+            )
+            // Per entry, not after the loop: a partial buffer is still forwarded to the
+            // scene, so progress must be recorded as it happens.
+            tracker.emittedEmoteSeq = entry.seq
+          })
+          // NEVER backwards. This tracker may have been created with a cursor ABOVE the
+          // watermark — `createSubscription` initializes it to the log's newest sequence
+          // so a latecomer gets no backlog, and pushes since the last tick are not yet
+          // committed. Assigning the watermark unconditionally would rewind that cursor
+          // and hand the latecomer exactly the backlog it must not see.
+          tracker.emittedEmoteSeq = Math.max(tracker.emittedEmoteSeq, committedEmoteSeq)
         },
       }
     },
@@ -866,6 +1043,7 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       unsubscribePeerRetired()
       transport.events.off('position', handlePosition)
       transport.events.off('movement', handleMovement)
+      transport.events.off('playerEmote', handlePlayerEmote)
       transport.events.off('profileMessage', handleProfileMessage)
       transport.events.off('chatMessage', handleChatMessage)
 

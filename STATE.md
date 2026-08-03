@@ -38,6 +38,10 @@
   - [ ] Realm with city loading
 - [ ] Communications
   - [ ] update ADR
+  - [x] Exposing remote players' emotes to scenes (`AvatarEmoteCommand`, component 1088).
+        Inbound only: rfc4 `playerEmote` becomes an APPEND_VALUE per scene. Note the
+        `Playing emotes` item below stays unchecked — that is avatar *rendering*, which a
+        headless server never does.
   - [ ] Parse communications connection strings [ADR-180](https://adr.decentraland.org/adr/ADR-180)
     - [ ] Connect WebSocket transport ([ADR-105](https://adr.decentraland.org/adr/ADR-105))
     - [ ] Exposing transports to avatars scenes [ADR-?]
