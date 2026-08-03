@@ -4,6 +4,7 @@ import { PBMeshRenderer } from "@dcl/protocol/out-js/decentraland/sdk/components
 import { ComponentType } from "../crdt-internal/components";
 import { memoize } from "../../misc/memoize";
 import { baseMaterial } from '../../babylon/scene/BabylonEntity';
+import { createCylinderMesh } from '../../babylon/scene/logic/primitive-meshes';
 import { setMeshRendererMaterial } from './material-component';
 
 const baseBox = memoize((scene: BABYLON.Scene) => {
@@ -78,6 +79,16 @@ export const meshRendererComponent = declareComponentUsingProtobufJs(PBMeshRende
       mesh.setEnabled(true)
     } else if (info.mesh?.$case === 'sphere') {
       mesh = baseSphere(entity.getScene()).clone()
+      mesh.parent = entity
+      mesh.setEnabled(true)
+    } else if (info.mesh?.$case === 'cylinder') {
+      // Built per entity rather than cloned from a template: radiusTop/
+      // radiusBottom are part of the component value, so the geometry differs
+      // between entities. Shares createCylinderMesh with the collider so a
+      // cylinder's collider cannot drift from the shape it stands in for.
+      const { radiusTop, radiusBottom } = info.mesh.cylinder
+      mesh = createCylinderMesh(entity.getScene(), 'cylinder-shape', radiusTop, radiusBottom)
+      mesh.material = baseMaterial(entity.getScene())
       mesh.parent = entity
       mesh.setEnabled(true)
     } else if (info.mesh?.$case === 'plane') {
