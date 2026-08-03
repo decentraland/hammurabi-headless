@@ -690,6 +690,7 @@ export function createAvatarCommunicationSystem(
     profileFetchState.delete(normalizedAddress)
     ownedEntities.delete(normalizedAddress)
     lastCommsPosLogMs.delete(normalizedAddress)
+    lastWorldPosition.delete(normalizedAddress)
   }
 
   function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
@@ -784,6 +785,16 @@ export function createAvatarCommunicationSystem(
   // retains; this only avoids the second, intermediate allocation per packet
   const tmpWorldPosition = new Vector3()
 
+  // Last WORLD position seen per peer, for `~system/Players.getPlayersInScene`.
+  // The Transform store holds SCENE-space positions (worldToScene is applied on
+  // the way in), which cannot answer "is this peer inside scene X" for any scene
+  // but this one — so the pre-conversion value is kept here.
+  //
+  // Bounded like lastCommsPosLogMs: an entry is only created for an address that
+  // resolved to an entity (so at most one per pool slot) and removePlayerEntity
+  // clears it on disconnect.
+  const lastWorldPosition = new Map<string, Vector3>()
+
   // DEBUG-only comms attribution tracer (opt-in). Logs which ADDRESS each
   // position/movement packet was attributed to (by LiveKit participant identity)
   // and the raw coordinates it carried, throttled per address. This is the
@@ -821,8 +832,18 @@ export function createAvatarCommunicationSystem(
     )
   }
 
-  const putPlayerTransform = (entity: Entity, data: any, rotation: Quaternion) => {
+  const putPlayerTransform = (entity: Entity, address: string, data: any, rotation: Quaternion) => {
     tmpWorldPosition.set(data.positionX, data.positionY, data.positionZ)
+
+    // Record BEFORE the conversion: worldToScene returns the vector the store
+    // retains, and it is scene-local.
+    const known = lastWorldPosition.get(address)
+    if (known) {
+      known.copyFrom(tmpWorldPosition)
+    } else {
+      lastWorldPosition.set(address, tmpWorldPosition.clone())
+    }
+
     Transform.createOrReplace(entity, {
       position: worldToScene(tmpWorldPosition),
       scale: Vector3.One(),
@@ -846,7 +867,7 @@ export function createAvatarCommunicationSystem(
       // Log only after allocation succeeds, so the throttle map gets an entry
       // only for an address that has an entity (cleaned up in removePlayerEntity).
       if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('position', normalizeAddress(event.address), d)
-      putPlayerTransform(entity, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
+      putPlayerTransform(entity, normalizeAddress(event.address), event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
     }
   }
 
@@ -861,7 +882,7 @@ export function createAvatarCommunicationSystem(
     if (entity) {
       // Log only after allocation succeeds (see handlePosition).
       if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('movement', normalizeAddress(event.address), d)
-      putPlayerTransform(entity, event.data, Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY))
+      putPlayerTransform(entity, normalizeAddress(event.address), event.data, Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY))
     }
   }
 
@@ -1092,6 +1113,32 @@ export function createAvatarCommunicationSystem(
       }
     },
 
+    /**
+     * Read-only view of the peers this system currently owns an entity for, for
+     * `~system/Players`. Positions are WORLD-space (pre-`worldToScene`) so a
+     * caller can test them against any scene's parcels; a peer that has been
+     * adopted but has not sent a position yet reports `null`.
+     *
+     * Returns a snapshot: the caller must not retain the vectors, which are
+     * reused in place as packets arrive.
+     */
+    listKnownPeers(): Array<{ address: string; worldPosition: Vector3 | null; profile: any | null }> {
+      const result: Array<{ address: string; worldPosition: Vector3 | null; profile: any | null }> = []
+      for (const address of ownedEntities.keys()) {
+        result.push({
+          address,
+          worldPosition: lastWorldPosition.get(address) ?? null,
+          profile: profileCache.get(address)?.profile ?? null
+        })
+      }
+      return result
+    },
+
+    /** The cached profile for a peer, or null when none has been resolved yet. */
+    getKnownProfile(address: string): any | null {
+      return profileCache.get(normalizeAddress(address))?.profile ?? null
+    },
+
     // Cleanup function
     dispose() {
       // Remove event listeners to prevent duplicates on hot-reload
@@ -1113,6 +1160,7 @@ export function createAvatarCommunicationSystem(
       profileFetchState.clear()
       deletedEntities.clear()
       ownedEntities.clear()
+      lastWorldPosition.clear()
     }
   }
 }

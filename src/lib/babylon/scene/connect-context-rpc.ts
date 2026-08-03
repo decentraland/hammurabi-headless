@@ -14,6 +14,8 @@ import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/ker
 import { UserActionModuleServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/user_action_module.gen'
 import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/restricted_actions.gen'
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
+import { PlayersServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/players.gen'
+import { EnvironmentApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/environment_api.gen'
 import { Scene } from '@dcl/schemas'
 import { Authenticator } from '@dcl/crypto'
 import { sceneIdentity, currentRealm, StorageDelegation, CurrentRealm } from '../../decentraland/state'
@@ -110,6 +112,60 @@ export function getStorageSigningStrategy(
       chainProvider: (payload: string) =>
         Authenticator.createSimpleAuthChain(payload, account.address, Authenticator.createSignature(account, payload)),
       extraHeaders: { 'x-authoritative-scope': scopeHeader }
+    }
+  }
+}
+
+/**
+ * Whether the current realm is a preview deployment. Same rule
+ * `updateStaticEntities` uses for RealmInfo.isPreview, so EnvironmentApi and the
+ * RealmInfo component cannot disagree.
+ */
+function isPreviewRealm(): boolean {
+  const realm = currentRealm.getOrNull()
+  if (!realm) return false
+  return (realm.aboutResponse?.configurations as any)?.isPreview ?? isLocalhostRealm(realm.baseUrl)
+}
+
+/**
+ * Catalyst profiles carry colors as {r,g,b} floats in 0..1; `UserData.avatar`
+ * declares them as strings, and the reference client renders them as hex. Kept
+ * consistent with the hard-coded values in UserIdentity.getUserData below.
+ */
+function colorToHex(color: { r?: number; g?: number; b?: number } | undefined, fallback: string): string {
+  if (!color || color.r === undefined || color.g === undefined || color.b === undefined) return fallback
+  const channel = (value: number) =>
+    Math.max(0, Math.min(255, Math.round(value * 255)))
+      .toString(16)
+      .padStart(2, '0')
+  return `#${channel(color.r)}${channel(color.g)}${channel(color.b)}`
+}
+
+/**
+ * Projects a cached Catalyst profile onto the protocol's `UserData`.
+ *
+ * The profile is peer-announced and therefore untrusted, so every field is
+ * defaulted rather than asserted — a malformed profile must produce a dull
+ * UserData, never a throw out of an RPC handler.
+ */
+function userDataFromProfile(userId: string, profile: any) {
+  return {
+    displayName: typeof profile?.name === 'string' ? profile.name : 'Unknown',
+    hasConnectedWeb3: profile?.hasConnectedWeb3 === true,
+    userId,
+    version: Number.isFinite(profile?.version) ? profile.version : 0,
+    avatar: {
+      bodyShape: typeof profile?.avatar?.bodyShape === 'string' ? profile.avatar.bodyShape : '',
+      skinColor: colorToHex(profile?.avatar?.skin?.color, '#443322'),
+      hairColor: colorToHex(profile?.avatar?.hair?.color, '#663322'),
+      eyeColor: colorToHex(profile?.avatar?.eyes?.color, '#332211'),
+      wearables: Array.isArray(profile?.avatar?.wearables)
+        ? profile.avatar.wearables.filter((w: unknown) => typeof w === 'string')
+        : [],
+      snapshots: {
+        face256: typeof profile?.avatar?.snapshots?.face256 === 'string' ? profile.avatar.snapshots.face256 : '',
+        body: typeof profile?.avatar?.snapshots?.body === 'string' ? profile.avatar.snapshots.body : ''
+      }
     }
   }
 }
@@ -336,6 +392,85 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
     },
     async consumeMessages() {
       return { messages: [] }
+    }
+  }))
+
+  registerService(port, PlayersServiceDefinition, async () => ({
+    async getPlayerData(req, context) {
+      const profile = context.avatarSystem?.getKnownProfile(req.userId) ?? null
+      const data = profile ? userDataFromProfile(req.userId, profile) : undefined
+      return { data }
+    },
+    async getPlayersInScene(_req, context) {
+      const peers = context.avatarSystem?.listKnownPeers() ?? []
+      return {
+        players: peers
+          // A peer that has been adopted but not yet reported a position cannot
+          // be placed, so it is not claimed to be in the scene.
+          .filter((peer) => peer.worldPosition !== null && context.isWorldPositionInsideScene(peer.worldPosition))
+          .map((peer) => ({ userId: peer.address }))
+      }
+    },
+    async getConnectedPlayers(_req, context) {
+      const peers = context.avatarSystem?.listKnownPeers() ?? []
+      return { players: peers.map((peer) => ({ userId: peer.address })) }
+    }
+  }))
+
+  registerService(port, EnvironmentApiServiceDefinition, async () => ({
+    async getBootstrapData(_req, context) {
+      return {
+        id: context.entityId,
+        baseUrl: context.loadableScene.baseUrl!,
+        entity: {
+          content: context.loadableScene.entity.content,
+          metadataJson: JSON.stringify(context.loadableScene.entity.metadata)
+        },
+        useFPSThrottling: false
+      }
+    },
+    async isPreviewMode() {
+      return { isPreview: isPreviewRealm() }
+    },
+    async getPlatform() {
+      return { platform: 'desktop' }
+    },
+    async areUnsafeRequestAllowed() {
+      // "Unsafe" here means plain-http / non-allowlisted requests. Scene fetches
+      // go through the SSRF egress guard regardless of this flag, so answering
+      // true would only mislead a scene into thinking the guard is off.
+      return { status: false }
+    },
+    async getCurrentRealm(_req, context) {
+      const realm = currentRealm.getOrNull()
+      if (!realm) return { currentRealm: undefined }
+
+      const roomInfo = context.transport?.getRoomInfo?.()
+      const serverName = realm.aboutResponse?.configurations?.realmName ?? ''
+
+      return {
+        currentRealm: {
+          domain: realm.baseUrl,
+          // SDK6-era island/layer concept; there is no equivalent here.
+          layer: '',
+          room: roomInfo?.roomName ?? '',
+          serverName,
+          displayName: serverName,
+          protocol: realm.aboutResponse?.comms?.protocol ?? 'v3'
+        }
+      }
+    },
+    async getExplorerConfiguration() {
+      return {
+        clientUri: currentRealm.getOrNull()?.baseUrl ?? '',
+        configurations: {}
+      }
+    },
+    async getDecentralandTime() {
+      // Deliberately mirrors Runtime.getWorldTime, which also reports 0: this
+      // server tracks no in-world day/night clock. Reporting a real wall-clock
+      // value here while getWorldTime says 0 would make the two APIs disagree.
+      return { seconds: 0 }
     }
   }))
 
