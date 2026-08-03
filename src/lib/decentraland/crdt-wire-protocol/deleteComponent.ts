@@ -42,6 +42,15 @@ export namespace DeleteComponent {
       throw new Error('DeleteComponentOperation tried to read another message type.')
     }
 
+    // This reader consumes a FIXED body size. A frame declared shorter than that
+    // (untrusted input) would make the three reads below cross into the NEXT
+    // message — or past the written data, throwing out of the parser. Reject
+    // instead; readAllMessages skips the declared frame and keeps going. An
+    // OVER-declared frame is handled there too, by re-anchoring the cursor.
+    if (header.length < CRDT_MESSAGE_HEADER_LENGTH + MESSAGE_HEADER_LENGTH) {
+      return null
+    }
+
     return {
       length: header.length,
       type: CrdtMessageType.DELETE_COMPONENT,

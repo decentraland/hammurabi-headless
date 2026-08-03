@@ -15,6 +15,7 @@ import { getAssetBundleRegistryUrl } from "../environment"
 import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from "../../misc/network"
 import { limits } from "../../misc/limits"
 import { limitLogger } from "../../misc/limit-logger"
+import { createRateLimitedErrorLogger } from "../../misc/logger"
 
 /**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
@@ -23,6 +24,343 @@ import { limitLogger } from "../../misc/limit-logger"
  * `worldToScene` converts world/global positions received from comms into the owning scene's
  * coordinate system, so the Transforms written here are only valid for that scene.
  */
+/**
+ * Peer-lifecycle state that belongs to the TRANSPORT, not to any one avatar system.
+ *
+ * The avatar systems are per-scene and are replaced freely (a local hot reload
+ * disposes one and creates another with a ~100ms gap in between), while the entity
+ * allocator they share is process-global and deliberately NOT reset on system
+ * teardown. Anything that guards that allocator therefore cannot live on a system:
+ *  - departed markers held by a disposed system are lost, so a straggler packet could
+ *    re-adopt a departed peer through the still-present global mapping and resurrect
+ *    a frozen ghost avatar;
+ *  - a peer that disconnects during the gap has NO system listening at all, so the
+ *    departure would be missed entirely and its pool slot leaked for good.
+ *
+ * So the registry owns the departed markers, the live sessions, and the transport
+ * subscriptions that maintain them — registered once per transport and never removed
+ * — and systems attach their own per-scene cleanup as callbacks. One registry per
+ * transport, so every scene on that transport agrees on who has left.
+ */
+type AvatarTransportRegistry = {
+  readonly departedPeers: Set<string>
+  /**
+   * Record that this address exists, without claiming any identified live session.
+   *
+   * Called when a system adopts a peer from a data packet: LiveKit emits no
+   * ParticipantConnected for peers already in the room when we joined, so those are
+   * only ever seen this way. Seeding a record makes "no record at all" mean strictly
+   * "never observed" rather than "observed but evicted", which is what lets a
+   * disconnect with no record be treated conservatively instead of destructively.
+   */
+  noteObserved(address: string): void
+  /**
+   * Visit every address the registry currently considers observed and not departed.
+   * Used by a newly attached system to rebuild its per-scene component stores without
+   * waiting for each stationary peer to send another packet.
+   */
+  forEachObservedPeer(callback: (address: string) => void): void
+  onPeerAdopted(callback: (address: string) => void): () => void
+  onPeerRetired(callback: (address: string) => void): () => void
+}
+
+// Keyed weakly so a discarded transport takes its registry with it.
+const avatarTransportRegistries = new WeakMap<CommsTransportWrapper, RegistryInternals>()
+
+/**
+ * Which engine/comms session the avatar state belongs to.
+ *
+ * A registry keeps its transport subscriptions for the life of that transport and
+ * deliberately never removes them, so they can outlive the session that created them:
+ * `resetEngine` starts `transport.disconnect()` WITHOUT awaiting it, clears the
+ * allocator and unblocks a restart, so a late PEER_DISCONNECTED from the OLD transport
+ * can land after a NEW session has already allocated the same address — and the old
+ * registry would then free a mapping that now belongs to the new session. Stamping each
+ * registry with the generation it was built in, and no-oping its handlers once that
+ * generation is over, closes that without having to chase down listeners.
+ */
+let avatarSessionGeneration = 0
+
+/**
+ * Ends the current avatar session: retires every registry built in it and releases the
+ * process-global remote-player allocator. Called by the session owner (`resetEngine`)
+ * once every scene is disposed and the transport is disconnecting — never from a scene
+ * or subscription teardown, which share this state with live siblings.
+ */
+export function resetAvatarSessionState() {
+  avatarSessionGeneration++
+  playerEntityManager.clear()
+}
+
+type RegistryInternals = AvatarTransportRegistry & {
+  readonly generation: number
+  /**
+   * Remove this registry's transport subscriptions. Called when a registry from a past
+   * generation is replaced on a transport that is being reused: the generation guard
+   * already makes the old handlers inert, but leaving them attached retains their
+   * closures — and therefore the departed/session maps they capture — for the life of
+   * the transport, once per session that reuses it.
+   */
+  detach(): void
+}
+
+function getAvatarTransportRegistry(transport: CommsTransportWrapper): AvatarTransportRegistry {
+  const existing = avatarTransportRegistries.get(transport)
+  if (existing) {
+    if (existing.generation === avatarSessionGeneration) return existing
+    // A registry from a previous session is inert (its handlers no-op on the generation
+    // check), but leaving it subscribed retains its closures and their maps for the life
+    // of the transport — once per session that reuses it. Detach before replacing.
+    existing.detach()
+    avatarTransportRegistries.delete(transport)
+  }
+
+  const generation = avatarSessionGeneration
+
+  const departedPeers = new Set<string>()
+  // Per address: a bounded set of exact live session ids, plus a scalar count for
+  // sessions whose identity is unavailable. That includes genuinely sid-less connects
+  // and exact ids collapsed out of the bounded set. Keeping collapsed liveness prevents
+  // the remaining exact disconnects from retiring a peer whose forgotten session is
+  // still live, without retaining attacker-controlled strings beyond the configured cap.
+  type PeerSessions = {
+    sids: Set<string>
+    untracked: number
+    untrackedSaturated: boolean
+  }
+  const liveSessions = new Map<string, PeerSessions>()
+  const adoptedCallbacks = new Set<(address: string) => void>()
+  const retiredCallbacks = new Set<(address: string) => void>()
+  const MAX_DEPARTED_PEERS = limits.maxDepartedPeers // HAMMURABI_MAX_DEPARTED_PEERS
+  const MAX_TRACKED_PEER_SESSIONS = limits.maxTrackedPeerSessions // HAMMURABI_MAX_TRACKED_PEER_SESSIONS
+  const MAX_SESSIONS_PER_PEER = limits.maxSessionsPerPeer // HAMMURABI_MAX_SESSIONS_PER_PEER
+  // One scene's callback must never be able to skip another scene's cleanup, so each
+  // dispatch is contained. Throttled because a callback that fails once tends to keep
+  // failing on every subsequent departure.
+  const logRegistryError = createRateLimitedErrorLogger()
+
+  /**
+   * The session record for `address`, created if absent, evicting another address's
+   * record first when the cap is reached.
+   *
+   * Eviction NEVER takes the record of an address that currently holds an avatar
+   * entity. That is the invariant the retire decision depends on: with a record
+   * present we can tell a stale session's disconnect from a real departure, and
+   * without one we cannot — so losing the record of a LIVE peer would let a stale
+   * sid-specific disconnect retire it and blacklist the address, making an active
+   * player invisible. Configuration requires one more tracked record than the remote
+   * avatar capacity, so a protected record cannot starve the eviction scan.
+   *
+   * The no-candidate path remains load-bearing defence in depth for tests, embedding,
+   * or future configuration changes that bypass readLimits: it permits a bounded
+   * overage instead of evicting a live record. At most the avatar capacity plus one
+   * records can then survive—the extra record belongs to the peer whose allocation
+   * fails, and the next insertion can evict it.
+   */
+  function recordFor(address: string): PeerSessions {
+    const existing = liveSessions.get(address)
+    if (existing !== undefined) return existing
+
+    if (liveSessions.size >= MAX_TRACKED_PEER_SESSIONS) {
+      let evicted: string | undefined
+      for (const candidate of liveSessions.keys()) {
+        if (playerEntityManager.getEntityForAddress(candidate) === null) {
+          evicted = candidate
+          break
+        }
+      }
+      // Never evict a live peer. If the configured invariant was bypassed and every
+      // record is protected, allow this insertion to exceed that invalid cap. The
+      // remote-player pool is the hard bound: once full, this new address cannot
+      // allocate an entity and becomes the evictable candidate for the next insertion.
+      if (evicted !== undefined) liveSessions.delete(evicted)
+      limitLogger.hit('maxTrackedPeerSessions', address)
+    }
+
+    const created: PeerSessions = { sids: new Set<string>(), untracked: 0, untrackedSaturated: false }
+    liveSessions.set(address, created)
+    return created
+  }
+
+  function addUntrackedSession(sessions: PeerSessions) {
+    if (sessions.untracked < Number.MAX_SAFE_INTEGER) {
+      sessions.untracked++
+    } else {
+      // Once the scalar count cannot represent another session exactly, fail
+      // conservatively: sid-specific disconnects can no longer prove that every
+      // collapsed session ended. An address-level disconnect still clears the record.
+      sessions.untrackedSaturated = true
+    }
+  }
+
+  function dispatch(callbacks: Set<(address: string) => void>, address: string, what: string) {
+    for (const callback of callbacks) {
+      try {
+        callback(address)
+      } catch (error: any) {
+        logRegistryError(`avatar registry: a scene's ${what} handler failed for ${address}`, error)
+      }
+    }
+  }
+
+  const onPeerConnected = (event: { address: string; sid?: string }) => {
+    // Inert once this session is over: see avatarSessionGeneration.
+    if (generation !== avatarSessionGeneration) return
+    const address = event.address.toLowerCase()
+    // A reconnect makes the peer allocatable again. Done here, not in a system, so a
+    // reconnect that lands while no system exists still clears the marker.
+    departedPeers.delete(address)
+    // Register THIS session so a late disconnect belonging to a PREVIOUS session
+    // cannot retire it. A transport without per-session ids, or a repeated connect for
+    // the same session, is idempotent — it is a Set.
+    // BOUNDED (load-bearing, CLAUDE.md): every connect records an address and a
+    // session, whether or not that peer ever obtains one of the 224 avatar slots, so a
+    // hostile or faulty comms source churning identities/sids — or simply losing
+    // disconnects — would otherwise grow this for the life of the transport.
+    const sessions = recordFor(address)
+
+    if (event.sid !== undefined) {
+      // Re-announcing a sid we already hold is free; only a NEW exact id consumes
+      // string-storage budget.
+      if (!sessions.sids.has(event.sid) && sessions.sids.size >= MAX_SESSIONS_PER_PEER) {
+        const oldestSid = sessions.sids.values().next().value
+        if (oldestSid !== undefined) {
+          sessions.sids.delete(oldestSid)
+          // The evicted sid may still be live. Collapse it into scalar liveness so
+          // disconnecting the retained ids cannot retire the address prematurely.
+          addUntrackedSession(sessions)
+        }
+        limitLogger.hit('maxSessionsPerPeer', address)
+      }
+      sessions.sids.add(event.sid)
+    } else {
+      // A number is fixed-size state, so count every sid-less session rather than
+      // dropping liveness merely to enforce the cap on attacker-controlled SID strings.
+      if (sessions.untracked >= MAX_SESSIONS_PER_PEER || sessions.untrackedSaturated) {
+        limitLogger.hit('maxSessionsPerPeer', address)
+      }
+      addUntrackedSession(sessions)
+    }
+    dispatch(adoptedCallbacks, address, 'peer-adopted')
+  }
+
+  const onPeerDisconnected = (event: { address: string; sid?: string }) => {
+    // Inert once this session is over. Without this, a late disconnect from the old
+    // transport frees an allocator mapping that now belongs to the NEW session.
+    if (generation !== avatarSessionGeneration) return
+    const address = event.address.toLowerCase()
+
+    // Retire THIS session. If any OTHER session for the same address is still live —
+    // the reconnect's PEER_CONNECTED already arrived, out of order, ahead of this
+    // disconnect — keep the peer: retiring it would make the live, reconnected client
+    // invisible until it happens to send a movement packet, i.e. never if it is
+    // standing still.
+    // A disconnect WITHOUT a session id is an address-level departure — the transport
+    // is telling us the peer is gone but cannot say which session, so every recorded
+    // session for it is over. Without this, a sid-less disconnect for a peer that DOES
+    // have recorded sessions left the set untouched and returned on `size > 0`, so the
+    // peer was never retired and its entity and pool slot leaked.
+    const sessions = liveSessions.get(address)
+    if (event.sid !== undefined) {
+      if (sessions === undefined) {
+        // No record, and a sid-specific disconnect cannot tell us whether any OTHER
+        // session for this address is still live. Because a record is seeded the first
+        // time an address is observed and is never evicted while that address holds an
+        // entity, reaching here means the address has no avatar entity to purge and no
+        // straggler to blacklist — so the conservative choice costs nothing. Retiring
+        // instead would let churn past the cap retire a live reconnect.
+        //
+        // DEFENCE IN DEPTH, deliberately not independently observable: the eviction
+        // protection in recordFor is what actually guarantees a live peer keeps its
+        // record, so no test can distinguish this branch while that holds. It exists so
+        // that if the protection is ever weakened, the failure mode is a leaked pool
+        // slot rather than an active player going invisible.
+        return
+      }
+      if (!sessions.sids.delete(event.sid) && !sessions.untrackedSaturated && sessions.untracked > 0) {
+        // The sid matches nothing we tracked, so it belongs to a session we could not
+        // identify or whose exact id was collapsed. Consume that scalar liveness
+        // instead of ignoring the disconnect, which would retain the peer forever.
+        sessions.untracked--
+      }
+      // Still live if another exact id remains, if a collapsed session remains, or if
+      // the collapsed count saturated and can no longer be retired safely by id.
+      if (sessions.sids.size > 0 || sessions.untracked > 0 || sessions.untrackedSaturated) return
+    }
+    liveSessions.delete(address)
+
+    // Mark departed BEFORE notifying, so a straggler packet racing the callbacks is
+    // already refused. Oldest markers are evicted once the set is full.
+    // TRADEOFF: eviction can un-remember a very old departure, which at worst lets a
+    // straggler resurrect one corpse — but stragglers land within seconds of the
+    // departure, so re-admitting a peer that departed MAX_DEPARTED_PEERS distinct
+    // departures ago is strictly better than an unbounded set (CLAUDE.md).
+    departedPeers.add(address)
+    if (departedPeers.size > MAX_DEPARTED_PEERS) limitLogger.hit('maxDepartedPeers')
+    while (departedPeers.size > MAX_DEPARTED_PEERS) {
+      const oldest = departedPeers.values().next().value
+      if (oldest === undefined) break
+      departedPeers.delete(oldest)
+    }
+
+    try {
+      // Let every live system purge its own components and emit its own tombstone
+      // first; they read their local mirrors, not the allocator. Contained per scene:
+      // one scene throwing must not skip its siblings' cleanup.
+      dispatch(retiredCallbacks, address, 'peer-retired')
+    } finally {
+      // Release the pool slot unconditionally and exactly once per departure. In a
+      // `finally` so that nothing a scene does — however it fails — can leak the slot.
+      playerEntityManager.freeEntityForPlayer(address)
+    }
+  }
+
+  transport.events.on('PEER_CONNECTED', onPeerConnected)
+  transport.events.on('PEER_DISCONNECTED', onPeerDisconnected)
+
+  const registry: RegistryInternals = {
+    generation,
+    departedPeers,
+    noteObserved(address: string) {
+      if (generation !== avatarSessionGeneration) return
+      recordFor(address)
+    },
+    forEachObservedPeer(callback) {
+      if (generation !== avatarSessionGeneration) return
+      // The callback may mirror an existing allocation and call noteObserved again,
+      // but it does not add a new address. Iterating the map directly is therefore safe
+      // and avoids allocating a snapshot proportional to the registry cap.
+      for (const address of liveSessions.keys()) {
+        try {
+          callback(address)
+        } catch (error: any) {
+          logRegistryError(`avatar registry: a scene's peer-replay handler failed for ${address}`, error)
+        }
+      }
+    },
+    detach() {
+      transport.events.off('PEER_CONNECTED', onPeerConnected)
+      transport.events.off('PEER_DISCONNECTED', onPeerDisconnected)
+      // Drop what the (now unreachable) handlers captured, so a transport reused across
+      // many sessions does not accumulate a retired registry's maps per session.
+      adoptedCallbacks.clear()
+      retiredCallbacks.clear()
+      departedPeers.clear()
+      liveSessions.clear()
+    },
+    onPeerAdopted(callback) {
+      adoptedCallbacks.add(callback)
+      return () => adoptedCallbacks.delete(callback)
+    },
+    onPeerRetired(callback) {
+      retiredCallbacks.add(callback)
+      return () => retiredCallbacks.delete(callback)
+    }
+  }
+  avatarTransportRegistries.set(transport, registry)
+  return registry
+}
+
 export function createAvatarCommunicationSystem(transport: CommsTransportWrapper, worldToScene: (position: Vector3) => Vector3) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
@@ -42,7 +380,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // Bound the tombstone map: peers churn through versioned entity ids over a long
   // session, and this grows once per departed peer. Oldest entries are evicted.
   const MAX_DELETED_ENTITIES = limits.maxAvatarTombstones // HAMMURABI_MAX_AVATAR_TOMBSTONES
-  let currentTick = 0
 
   // Throttle the "pool exhausted" warning. findPlayerEntityByAddress runs per
   // inbound packet, so once the 224-slot remote-player pool is full an unallocated
@@ -50,6 +387,35 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   // rate, aggregated across peers. On blocking stderr that is an event-loop-stall
   // vector; log at most once per second regardless of how many packets are dropped.
   let lastPoolExhaustedLogAt = 0
+
+  // Transport-scoped peer lifecycle: departed markers, live sessions, and the
+  // subscriptions that maintain them. Shared with every other avatar system on this
+  // transport and OUTLIVES this system, which is what makes the departed-peer guard
+  // survive a hot reload (see getAvatarTransportRegistry).
+  //
+  // The guard refuses only KNOWN-DEPARTED addresses, never unknown ones: LiveKit does
+  // NOT emit ParticipantConnected for peers already in the room when we joined, so
+  // those are discovered ONLY from their first data packet and must still be allowed
+  // to allocate. Inverting this into an allowlist would make every peer who joined
+  // before us permanently invisible.
+  const registry = getAvatarTransportRegistry(transport)
+  const departedPeers = registry.departedPeers
+
+  // THIS system's own address→entity mirror of the process-global allocator.
+  //
+  // `playerEntityManager` is shared by every avatar system in the process (one per
+  // scene, all wired to the same transport), but the LWW stores and the
+  // `deletedEntities` tombstones are per-system. Resolving a departing peer through
+  // the global allocator therefore only works for whichever system's
+  // PEER_DISCONNECTED listener happens to run FIRST: it calls removePlayerEntity,
+  // which frees the global mapping, and every sibling system then resolves `null`,
+  // purges nothing and emits no DELETE_ENTITY — leaving a ghost avatar frozen in
+  // those scenes forever.
+  //
+  // Mirroring locally makes each system's cleanup independent of listener order.
+  // Freeing the global slot stays safe: freeEntityForPlayer early-exits once the
+  // address is gone, so several systems calling it is harmless.
+  const ownedEntities = new Map<string, Entity>()
 
   // One tracker per live subscription: its highest emitted deletion sequence.
   const subscriptionTrackers = new Set<{ emittedSeq: number }>()
@@ -238,22 +604,47 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       deletedEntities.delete(oldest)
     }
 
-    // Free the entity in the player entity manager
+    // Free the entity in the player entity manager. Idempotent across systems: a
+    // sibling may already have freed this address, in which case this is a no-op.
     playerEntityManager.freeEntityForPlayer(address)
 
     // Clear from profile cache and per-peer fetch state
     const normalizedAddress = normalizeAddress(address)
     profileCache.delete(normalizedAddress)
     profileFetchState.delete(normalizedAddress)
+    ownedEntities.delete(normalizedAddress)
     lastCommsPosLogMs.delete(normalizedAddress)
   }
 
   function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
     const normalizedAddress = normalizeAddress(address)
 
-    // First check if we already have an entity allocated for this address
+    // Refuse a peer we already saw depart BEFORE consulting the allocator. The global
+    // mapping may still exist — a sibling system that has not processed the departure
+    // yet, or one this system never adopted — and honouring it here would let a
+    // straggler packet resurrect a departed peer through the back door, which is the
+    // whole thing departedPeers exists to prevent. Checked for reads as well as
+    // allocations, since adopting an existing mapping also starts writing components.
+    if (departedPeers.has(normalizedAddress)) return null
+
+    // Then check if we already have an entity allocated for this address
     let entity = playerEntityManager.getEntityForAddress(normalizedAddress)
     if (entity !== null) {
+      // The allocation may have been made by ANOTHER avatar system sharing the
+      // process-global playerEntityManager (there is one system per scene, all wired
+      // to the same comms transport), in which case only THAT system's store holds
+      // the identity. Backfill ours, or this scene writes a 30Hz Transform for an
+      // entity that has no PlayerIdentityData here — a moving avatar belonging to no
+      // player. Guarded by `has` so we don't rewrite (and re-dirty) the component on
+      // every inbound packet.
+      if (!PlayerIdentityData.has(entity)) {
+        PlayerIdentityData.createOrReplace(entity, { address: normalizedAddress, isGuest: true })
+      }
+      // Mirror it locally even though another system allocated it: this system now
+      // writes components for that entity, so this system must be able to clean it
+      // up on disconnect regardless of which listener runs first (see ownedEntities).
+      ownedEntities.set(normalizedAddress, entity)
+      registry.noteObserved(normalizedAddress)
       return entity
     }
 
@@ -272,14 +663,20 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
     // Initialize with minimal identity data
     PlayerIdentityData.createOrReplace(entity, { address: normalizedAddress, isGuest: true })
+    ownedEntities.set(normalizedAddress, entity)
+    // Peers already in the room when we joined get no PEER_CONNECTED, so this is the
+    // only place their existence is recorded (see noteObserved).
+    registry.noteObserved(normalizedAddress)
 
     return entity
   }
 
   // Event handlers (stored for cleanup on dispose)
-  const handlePeerConnected = (event: { address: string }) => {
-    console.log('peer connected', event)
-    const address = normalizeAddress(event.address)
+  //
+  // Peer connect/disconnect are NOT subscribed on the transport directly: the registry
+  // owns those subscriptions so its bookkeeping survives this system, and hands us the
+  // per-scene half of the work as callbacks (see getAvatarTransportRegistry).
+  const handlePeerAdopted = (address: string) => {
 
     // Allocate entity for the new participant
     const entity = findPlayerEntityByAddress(address, true)
@@ -294,11 +691,16 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     }
   }
 
-  const handlePeerDisconnected = (event: { address: string }) => {
-    console.log('[PEER_DISCONNECTED]', event)
-    const entity = findPlayerEntityByAddress(event.address, false)
-    if (entity) {
-      removePlayerEntity(entity, event.address)
+  // The registry has already retired the session, marked the address departed and
+  // will free the pool slot; this is only THIS scene's half of the teardown.
+  const handlePeerRetired = (address: string) => {
+    console.log('[PEER_DISCONNECTED]', { address })
+
+    // Resolve from THIS system's mirror, not the allocator: sibling systems purge
+    // independently and in any order, and the mapping may already be gone.
+    const entity = ownedEntities.get(address) ?? null
+    if (entity !== null) {
+      removePlayerEntity(entity, address)
     }
   }
 
@@ -403,12 +805,17 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
   }
 
   // Wire up transport events
-  transport.events.on('PEER_CONNECTED', handlePeerConnected)
-  transport.events.on('PEER_DISCONNECTED', handlePeerDisconnected)
+  const unsubscribePeerAdopted = registry.onPeerAdopted(handlePeerAdopted)
+  const unsubscribePeerRetired = registry.onPeerRetired(handlePeerRetired)
   transport.events.on('position', handlePosition)
   transport.events.on('movement', handleMovement)
   transport.events.on('profileMessage', handleProfileMessage)
   transport.events.on('chatMessage', handleChatMessage)
+  // The registry outlives systems across hot reloads and late scene attachment.
+  // Rebuild this system's local stores now; stationary peers may send no future packet
+  // that would otherwise trigger adoption. Run after every transport handler is wired
+  // because adoption emits the initial profileMessage synchronously.
+  registry.forEachObservedPeer(handlePeerAdopted)
 
   // Public API for managing the avatar system
   return {
@@ -417,7 +824,6 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
 
     // Update function to be called each frame
     update() {
-      currentTick++
       for (const component of listOfComponentsToSynchronize) {
         // Advance ticks/timestamps and clear the dirty state; serialization
         // happens per-subscription in getUpdates (dumpCrdtDeltas). This
@@ -440,19 +846,41 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
       // subscription has delivered them (see pruneEmittedTombstones); without
       // pruning, getUpdates rescans up to MAX_DELETED_ENTITIES entries per
       // subscription per frame for the rest of the session.
-      const tracker = { emittedSeq: 0 }
+      // Starts at the CURRENT deletion sequence, not 0: a subscription created now
+      // begins from a state dump that never contained the already-purged entities, so
+      // every tombstone retained from before this moment is one it must not emit.
+      // Starting at 0 made a fresh subscription's first getUpdates emit a
+      // DELETE_ENTITY for every retained tombstone — deletes for entities that
+      // subscription had never been told about.
+      const tracker = { emittedSeq: deletionSequence }
       subscriptionTrackers.add(tracker)
 
       return {
         range: OTHER_PLAYER_ENTITIES_RANGE,
         dispose() {
+          // ONE subscription is going away: tear down only what belongs to it — its
+          // tracker and its per-component tick cursors.
+          //
+          // Deliberately does NOT clear playerEntityManager / profileCache /
+          // profileFetchState / deletedEntities. `playerEntityManager` is a
+          // process-global singleton and the other three belong to the SYSTEM, shared
+          // by every subscription it hands out, so clearing them from one
+          // subscription's teardown drops other scenes' live peer mappings and
+          // destroys sibling subscriptions' pending DELETE_ENTITY tombstones (which,
+          // since removePlayerEntity purges the components, are the ONLY removal
+          // signal — so their avatars linger as ghosts).
+          //
+          // Worse, playerEntityManager.clear() also resets `nextEntityNumber` and
+          // `entityVersions`, so a later allocation can hand a DIFFERENT address an
+          // entity id a surviving scene's VM still holds. That is not merely cosmetic:
+          // `@dcl/ecs` treats entities < 512 as Reserved and KEEPS their LWW
+          // timestamps across `entityDeleted`, while our purgeEntity resets ours to 0.
+          // The reissued id's one-shot PlayerIdentityData PUT (timestamp 1) is then
+          // rejected as outdated while its 30Hz Transform PUTs eventually win — so the
+          // entity keeps the OLD player's address while tracking the NEW player's
+          // movement.
           subscriptionTrackers.delete(tracker)
           state.clear()
-          // Clear player entity manager and profile cache
-          playerEntityManager.clear()
-          profileCache.clear()
-          profileFetchState.clear()
-          deletedEntities.clear()
         },
         getUpdates(writer: ReadWriteByteBuffer) {
           // Write DELETE_ENTITY messages for players removed since we last ran.
@@ -477,16 +905,23 @@ export function createAvatarCommunicationSystem(transport: CommsTransportWrapper
     // Cleanup function
     dispose() {
       // Remove event listeners to prevent duplicates on hot-reload
-      transport.events.off('PEER_CONNECTED', handlePeerConnected)
-      transport.events.off('PEER_DISCONNECTED', handlePeerDisconnected)
+      unsubscribePeerAdopted()
+      unsubscribePeerRetired()
       transport.events.off('position', handlePosition)
       transport.events.off('movement', handleMovement)
       transport.events.off('profileMessage', handleProfileMessage)
       transport.events.off('chatMessage', handleChatMessage)
 
-      playerEntityManager.clear()
+      // Clear only what THIS system owns. Neither playerEntityManager nor the
+      // transport registry is touched: they are shared with sibling scenes and must
+      // outlive this system, which is exactly what lets the departed-peer guard and
+      // the pool slots survive a hot reload. Pool slots are released by the registry
+      // on PEER_DISCONNECTED, not by system teardown, and a replacement system replays
+      // the registry's observed peers when it attaches.
       profileCache.clear()
+      profileFetchState.clear()
       deletedEntities.clear()
+      ownedEntities.clear()
     }
   }
 }

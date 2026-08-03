@@ -12,6 +12,7 @@ import { createCharacterControllerSystem } from './babylon/avatars/CharacterCont
 import { createCameraFollowsPlayerSystem } from './babylon/scene/logic/camera-follows-player'
 import { createLocalAvatarSceneSystem } from './babylon/scene/logic/local-avatar-scene'
 import { createSceneComms } from './decentraland/communications/scene-comms'
+import { resetAvatarSessionState } from './decentraland/communications/avatar-communication-system'
 import { commsLogger } from './decentraland/communications/types'
 import { SceneContext } from './babylon/scene/scene-context'
 import { generateRandomAvatar, downloadAvatar } from './decentraland/identity/avatar'
@@ -119,6 +120,20 @@ export function resetEngine() {
     disposeSession(activeSession)
     activeSession = undefined
   }
+
+  // Release the remote-player entity allocator. This is the ONLY correct place to do
+  // it: the allocator is process-global and shared by every scene on a transport, so
+  // neither an avatar system's nor a subscription's teardown may clear it (that would
+  // drop live sibling scenes' mappings and reset entity versions underneath them).
+  // resetEngine is the session owner — every scene is disposed and the transport is
+  // disconnected above — so by here nothing can still be using it. Skipping this
+  // carried stale address->entity mappings and version state into the NEXT session:
+  // the 224-slot pool eroded across restarts and a fresh session could adopt a mapping
+  // minted for the previous room.
+  //
+  // NOT done in disposeSession: that also runs for a startup superseded mid-flight,
+  // where the replacement session is already live and owns these mappings.
+  resetAvatarSessionState()
 
   // Reset the initialization flag
   initialized = false

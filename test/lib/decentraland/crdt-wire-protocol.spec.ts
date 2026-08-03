@@ -30,6 +30,182 @@ describe('readAllMessages hardening against untrusted input', () => {
   })
 })
 
+// Regression: the reader used to trust the length prefix INSIDE a message and
+// never compare it with the framed `header.length`. `readBuffer()` is bounded by
+// the buffer's WRITE offset, so an inconsistent inner length swallowed bytes of
+// the NEXT message and every message after it was parsed at a shifted offset —
+// pairing one entity's header with another entity's component data. The
+// fixed-size DELETE_* readers had the mirror problem: they ignored the frame, so
+// an over-declared length left the cursor INSIDE the message and its tail was
+// parsed as a fresh header.
+describe('framing of messages whose declared length disagrees with their contents', () => {
+  const INCONSISTENT_ENTITY = 187 as Entity
+  const FOLLOWING_ENTITY = 170 as Entity
+  const FOLLOWING_DATA = Uint8Array.of(7, 7, 7)
+
+  // Writes a PUT_COMPONENT by hand so the framed length and the payload length
+  // prefix can disagree (PutComponentOperation.write always keeps them in sync).
+  function writeInconsistentPut(buf: ReadWriteByteBuffer, payload: Uint8Array, declaredDataLength: number) {
+    buf.writeUint32(CRDT_MESSAGE_HEADER_LENGTH + PutComponentOperation.MESSAGE_HEADER_LENGTH + payload.byteLength)
+    buf.writeUint32(CrdtMessageType.PUT_COMPONENT)
+    buf.writeUint32(INCONSISTENT_ENTITY)
+    buf.writeUint32(1)
+    buf.writeUint32(1)
+    buf.writeUint32(declaredDataLength)
+    buf.writeBuffer(payload, false)
+  }
+
+  describe('when a PUT declares MORE payload bytes than its frame can hold', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      buf = new ReadWriteByteBuffer()
+      // frame holds 4 payload bytes, the message claims 8 — the extra 4 would be
+      // taken from the length field of the message that follows.
+      writeInconsistentPut(buf, Uint8Array.of(1, 1, 1, 1), 8)
+      PutComponentOperation.write(
+        { entityId: FOLLOWING_ENTITY, componentId: 1, timestamp: 1, data: FOLLOWING_DATA },
+        buf
+      )
+    })
+
+    it('should reject the message from PutComponentOperation.read', () => {
+      expect(PutComponentOperation.read(buf)).toBe(null)
+    })
+
+    it('should skip the rejected message and read the following one from its own offset', () => {
+      expect(Array.from(readAllMessages(buf))).toEqual([
+        {
+          length: CRDT_MESSAGE_HEADER_LENGTH + PutComponentOperation.MESSAGE_HEADER_LENGTH + FOLLOWING_DATA.byteLength,
+          type: CrdtMessageType.PUT_COMPONENT,
+          entityId: FOLLOWING_ENTITY,
+          componentId: 1,
+          timestamp: 1,
+          data: FOLLOWING_DATA
+        }
+      ])
+    })
+  })
+
+  describe('when a PUT declares FEWER payload bytes than its frame holds', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      buf = new ReadWriteByteBuffer()
+      writeInconsistentPut(buf, Uint8Array.of(1, 1, 1, 1), 0)
+      PutComponentOperation.write(
+        { entityId: FOLLOWING_ENTITY, componentId: 1, timestamp: 1, data: FOLLOWING_DATA },
+        buf
+      )
+    })
+
+    it('should skip the rejected message and read the following one from its own offset', () => {
+      expect(Array.from(readAllMessages(buf))).toMatchObject([
+        { type: CrdtMessageType.PUT_COMPONENT, entityId: FOLLOWING_ENTITY, data: FOLLOWING_DATA }
+      ])
+    })
+  })
+
+  describe('when a PUT declares a frame too short to hold its own fixed header', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      buf = new ReadWriteByteBuffer()
+      buf.writeUint32(CRDT_MESSAGE_HEADER_LENGTH) // no room for entity/component/timestamp/length
+      buf.writeUint32(CrdtMessageType.PUT_COMPONENT)
+      DeleteEntity.write({ entityId: FOLLOWING_ENTITY }, buf)
+    })
+
+    it('should skip it without reading a single byte of the following message', () => {
+      expect(Array.from(readAllMessages(buf))).toMatchObject([
+        { type: CrdtMessageType.DELETE_ENTITY, entityId: FOLLOWING_ENTITY }
+      ])
+    })
+  })
+
+  describe('when an APPEND_VALUE declares a payload length that disagrees with its frame', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      buf = new ReadWriteByteBuffer()
+      buf.writeUint32(CRDT_MESSAGE_HEADER_LENGTH + AppendValueOperation.MESSAGE_HEADER_LENGTH + 4)
+      buf.writeUint32(CrdtMessageType.APPEND_VALUE)
+      buf.writeUint32(INCONSISTENT_ENTITY)
+      buf.writeUint32(1)
+      buf.writeUint32(1)
+      buf.writeUint32(8) // LIES: the frame only holds 4
+      buf.writeUint32(0)
+      AppendValueOperation.write(
+        { entityId: FOLLOWING_ENTITY, componentId: 1, timestamp: 1, data: FOLLOWING_DATA },
+        buf
+      )
+    })
+
+    it('should skip the rejected message and read the following one from its own offset', () => {
+      expect(Array.from(readAllMessages(buf))).toMatchObject([
+        { type: CrdtMessageType.APPEND_VALUE, entityId: FOLLOWING_ENTITY, data: FOLLOWING_DATA }
+      ])
+    })
+  })
+
+  describe('when a DELETE_COMPONENT declares a frame LONGER than the bytes its reader consumes', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      buf = new ReadWriteByteBuffer()
+      // 4 bytes of padding beyond the 20 the reader consumes: without re-anchoring
+      // on the frame, that padding is parsed as the next message's header.
+      buf.writeUint32(CRDT_MESSAGE_HEADER_LENGTH + DeleteComponent.MESSAGE_HEADER_LENGTH + 4)
+      buf.writeUint32(CrdtMessageType.DELETE_COMPONENT)
+      buf.writeUint32(INCONSISTENT_ENTITY)
+      buf.writeUint32(1)
+      buf.writeUint32(9)
+      buf.writeUint32(0)
+      DeleteEntity.write({ entityId: FOLLOWING_ENTITY }, buf)
+    })
+
+    it('should yield it and still read the following message from its own offset', () => {
+      expect(Array.from(readAllMessages(buf))).toMatchObject([
+        { type: CrdtMessageType.DELETE_COMPONENT, entityId: INCONSISTENT_ENTITY, componentId: 1, timestamp: 9 },
+        { type: CrdtMessageType.DELETE_ENTITY, entityId: FOLLOWING_ENTITY }
+      ])
+    })
+  })
+
+  describe('when a DELETE_COMPONENT declares a frame SHORTER than the bytes its reader consumes', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      buf = new ReadWriteByteBuffer()
+      buf.writeUint32(CRDT_MESSAGE_HEADER_LENGTH) // no room for entity/component/timestamp
+      buf.writeUint32(CrdtMessageType.DELETE_COMPONENT)
+      DeleteEntity.write({ entityId: FOLLOWING_ENTITY }, buf)
+    })
+
+    it('should skip it instead of reading the following message as its body', () => {
+      expect(Array.from(readAllMessages(buf))).toMatchObject([
+        { type: CrdtMessageType.DELETE_ENTITY, entityId: FOLLOWING_ENTITY }
+      ])
+    })
+  })
+
+  describe('when the last message of the buffer is truncated', () => {
+    let buf: ReadWriteByteBuffer
+
+    beforeEach(() => {
+      const complete = new ReadWriteByteBuffer()
+      PutComponentOperation.write({ entityId: 1 as Entity, componentId: 1, timestamp: 1, data: Uint8Array.of(1, 2, 3) }, complete)
+      PutComponentOperation.write({ entityId: 2 as Entity, componentId: 1, timestamp: 2, data: Uint8Array.of(4, 5, 6) }, complete)
+      const bytes = complete.toBinary()
+      buf = new ReadWriteByteBuffer(new Uint8Array(bytes.subarray(0, bytes.byteLength - 5)))
+    })
+
+    it('should yield the complete messages and return cleanly instead of throwing', () => {
+      expect(Array.from(readAllMessages(buf))).toMatchObject([{ type: CrdtMessageType.PUT_COMPONENT, entityId: 1 }])
+    })
+  })
+})
+
 describe('Component operation tests', () => {
   it('validate corrupt message', () => {
     const buf = new ReadWriteByteBuffer(

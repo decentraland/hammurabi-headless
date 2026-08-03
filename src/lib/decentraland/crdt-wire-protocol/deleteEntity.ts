@@ -35,6 +35,13 @@ export namespace DeleteEntity {
       throw new Error('DeleteEntity tried to read another message type.')
     }
 
+    // See DeleteComponent.read: a frame too short for this reader's FIXED body
+    // must never be read, or the entityId is taken from the next message (or
+    // from past the written data, throwing out of the parser).
+    if (header.length < CRDT_MESSAGE_HEADER_LENGTH + MESSAGE_HEADER_LENGTH) {
+      return null
+    }
+
     return {
       length: header.length,
       type: CrdtMessageType.DELETE_ENTITY,

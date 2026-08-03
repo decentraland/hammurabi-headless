@@ -36,7 +36,11 @@ export namespace AppendValueOperation {
     buf.writeBuffer(message.data, false)
   }
 
-  /** See PutComponentOperation.read for the peekedHeader contract. */
+  /**
+   * See PutComponentOperation.read for the peekedHeader contract and for why the
+   * declared payload length MUST be cross-checked against the framed length
+   * before readBuffer() is allowed to move the read cursor.
+   */
   export function read(buf: ByteBuffer, peekedHeader?: CrdtMessageHeader): AppendValueMessage | null {
     const header = CrdtMessageProtocol.consumeOrReadHeader(buf, peekedHeader)
     /* istanbul ignore if */
@@ -49,12 +53,25 @@ export namespace AppendValueOperation {
       throw new Error('AppendValueOperation tried to read another message type.')
     }
 
+    const expectedDataLength = header.length - CRDT_MESSAGE_HEADER_LENGTH - MESSAGE_HEADER_LENGTH
+    if (expectedDataLength < 0) {
+      return null
+    }
+
+    const entityId = buf.readUint32() as Entity
+    const componentId = buf.readUint32()
+    const timestamp = buf.readUint32()
+
+    if (buf.getUint32(buf.currentReadOffset()) !== expectedDataLength) {
+      return null
+    }
+
     return {
       length: header.length,
       type: CrdtMessageType.APPEND_VALUE,
-      entityId: buf.readUint32() as Entity,
-      componentId: buf.readUint32(),
-      timestamp: buf.readUint32(),
+      entityId,
+      componentId,
+      timestamp,
       data: buf.readBuffer()
     }
   }

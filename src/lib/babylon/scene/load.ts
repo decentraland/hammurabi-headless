@@ -64,7 +64,21 @@ export async function loadSceneContextFromLocal(sceneContext: Atom<SceneContext>
   sceneContext.swap(await createSceneContext(engineScene, loadableScene, entityId, options.isGlobal, virtualScene))
 
   async function reloadScene() {
-    unloadScene(entityId)
+    // Unload the scene this watcher CURRENTLY owns, read from the atom — NOT the
+    // `entityId` captured when this closure was created. For a local scene the entity
+    // id is the content hash of the scene files, so the first code change mints a new
+    // id: from the second reload onward `unloadScene(entityId)` looked up an id that
+    // was no longer registered, did nothing, and leaked the live SceneContext — along
+    // with its avatar communication system, which stays subscribed to the shared
+    // (still-connected) comms transport and keeps writing avatar state for a dead
+    // scene. One leaked context and system per reload.
+    //
+    // Reading the atom keeps this a SINGLE-scene teardown. Iterating
+    // loadedScenesByEntityId would also fix the stale id, but that map is shared, so
+    // it would turn one local file watcher into a global teardown of scenes this
+    // watcher does not own.
+    const current = sceneContext.getOrNull()
+    if (current) unloadScene(current.entityId)
     await sleep(100)
     options.withoutHotReload = true
     loadSceneContextFromLocal(sceneContext, engineScene, options)
