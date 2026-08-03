@@ -77,12 +77,21 @@ export type TransportDisconnectedEvent = {
 export type PeerConnectedEvent = {
   // The ethereum address of the connected peer
   address: string
+  // The transport's unique id for THIS session of that peer (LiveKit
+  // `participant.sid`). The address is identical across a reconnect, so it cannot
+  // tell one session from the next; consumers that must survive out-of-order
+  // connect/disconnect pairs key on this instead. Optional because not every
+  // transport has a per-session id (see transports/offline).
+  sid?: string
 }
 
 // PEER_DISCONNECTED
 export type PeerDisconnectedEvent = {
   // The ethereum address of the disconnected peer
   address: string
+  // The session this disconnect belongs to; see PeerConnectedEvent.sid. A
+  // disconnect for an OLD session can arrive after the reconnect of a new one.
+  sid?: string
 }
 
 // message

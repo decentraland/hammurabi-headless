@@ -1,4 +1,5 @@
 import { readLimits } from '../../../src/lib/misc/limits'
+import { REMOTE_PLAYER_ENTITY_CAPACITY } from '../../../src/lib/decentraland/communications/player-entity-manager'
 
 describe('readLimits', () => {
   it('returns the documented defaults when no env vars are set', () => {
@@ -43,6 +44,27 @@ describe('readLimits', () => {
     expect(l.maxSyncExecutionMs).toBe(10_000)
     expect(l.maxMessagesPerWindow).toBe(300)
     expect(l.isolateMemoryLimitBytes).toBe(256 * 1024 * 1024)
+  })
+
+  describe('when the tracked-session cap does not exceed the remote-player capacity', () => {
+    it('should keep the default so every live avatar can retain its session record', () => {
+      const l = readLimits({
+        HAMMURABI_MAX_TRACKED_PEER_SESSIONS: String(REMOTE_PLAYER_ENTITY_CAPACITY)
+      })
+
+      expect(l.maxTrackedPeerSessions).toBe(1_024)
+    })
+  })
+
+  describe('when the tracked-session cap leaves room beyond the remote-player capacity', () => {
+    it('should accept the override at the safe minimum', () => {
+      const safeMinimum = REMOTE_PLAYER_ENTITY_CAPACITY + 1
+      const l = readLimits({
+        HAMMURABI_MAX_TRACKED_PEER_SESSIONS: String(safeMinimum)
+      })
+
+      expect(l.maxTrackedPeerSessions).toBe(safeMinimum)
+    })
   })
 
   it('allows zero for knobs whose minimum is zero (disable semantics)', () => {

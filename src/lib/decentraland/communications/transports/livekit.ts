@@ -34,8 +34,13 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
       .on(RoomEvent.ParticipantConnected, (_) => {
         const address = _.identity
         commsLogger.log(`👤 Participant connected to livekit room`, { address, room: this.room.name })
+        // Forward `sid` as well as the identity: the identity (the wallet address) is
+        // IDENTICAL across a reconnect, so consumers cannot tell one session from the
+        // next, and LiveKit does not guarantee that a disconnect for the old session
+        // arrives before the connect for the new one.
         this.events.emit('PEER_CONNECTED', {
-          address: address
+          address: address,
+          sid: _.sid
         })
       })
       .on(RoomEvent.ParticipantDisconnected, (_) => {
@@ -43,7 +48,8 @@ export class LivekitAdapter implements MinimumCommunicationsTransport {
         commsLogger.log(`👋 Participant disconnected from livekit room`, { address, room: this.room.name })
 
         this.events.emit('PEER_DISCONNECTED', {
-          address: address
+          address: address,
+          sid: _.sid
         })
       })
       .on(RoomEvent.Disconnected, (reason) => {

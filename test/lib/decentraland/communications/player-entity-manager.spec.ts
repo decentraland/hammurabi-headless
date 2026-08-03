@@ -1,4 +1,8 @@
-import { PlayerEntityManager, EntityUtils } from '../../../../src/lib/decentraland/communications/player-entity-manager'
+import {
+  PlayerEntityManager,
+  EntityUtils,
+  REMOTE_PLAYER_ENTITY_CAPACITY
+} from '../../../../src/lib/decentraland/communications/player-entity-manager'
 
 describe('PlayerEntityManager remote entity allocation', () => {
   describe('when two peers are connected at the same time', () => {
@@ -49,8 +53,7 @@ describe('PlayerEntityManager remote entity allocation', () => {
     it('returns null instead of colliding onto a live entity', () => {
       const m = new PlayerEntityManager()
 
-      // 32..255 inclusive = 224 remote slots.
-      for (let i = 0; i < 224; i++) {
+      for (let i = 0; i < REMOTE_PLAYER_ENTITY_CAPACITY; i++) {
         expect(m.allocateEntityForPlayer(`0x${i}`)).not.toBeNull()
       }
 
