@@ -1,4 +1,4 @@
-import { robustFetch } from '../../../src/lib/misc/network'
+import { readBodyCapped, robustFetch } from '../../../src/lib/misc/network'
 
 describe('robustFetch', () => {
   const realFetch = globalThis.fetch
@@ -102,5 +102,64 @@ describe('robustFetch', () => {
     controller.abort()
     await p
     expect(calls).toBe(1)
+  })
+})
+
+// A caller holding a Response cannot abort it — robustFetch unbridges the caller's signal in
+// the same `finally` that returns it — and cannot cancel the stream either, because the read
+// locks it. So a body that stalls mid-stream is bounded only by this deadline, and only the
+// reader can release the socket and the chunks it has accumulated.
+describe('readBodyCapped with a time budget', () => {
+  let cancelled: boolean
+  let response: Response
+
+  beforeEach(() => {
+    cancelled = false
+    response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([123, 125])) // "{}" — then stalls forever
+        },
+        cancel() {
+          cancelled = true
+        }
+      })
+    )
+  })
+
+  describe('when the body stalls part-way through', () => {
+    let error: Error
+
+    beforeEach(async () => {
+      error = await readBodyCapped(response, 1024, { timeoutMs: 30 }).catch((e) => e)
+    })
+
+    it('should reject rather than wait on the stream forever', () => {
+      expect(error).toBeInstanceOf(Error)
+    })
+
+    it('should name the timeout so the failure is diagnosable', () => {
+      expect(error.message).toMatch(/timed out/)
+    })
+
+    it('should cancel the reader, releasing the socket and the buffered chunks', () => {
+      expect(cancelled).toBe(true)
+    })
+  })
+
+  describe('when no budget is given', () => {
+    it('should still read a complete body to the end', async () => {
+      const complete = new Response('{"ok":true}')
+
+      await expect(readBodyCapped(complete, 1024)).resolves.toBe('{"ok":true}')
+    })
+  })
+
+  describe('when the body completes inside the budget', () => {
+    it('should return it rather than time out', async () => {
+      const complete = new Response('{"ok":true}')
+
+      await expect(readBodyCapped(complete, 1024, { timeoutMs: 5_000 })).resolves.toBe('{"ok":true}')
+    })
   })
 })
