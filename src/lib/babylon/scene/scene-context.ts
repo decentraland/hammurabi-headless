@@ -44,6 +44,8 @@ import { avatarShapeComponent } from '../../decentraland/sdk-components/avatar-s
 import { avatarBaseComponent } from '../../decentraland/sdk-components/avatar-base'
 // import { delayedInterpolationComponent } from '../../decentraland/sdk-components/delayed-interpolation'
 import { tweenComponent } from '../../decentraland/sdk-components/tween'
+import { tweenStateComponent } from '../../decentraland/sdk-components/tween-state'
+import { processTweens } from './logic/tweens'
 import { materialComponent } from '../../decentraland/sdk-components/material-component'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { CommsTransportWrapper } from '../../decentraland/communications/CommsTransportWrapper'
@@ -201,6 +203,7 @@ export class SceneContext implements EngineApiInterface {
     [avatarShapeComponent.componentId]: createLwwStore(avatarShapeComponent),
     [avatarBaseComponent.componentId]: createLwwStore(avatarBaseComponent),
     [tweenComponent.componentId]: createLwwStore(tweenComponent),
+    [tweenStateComponent.componentId]: createLwwStore(tweenStateComponent),
     // [delayedInterpolationComponent.componentId]: createLwwStore(delayedInterpolationComponent),
     [materialComponent.componentId]: createLwwStore(materialComponent),
     [realmInfoComponent.componentId]: createLwwStore(realmInfoComponent)
@@ -524,6 +527,11 @@ export class SceneContext implements EngineApiInterface {
     if (this._avatarSystem) {
       this._avatarSystem.update()
     }
+
+    // Advance tweens AFTER this tick's CRDT is ingested (so a PBTween put this
+    // frame takes effect immediately) and BEFORE Babylon computes world
+    // matrices, so colliders and raycasts this frame see the tweened positions.
+    processTweens(this, this.babylonScene.getEngine().getDeltaTime())
 
     // mark the frame as processed. this signals the lateUpdate to respond to the scene with updates
     this.finishedProcessingIncomingMessagesOfTick = true
