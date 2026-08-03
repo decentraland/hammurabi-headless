@@ -1,4 +1,5 @@
 import { readBodyCapped, robustFetch } from '../../../src/lib/misc/network'
+import { limitLogger } from '../../../src/lib/misc/limit-logger'
 
 describe('robustFetch', () => {
   const realFetch = globalThis.fetch
@@ -148,18 +149,96 @@ describe('readBodyCapped with a time budget', () => {
   })
 
   describe('when no budget is given', () => {
-    it('should still read a complete body to the end', async () => {
-      const complete = new Response('{"ok":true}')
+    let complete: Response
 
+    beforeEach(() => {
+      complete = new Response('{"ok":true}')
+    })
+
+    it('should still read a complete body to the end', async () => {
       await expect(readBodyCapped(complete, 1024)).resolves.toBe('{"ok":true}')
     })
   })
 
   describe('when the body completes inside the budget', () => {
-    it('should return it rather than time out', async () => {
-      const complete = new Response('{"ok":true}')
+    let complete: Response
 
+    beforeEach(() => {
+      complete = new Response('{"ok":true}')
+    })
+
+    it('should return it rather than time out', async () => {
       await expect(readBodyCapped(complete, 1024, { timeoutMs: 5_000 })).resolves.toBe('{"ok":true}')
+    })
+  })
+})
+
+// The size cap is what stops a hostile or misconfigured endpoint streaming unbounded bytes
+// into host memory, so it is load-bearing (CLAUDE.md) — and it was untested.
+describe('readBodyCapped size cap', () => {
+  let hit: jest.SpyInstance
+
+  beforeEach(() => {
+    hit = jest.spyOn(limitLogger, 'hit').mockImplementation(() => void 0)
+  })
+
+  afterEach(() => {
+    hit.mockRestore()
+  })
+
+  describe('when the declared content-length already exceeds the cap', () => {
+    let response: Response
+    let error: Error
+
+    beforeEach(async () => {
+      response = new Response('too much', { headers: { 'content-length': '9999' } })
+      error = await readBodyCapped(response, 8).catch((e) => e)
+    })
+
+    it('should reject rather than start reading', () => {
+      expect(error.message).toMatch(/exceeds 8 bytes/)
+    })
+
+    it('should release the body it is refusing', () => {
+      expect(response.bodyUsed).toBe(true)
+    })
+
+    it('should report the limit hit naming the declared size', () => {
+      expect(hit).toHaveBeenCalledWith('maxBodyBytes', expect.stringContaining('content-length 9999'))
+    })
+  })
+
+  describe('when a body without a declared length streams past the cap', () => {
+    let cancelled: boolean
+    let error: Error
+
+    beforeEach(async () => {
+      cancelled = false
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(4))
+            controller.enqueue(new Uint8Array(4))
+            controller.enqueue(new Uint8Array(4))
+          },
+          cancel() {
+            cancelled = true
+          }
+        })
+      )
+      error = await readBodyCapped(response, 8).catch((e) => e)
+    })
+
+    it('should reject once the streamed total passes the cap', () => {
+      expect(error.message).toMatch(/exceeds 8 bytes/)
+    })
+
+    it('should cancel the reader instead of draining the rest', () => {
+      expect(cancelled).toBe(true)
+    })
+
+    it('should report the limit hit naming the streamed overflow', () => {
+      expect(hit).toHaveBeenCalledWith('maxBodyBytes', expect.stringContaining('streamed'))
     })
   })
 })

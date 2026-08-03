@@ -8,9 +8,23 @@ import { Entity } from '../../../../src/lib/decentraland/types'
 // every subscription reads the same entries through its own cursor, nothing is delivered
 // twice, and it stays bounded when a subscription stops reading.
 
-function seqsAfter(log: ReturnType<typeof createEmoteAppendLog>, afterSeq: number, throughSeq: number): number[] {
+type Log = ReturnType<typeof createEmoteAppendLog>
+
+function seqsAfter(log: Log, afterSeq: number, throughSeq: number): number[] {
   const seen: number[] = []
   log.forEachAfter(afterSeq, throughSeq, (entry) => seen.push(entry.seq))
+  return seen
+}
+
+function payloadsOf(log: Log): Uint8Array[] {
+  const seen: Uint8Array[] = []
+  log.forEachAfter(0, log.sequence, (entry) => seen.push(entry.data))
+  return seen
+}
+
+function entitiesOf(log: Log): Entity[] {
+  const seen: Entity[] = []
+  log.forEachAfter(0, log.sequence, (entry) => seen.push(entry.entityId))
   return seen
 }
 
@@ -40,10 +54,7 @@ describe('emote append log', () => {
     })
 
     it('should retain the payload bytes as given', () => {
-      const payloads: Uint8Array[] = []
-      log.forEachAfter(0, log.sequence, (entry) => payloads.push(entry.data))
-
-      expect(payloads).toEqual([Uint8Array.of(1), Uint8Array.of(2)])
+      expect(payloadsOf(log)).toEqual([Uint8Array.of(1), Uint8Array.of(2)])
     })
   })
 
@@ -75,6 +86,14 @@ describe('emote append log', () => {
       // been committed, so an append can never be delivered ahead of them.
       expect(seqsAfter(log, 0, 2)).toEqual([1, 2])
     })
+
+    describe('and the reader cursor is already past that bound', () => {
+      it('should return nothing rather than treat the range as inverted', () => {
+        // This is the shape a subscription created mid-tick sees: its cursor starts at the
+        // newest sequence while the bound still sits at the last committed one.
+        expect(seqsAfter(log, 3, 1)).toEqual([])
+      })
+    })
   })
 
   describe('when pruning entries every reader has consumed', () => {
@@ -96,6 +115,16 @@ describe('emote append log', () => {
     it('should not rewind the sequence, so later cursors stay comparable', () => {
       expect(log.sequence).toBe(3)
     })
+
+    describe('and a later prune names a sequence below what survives', () => {
+      beforeEach(() => {
+        log.pruneUpTo(1)
+      })
+
+      it('should drop nothing, since those entries are already gone', () => {
+        expect(seqsAfter(log, 0, log.sequence)).toEqual([3])
+      })
+    })
   })
 
   describe('when an entity is retired', () => {
@@ -111,10 +140,7 @@ describe('emote append log', () => {
     })
 
     it('should leave other entities pending', () => {
-      const entities: Entity[] = []
-      log.forEachAfter(0, log.sequence, (entry) => entities.push(entry.entityId))
-
-      expect(entities).toEqual([entityB])
+      expect(entitiesOf(log)).toEqual([entityB])
     })
 
     it('should not rewind the sequence', () => {

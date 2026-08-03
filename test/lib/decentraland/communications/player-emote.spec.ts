@@ -126,32 +126,34 @@ describe('avatar communication system player emotes', () => {
       expect(emoteAppends(subscription)).toEqual([])
     })
 
-    it('should emit the identity PUT for the entity in the same buffer', () => {
-      const messages = pullMessages(subscription)
+    describe('and the buffer is inspected as a whole', () => {
+      let identityPuts: any[]
+      let identityAt: number
+      let appendAt: number
 
-      expect(
-        messages.filter(
-          (message) =>
-            message.type === CrdtMessageType.PUT_COMPONENT &&
-            message.componentId === playerIdentityDataComponent.componentId &&
-            message.entityId === entity
-        )
-      ).toHaveLength(1)
-    })
-
-    it('should place that identity PUT before the append, so the entity exists first', () => {
-      const messages = pullMessages(subscription)
-      const identityAt = messages.findIndex(
-        (message) =>
+      beforeEach(() => {
+        const messages = pullMessages(subscription)
+        const isIdentityPut = (message: any) =>
           message.type === CrdtMessageType.PUT_COMPONENT &&
           message.componentId === playerIdentityDataComponent.componentId
-      )
-      const appendAt = messages.findIndex((message) => message.type === CrdtMessageType.APPEND_VALUE)
+        identityPuts = messages.filter((message) => isIdentityPut(message) && message.entityId === entity)
+        identityAt = messages.findIndex(isIdentityPut)
+        appendAt = messages.findIndex((message) => message.type === CrdtMessageType.APPEND_VALUE)
+      })
 
-      // Both indices must be real: `-1 < 0` would otherwise "pass" with no PUT at all,
-      // which is how the original version of this test managed to prove nothing.
-      expect(identityAt).toBeGreaterThanOrEqual(0)
-      expect(identityAt).toBeLessThan(appendAt)
+      it('should emit the identity PUT for the entity exactly once', () => {
+        expect(identityPuts).toHaveLength(1)
+      })
+
+      it('should emit that identity PUT at all, not merely absent from the buffer', () => {
+        // Guards the ordering assertion below from `-1 < 0`, which is how the first version
+        // of that test managed to prove nothing.
+        expect(identityAt).toBeGreaterThanOrEqual(0)
+      })
+
+      it('should place it before the append, so the entity exists first', () => {
+        expect(identityAt).toBeLessThan(appendAt)
+      })
     })
   })
 
@@ -185,6 +187,8 @@ describe('avatar communication system player emotes', () => {
   })
 
   describe('when the same emote arrives repeatedly', () => {
+    let appends: ReturnType<typeof emoteAppends>
+
     beforeEach(() => {
       // A held looping emote re-sends once per animation cycle. rfc4 declares an
       // `isRepeating` field for exactly this, but the reference client never SETS it (no
@@ -193,15 +197,14 @@ describe('avatar communication system player emotes', () => {
       transport.events.emit('playerEmote', { address: '0xCCC', data: { urn: loopingUrn, timestamp: 0 } })
       transport.events.emit('playerEmote', { address: '0xCCC', data: { urn: loopingUrn, timestamp: 1 } })
       system.update()
+      appends = emoteAppends(subscription)
     })
 
     it('should append every occurrence', () => {
-      expect(emoteAppends(subscription)).toHaveLength(2)
+      expect(appends).toHaveLength(2)
     })
 
     it('should give them increasing timestamps', () => {
-      const appends = emoteAppends(subscription)
-
       expect(appends[1].value.timestamp).toBeGreaterThan(appends[0].value.timestamp)
     })
   })

@@ -483,65 +483,77 @@ describe('emote metadata resolver', () => {
   })
 
   describe('when reading the response body', () => {
+    // The request signal cannot bound the body (robustFetch unbridges it before returning the
+    // response) and the stream is locked by the reader, so the deadline has to be the
+    // reader's. Behaviour of that deadline lives in test/lib/misc/network.spec.ts; what
+    // belongs here is that a budget is handed over at all.
+    let budgetMs: number
+
     beforeEach(async () => {
       robustFetchMock.mockResolvedValue({ ok: true })
       readBodyCappedMock.mockResolvedValue('[]')
       await resolver.resolveLoop('urn:decentraland:matic:collections-v2:0xbody:1', '0xpeer')
+      budgetMs = readBodyCappedMock.mock.calls[0][2].timeoutMs
     })
 
     it('should hand the reader what is left of the lookup budget', () => {
-      // The request signal cannot bound the body (robustFetch unbridges it before returning
-      // the response) and the stream is locked by the reader, so the deadline has to be the
-      // reader's. Behaviour of that deadline is covered in test/lib/misc/network.spec.ts;
-      // what belongs here is that a budget is passed at all.
-      const [, , opts] = readBodyCappedMock.mock.calls[0]
-
-      expect(opts.timeoutMs).toBeGreaterThan(0)
+      expect(budgetMs).toBeGreaterThan(0)
     })
 
     it('should not hand it more than the whole-lookup budget', () => {
-      const [, , opts] = readBodyCappedMock.mock.calls[0]
-
-      expect(opts.timeoutMs).toBeLessThanOrEqual(limits.emoteMetadataLookupTimeoutMs)
+      expect(budgetMs).toBeLessThanOrEqual(limits.emoteMetadataLookupTimeoutMs)
     })
   })
 
   describe('when shortening urns', () => {
+    let itemUrn: string
+    let baseEmoteUrn: string
+
+    beforeEach(() => {
+      itemUrn = 'urn:decentraland:matic:collections-v2:0xc0ffee:3'
+      baseEmoteUrn = 'urn:decentraland:off-chain:base-emotes:wave'
+    })
+
     it('should drop the token id tail of an extended collection urn', () => {
-      expect(shortenEmoteUrn('urn:decentraland:matic:collections-v2:0xc0ffee:3:12345')).toBe(
-        'urn:decentraland:matic:collections-v2:0xc0ffee:3'
-      )
+      expect(shortenEmoteUrn(`${itemUrn}:12345`)).toBe(itemUrn)
     })
 
     it('should leave a non-extended urn untouched', () => {
-      expect(shortenEmoteUrn('urn:decentraland:off-chain:base-emotes:wave')).toBe(
-        'urn:decentraland:off-chain:base-emotes:wave'
-      )
+      expect(shortenEmoteUrn(baseEmoteUrn)).toBe(baseEmoteUrn)
     })
 
-    it('should leave a third-party urn that carries no token id untouched', () => {
-      const urn = 'urn:decentraland:amoy:collections-thirdparty:back-to-the-future:amoy-eb54:tuxedo-6751'
+    describe('and the urn is third party', () => {
+      let itemUrn: string
+      let extendedUrn: string
 
-      expect(shortenEmoteUrn(urn)).toBe(urn)
+      beforeEach(() => {
+        itemUrn = 'urn:decentraland:amoy:collections-thirdparty:back-to-the-future:amoy-eb54:tuxedo-6751'
+        // The client keeps the first 7 parts for third-party items; the trailing
+        // `<chain>:<contract>:<tokenId>` identifies the copy, not the item.
+        extendedUrn = `${itemUrn}:amoy:0x1d9fb685c257e74f869ba302e260c0b68f5ebb37:12`
+      })
+
+      it('should leave one that carries no token id untouched', () => {
+        expect(shortenEmoteUrn(itemUrn)).toBe(itemUrn)
+      })
+
+      it('should drop the three-part token id of an extended one', () => {
+        expect(shortenEmoteUrn(extendedUrn)).toBe(itemUrn)
+      })
     })
 
-    it('should not take the third-party path for a urn that merely mentions it in the tail', () => {
-      // Peer-controlled: appending this to an ordinary urn used to select the branch that
-      // returns the urn unshortened, minting a fresh cache key per crafted tail.
-      expect(shortenEmoteUrn('urn:decentraland:matic:collections-v2:0xc0ffee:3:collections-thirdparty')).toBe(
-        'urn:decentraland:matic:collections-v2:0xc0ffee:3'
-      )
-    })
+    describe('and the urn merely mentions third party in its tail', () => {
+      let craftedUrn: string
 
-    it('should drop the three-part token id of an extended third-party urn', () => {
-      // The client keeps the first 7 parts for third-party items; the trailing
-      // `<chain>:<contract>:<tokenId>` is what identifies the copy, not the item.
-      const extended =
-        'urn:decentraland:amoy:collections-thirdparty:back-to-the-future:amoy-eb54:tuxedo-6751:amoy:0x1d9fb685c257e74f869ba302e260c0b68f5ebb37:12'
+      beforeEach(() => {
+        // Peer-controlled: this used to select the branch that returns the urn unshortened,
+        // minting a fresh cache key per crafted tail.
+        craftedUrn = 'urn:decentraland:matic:collections-v2:0xc0ffee:3:collections-thirdparty'
+      })
 
-      expect(shortenEmoteUrn(extended)).toBe(
-        'urn:decentraland:amoy:collections-thirdparty:back-to-the-future:amoy-eb54:tuxedo-6751'
-      )
+      it('should shorten it normally rather than take the third-party path', () => {
+        expect(shortenEmoteUrn(craftedUrn)).toBe('urn:decentraland:matic:collections-v2:0xc0ffee:3')
+      })
     })
   })
 })
