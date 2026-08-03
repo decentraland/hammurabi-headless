@@ -191,6 +191,16 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   into a fetch URL — a `../`-bearing hash would otherwise WHATWG-normalize into a
   path traversal on the realm origin. Scene→LiveKit `sendBinary` caps peers,
   messages, per-message size AND the per-message destination-identities list.
+  CommsApi topics (`comms-api-topics.ts`) are bounded on BOTH sides because both
+  are untrusted: outbound, the topic byte length and a per-topic publish rate;
+  inbound, only SUBSCRIBED topics allocate a buffer (a peer cannot make the host
+  allocate for a topic the scene never asked for) and each buffer drops oldest at
+  its cap. The subscription count and the publish-rate map are capped too — both
+  are keyed by scene-controlled strings, and the reference client bounds neither.
+  Topic payloads share the rfc4 `Scene` packet with the SDK MessageBus and are
+  told apart ONLY by the leading `MsgType` byte (`CommsData = 3`, a value fixed by
+  the reference client): `sceneMessageBus` must route on that byte and return, or
+  every topic payload also lands in the MessageBus queue as an untagged blob.
   Inbound comms: `CommsTransportWrapper.handleMessage` drops oversized packets and
   rate-limits per peer before decoding; the avatar system dedupes + rate-limits
   per-peer profile fetches (`avatar-communication-system.ts`) to bound Catalyst

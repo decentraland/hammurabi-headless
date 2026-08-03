@@ -60,6 +60,11 @@ export interface Limits {
   maxSendMessages: number
   maxCommsMessageBytes: number
   maxSignedFetchRedirects: number
+  maxCommsTopicBytes: number
+  maxCommsTopicSubscriptions: number
+  maxCommsTopicBufferMessages: number
+  commsTopicPublishWindowMs: number
+  maxCommsTopicPublishesPerWindow: number
 
   // --- Fetch / network / assets / WebSocket ---
   fetchTimeoutMs: number
@@ -185,6 +190,18 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxSendMessages', env: 'HAMMURABI_MAX_SEND_MESSAGES', def: 512, min: 1 },
   { key: 'maxCommsMessageBytes', env: 'HAMMURABI_MAX_COMMS_MESSAGE_BYTES', def: 30_000, min: 1 },
   { key: 'maxSignedFetchRedirects', env: 'HAMMURABI_MAX_SIGNED_FETCH_REDIRECTS', def: 5, min: 0 },
+  // CommsApi topics. The first three mirror the reference client's constants
+  // (MAX_TOPIC_BYTES_LENGTH, TOPIC_BUFFER_MAX_MESSAGE_COUNT, RATE_LIMIT_WINDOW_MS
+  // / MAX_MESSAGES_PER_SECOND) so a scene tuned against it behaves the same here.
+  { key: 'maxCommsTopicBytes', env: 'HAMMURABI_MAX_COMMS_TOPIC_BYTES', def: 512, min: 1 },
+  // No reference-client equivalent: it keeps an unbounded topic dictionary. A
+  // scene here is untrusted, and subscribeToTopic is scene-driven, so the map
+  // needs a ceiling of its own or a loop of subscribe(uniqueTopic) grows host
+  // memory without limit.
+  { key: 'maxCommsTopicSubscriptions', env: 'HAMMURABI_MAX_COMMS_TOPIC_SUBSCRIPTIONS', def: 256, min: 1 },
+  { key: 'maxCommsTopicBufferMessages', env: 'HAMMURABI_MAX_COMMS_TOPIC_BUFFER_MESSAGES', def: 1_024, min: 1 },
+  { key: 'commsTopicPublishWindowMs', env: 'HAMMURABI_COMMS_TOPIC_PUBLISH_WINDOW_MS', def: 1_000, min: 1 },
+  { key: 'maxCommsTopicPublishesPerWindow', env: 'HAMMURABI_MAX_COMMS_TOPIC_PUBLISHES_PER_WINDOW', def: 10, min: 1 },
 
   // Fetch / network / assets / WS
   { key: 'fetchTimeoutMs', env: 'HAMMURABI_FETCH_TIMEOUT_MS', def: 15_000, min: 100 },
