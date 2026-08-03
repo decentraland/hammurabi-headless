@@ -51,6 +51,7 @@ export interface Limits {
   maxEmoteAppendLog: number
   maxEmoteMetadataCacheEntries: number
   maxEmoteMetadataInflight: number
+  maxEmoteMetadataWaiters: number
   emoteMetadataFetchCooldownMs: number
   emoteMetadataLookupTimeoutMs: number
 
@@ -160,6 +161,10 @@ const KNOBS: readonly Knob[] = [
   // therefore leaves only that weak bound, and unlike profileFetchCooldownMs nothing sits
   // behind it (no attemptedVersion-style dedupe), so 0 removes the only rate control.
   { key: 'maxEmoteMetadataInflight', env: 'HAMMURABI_MAX_EMOTE_METADATA_INFLIGHT', def: 32, min: 1 },
+  // Callers allowed to wait on ONE in-flight lookup. The ceiling above counts lookups, so
+  // without this a peer repeating an emote at its full packet rate stacks continuations for
+  // as long as that lookup takes, which is rate x deadline rather than any cap.
+  { key: 'maxEmoteMetadataWaiters', env: 'HAMMURABI_MAX_EMOTE_METADATA_WAITERS', def: 64, min: 1 },
   {
     key: 'emoteMetadataFetchCooldownMs',
     env: 'HAMMURABI_EMOTE_METADATA_FETCH_COOLDOWN_MS',

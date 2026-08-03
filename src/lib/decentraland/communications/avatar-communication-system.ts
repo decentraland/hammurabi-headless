@@ -390,6 +390,9 @@ export function createAvatarCommunicationSystem(
   // session, and this grows once per departed peer. Oldest entries are evicted.
   const MAX_DELETED_ENTITIES = limits.maxAvatarTombstones // HAMMURABI_MAX_AVATAR_TOMBSTONES
 
+  // Whitespace (incl. CR/LF) or an ASCII control char anywhere in an emote identifier.
+  const MALFORMED_EMOTE_URN = /[\s\u0000-\u001f\u007f]/
+
   // Throttle the "pool exhausted" warning. findPlayerEntityByAddress runs per
   // inbound packet, so once the 224-slot remote-player pool is full an unallocated
   // peer would otherwise log once per dropped packet — up to the per-peer inbound
@@ -843,6 +846,16 @@ export function createAvatarCommunicationSystem(
     // there. Throttled log: a peer could otherwise spam this at its full packet rate.
     if (Buffer.byteLength(emoteUrn) > MAX_EMOTE_URN_BYTES) {
       limitLogger.hit('maxEmoteUrnBytes', event.address)
+      return
+    }
+    // No real emote identifier contains whitespace or control characters — urns, legacy
+    // names and the client's embedded ids are all single tokens. Rejecting those here keeps
+    // a crafted string from becoming a registry pointer and a cache key, and keeps it out of
+    // log lines. Deliberately NOT a charset allowlist: a false reject would silently drop a
+    // legitimate emote, and cache/debounce/ceiling already bound the load an odd-but-valid
+    // urn can cause.
+    if (MALFORMED_EMOTE_URN.test(emoteUrn)) {
+      limitLogger.hit('maxEmoteUrnBytes', `malformed urn from ${event.address}`)
       return
     }
 

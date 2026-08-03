@@ -349,6 +349,36 @@ describe('avatar communication system player emotes', () => {
     })
   })
 
+  describe('when the urn contains control characters or whitespace', () => {
+    let hit: jest.SpyInstance
+    let appends: ReturnType<typeof emoteAppends>
+
+    beforeEach(() => {
+      // No real emote identifier looks like this — urns, legacy names and the client's
+      // embedded ids are single tokens. Rejecting it keeps a crafted string from becoming a
+      // registry pointer, a cache key and a log line.
+      hit = jest.spyOn(limitLogger, 'hit').mockImplementation(() => void 0)
+      transport.events.emit('playerEmote', { address: '0xC0C', data: { urn: 'wave\r\ninjected', timestamp: 0 } })
+      transport.events.emit('playerEmote', { address: '0xC0C', data: { urn: 'two words', timestamp: 0 } })
+      system.update()
+      appends = emoteAppends(subscription)
+    })
+
+    afterEach(() => hit.mockRestore())
+
+    it('should append nothing for either', () => {
+      expect(appends).toEqual([])
+    })
+
+    it('should report the rejection with the peer for context', () => {
+      expect(hit).toHaveBeenCalledWith('maxEmoteUrnBytes', expect.stringContaining('malformed urn'))
+    })
+
+    it('should not have attempted a metadata lookup for them', () => {
+      expect(robustFetchMock).not.toHaveBeenCalled()
+    })
+  })
+
   describe('when the urn is within the character count but exceeds the cap in bytes', () => {
     let hit: jest.SpyInstance
 

@@ -210,7 +210,15 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   cooldown to 0 leaves just `ceiling ÷ latency` — thousands of requests per second
   against a fast registry, and raising the ceiling multiplies that term directly.
   Unlike `profileFetchCooldownMs` nothing sits behind this cooldown (there is no
-  `attemptedVersion`-style dedupe), so 0 removes the only rate control. The BODY read
+  `attemptedVersion`-style dedupe), so 0 removes the only rate control. A THIRD cap
+  bounds waiters, not lookups: repeats of an in-flight urn are deliberately coalesced
+  onto the shared promise (a repeat should get the real answer), but each handout costs
+  the caller a continuation living until the lookup settles — peer packet rate × lookup
+  deadline, which neither of the other two caps touches — so the excess degrades to the
+  default like a cooldown hit. The urn is also rejected outright if it contains
+  whitespace or control characters: no real identifier does, and it keeps a crafted
+  string out of registry pointers, cache keys and log lines. That is deliberately not a
+  charset allowlist — a false reject would silently drop a legitimate emote. The BODY read
   carries its OWN deadline and needs to: `robustFetch` swaps in its internal
   controller's signal and unbridges the caller's in the same `finally` that returns the
   response, so the request signal stops covering anything once the response is in hand,

@@ -1,7 +1,7 @@
 import { getAssetBundleRegistryUrl } from '../environment'
 import { robustFetch, drainResponse, readBodyCapped, DEFAULT_MAX_BODY_BYTES } from '../../misc/network'
 import { limits } from '../../misc/limits'
-import { limitLogger } from '../../misc/limit-logger'
+import { limitLogger, sanitizeLogDetail } from '../../misc/limit-logger'
 import { createRateLimitedErrorLogger } from '../../misc/logger'
 
 /**
@@ -107,6 +107,7 @@ const MAX_CACHE_ENTRIES = limits.maxEmoteMetadataCacheEntries // HAMMURABI_MAX_E
 const MAX_INFLIGHT = limits.maxEmoteMetadataInflight // HAMMURABI_MAX_EMOTE_METADATA_INFLIGHT
 const FETCH_COOLDOWN_MS = limits.emoteMetadataFetchCooldownMs // HAMMURABI_EMOTE_METADATA_FETCH_COOLDOWN_MS
 const LOOKUP_TIMEOUT_MS = limits.emoteMetadataLookupTimeoutMs // HAMMURABI_EMOTE_METADATA_LOOKUP_TIMEOUT_MS
+const MAX_WAITERS_PER_LOOKUP = limits.maxEmoteMetadataWaiters // HAMMURABI_MAX_EMOTE_METADATA_WAITERS
 
 // Number of colon-separated parts a non-extended urn has; anything longer carries a
 // tokenId tail that the client strips before using the urn as a pointer/key.
@@ -164,6 +165,9 @@ export function createEmoteMetadataResolver(): EmoteMetadataResolver {
   const cache = new Map<string, boolean>()
   // Lookups in flight, so N packets for the same urn share one request.
   const inFlight = new Map<string, Promise<boolean>>()
+  // How many callers are already waiting on each in-flight lookup. Cleared with the
+  // lookup, so this map is bounded by `inFlight` and needs no cap of its own.
+  const pendingWaiters = new Map<string, number>()
   // peer address -> when we last started a lookup for it.
   const lastFetchAt = new Map<string, number>()
 
@@ -257,7 +261,10 @@ export function createEmoteMetadataResolver(): EmoteMetadataResolver {
       const loop = metadata?.emoteDataADR74?.loop ?? metadata?.data?.loop
       return remember(key, loop === true)
     } catch (error: any) {
-      logError(`Failed to resolve emote metadata for ${pointer}`, error)
+      // The pointer is a remote peer's string. It is length-capped upstream, but this is an
+      // ORDINARY error log, not limitLogger, so nothing else would collapse control
+      // characters — a crafted urn could otherwise forge extra log lines.
+      logError(`Failed to resolve emote metadata for ${sanitizeLogDetail(pointer)}`, error)
       return undefined
     } finally {
       clearTimeout(timer)
@@ -286,7 +293,22 @@ export function createEmoteMetadataResolver(): EmoteMetadataResolver {
       if (embedded !== undefined) return embedded
 
       const pending = inFlight.get(key)
-      if (pending) return pending
+      if (pending) {
+        // Coalescing is deliberate — a repeat should get the real answer rather than the
+        // default — but handing the shared promise out is not free to the CALLER: each one
+        // attaches a continuation that lives until the lookup settles. That is bounded by
+        // the peer's packet rate times the lookup deadline, i.e. by nothing either
+        // maxEmoteMetadataInflight (which counts lookups, not waiters) or maxEmoteAppendLog
+        // (which counts queued appends, not pending ones) constrains. So cap the waiters and
+        // degrade the excess to the default, exactly as the cooldown does.
+        const waiters = (pendingWaiters.get(key) ?? 0) + 1
+        if (waiters > MAX_WAITERS_PER_LOOKUP) {
+          limitLogger.hit('maxEmoteMetadataWaiters', peerAddress)
+          return false
+        }
+        pendingWaiters.set(key, waiters)
+        return pending
+      }
 
       // A legacy bare name ("wave") is mapped onto its on-chain urn before the lookup,
       // exactly as the client does. The pointer keeps its original casing — only our
@@ -320,7 +342,10 @@ export function createEmoteMetadataResolver(): EmoteMetadataResolver {
         .then((loop) => loop ?? false)
         // Cleared HERE, keyed by `key`, because that is what the map is keyed by — a
         // legacy name and the pointer it maps to are different strings.
-        .finally(() => inFlight.delete(key))
+        .finally(() => {
+          inFlight.delete(key)
+          pendingWaiters.delete(key)
+        })
       inFlight.set(key, promise)
       return promise
     }

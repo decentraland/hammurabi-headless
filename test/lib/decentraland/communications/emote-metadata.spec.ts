@@ -505,6 +505,68 @@ describe('emote metadata resolver', () => {
     })
   })
 
+  describe('when a peer repeats an emote whose lookup is still in flight', () => {
+    let hit: jest.SpyInstance
+    let admitted: number
+    let overflow: boolean | Promise<boolean>
+
+    beforeEach(() => {
+      // Coalescing hands every repeat the SAME promise, so each one costs the caller a
+      // continuation that lives until the lookup settles. The in-flight ceiling counts
+      // lookups, not waiters, so without a cap of its own this grows with the peer's packet
+      // rate times the lookup deadline.
+      hit = jest.spyOn(limitLogger, 'hit').mockImplementation(() => void 0)
+      robustFetchMock.mockReturnValue(new Promise(() => void 0)) // never settles
+      admitted = 0
+      const urn = 'urn:decentraland:matic:collections-v2:0xrepeated:1'
+      resolver.resolveLoop(urn, '0xpeer') // the lookup itself
+      for (let i = 0; i < limits.maxEmoteMetadataWaiters; i++) {
+        if (typeof resolver.resolveLoop(urn, '0xpeer') !== 'boolean') admitted++
+      }
+      overflow = resolver.resolveLoop(urn, '0xpeer')
+    })
+
+    afterEach(() => hit.mockRestore())
+
+    it('should let repeats share the lookup up to the waiter cap', () => {
+      expect(admitted).toBe(limits.maxEmoteMetadataWaiters)
+    })
+
+    it('should degrade the overflowing repeat to the safe default', () => {
+      expect(overflow).toBe(false)
+    })
+
+    it('should report the limit hit with the peer for context', () => {
+      expect(hit).toHaveBeenCalledWith('maxEmoteMetadataWaiters', '0xpeer')
+    })
+
+    it('should still hold only one outbound lookup for them all', () => {
+      expect(robustFetchMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('when a lookup fails for a urn carrying control characters', () => {
+    let logged: string
+
+    beforeEach(async () => {
+      // This path logs through the ordinary error logger, not limitLogger, so nothing else
+      // would collapse the CR/LF a crafted urn could use to forge extra log lines.
+      const error = jest.spyOn(console, 'error').mockImplementation(() => void 0)
+      robustFetchMock.mockRejectedValue(new Error('network down'))
+      await resolver.resolveLoop('urn:decentraland:matic:collections-v2:0xevil\r\nFAKE LOG LINE:1', '0xpeer')
+      logged = error.mock.calls.map((args) => String(args[0])).join('\n')
+      error.mockRestore()
+    })
+
+    it('should strip the control characters before logging the urn', () => {
+      expect(logged).not.toMatch(/[\r\n]FAKE LOG LINE/)
+    })
+
+    it('should still name the urn so the failure stays diagnosable', () => {
+      expect(logged).toMatch(/0xevil/)
+    })
+  })
+
   describe('when shortening urns', () => {
     let itemUrn: string
     let baseEmoteUrn: string

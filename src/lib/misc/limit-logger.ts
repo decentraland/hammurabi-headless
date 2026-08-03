@@ -34,6 +34,20 @@ export const MAX_DETAIL_LEN = 200
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]+/g
 const URL_USERINFO = /(:\/\/)[^/\s@]+@/g
 
+/**
+ * Make a scene/peer-controlled string safe to put in a log line: collapse control
+ * characters so it cannot fake extra lines, redact URL userinfo, then truncate.
+ *
+ * Exported because the hazard is not exclusive to the throttled limit logger — any path
+ * that logs untrusted text needs the same treatment, and duplicating these regexes is how
+ * one copy ends up weaker than the other.
+ */
+export function sanitizeLogDetail(detail: string, maxLen: number = MAX_DETAIL_LEN): string {
+  // Sanitize BEFORE truncating so the cut cannot re-expose a stripped char.
+  const clean = detail.replace(CONTROL_CHARS, ' ').replace(URL_USERINFO, '$1***@')
+  return clean.length > maxLen ? clean.slice(0, maxLen) + '…' : clean
+}
+
 export interface ThrottledLimitLoggerOptions {
   /** Minimum gap between emissions for the same key. Defaults to {@link DEFAULT_LIMIT_LOG_INTERVAL_MS}. */
   intervalMs?: number
@@ -73,12 +87,7 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
       if (t - s.lastLogAt >= intervalMs) {
         const windowSec = s.lastLogAt === Number.NEGATIVE_INFINITY ? null : Math.round((t - s.lastLogAt) / 1000)
         const suffix = s.suppressed > 0 ? ` (${s.suppressed} more in ${windowSec ?? '?'}s)` : ''
-        let shownDetail = detail
-        if (shownDetail) {
-          // Sanitize BEFORE truncating so the cut cannot re-expose a stripped char.
-          shownDetail = shownDetail.replace(CONTROL_CHARS, ' ').replace(URL_USERINFO, '$1***@')
-          if (shownDetail.length > MAX_DETAIL_LEN) shownDetail = shownDetail.slice(0, MAX_DETAIL_LEN) + '…'
-        }
+        const shownDetail = detail ? sanitizeLogDetail(detail) : detail
         emit(`${key} reached${shownDetail ? `: ${shownDetail}` : ''}${suffix}`)
         s.lastLogAt = t
         s.suppressed = 0
