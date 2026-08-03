@@ -328,15 +328,38 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 - **Adapter System** (`src/lib/decentraland/communications/connect-adapter.ts`)
   - `connectLocalAdapter`: Local preview via comms-gatekeeper
   - `connectGenesisAdapter`: Production Genesis City connections
+  - `connectWorldsAdapter`: Decentraland Worlds scenes
   - `connectProductionAdapter`: Flexible production realm connections
-  - Protocol support: livekit, ws-room, offline, signed-login
-- **Comms Gatekeeper URLs**:
-  - Local: `https://comms-gatekeeper-local.decentraland.org`
-  - Production: `https://comms-gatekeeper.decentraland.zone`
+  - `connectAdapter`: dispatches on the adapter string's protocol prefix
+  - Adapter protocols understood by `connectAdapter`: **`livekit` and `offline`
+    only**. A `ws-room:` or `signed-login:` adapter string throws
+    ("A communications adapter could not be created for protocol=…"). Realms
+    advertising those in `/about`'s `comms.fixedAdapter` are NOT supported.
+- **Transports** (`connect-transport.ts` → `transports/`)
+  - **`livekit` is the only transport that can be constructed.** `offline.ts`
+    exists but is reachable only through the local-preview fallback in
+    `scene-comms.ts` (when the gatekeeper handshake fails), never via
+    `connectTransport`. There is no ws-room transport.
+- **Comms Gatekeeper URLs**: the non-local URL is environment-derived
+  (`getCommsGatekeeperUrl`, `environment.ts`) — `decentraland.org` by default,
+  `decentraland.zone` under `--env=zone`. It is not a fixed `.zone` host.
+  - Local preview: `https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter`
+  - Otherwise: `https://comms-gatekeeper.${domain}/get-server-scene-adapter`
 
 **RPC Services (`src/lib/babylon/scene/connect-context-rpc.ts`)**
 - Scene-kernel communication via RPC protocol
-- Service definitions: Runtime, Permissions, UserIdentity, PortableExperiences, CommsApi
+- Services actually registered: `EngineApi`, `Runtime`, `UserIdentity`,
+  `UserActionModule`, `RestrictedActions`, `CommunicationsController`, `CommsApi`,
+  `SignedFetch` — plus `Testing` (registered separately, in `nodejs-runtime.ts`).
+  **`Permissions` and `PortableExperiences` are NOT registered**, and neither is
+  `EnvironmentApi`, `EthereumController`, `Players`, `Scene` or `ParcelIdentity`.
+  `common-runtime/modules.ts` is the matching scene-side list: a `require()` of
+  any module not in that switch throws `Unknown module <name>`.
+- Several registered methods are deliberate no-ops that report success and do
+  nothing: every `RestrictedActions` method (`movePlayerTo`, `teleportTo`,
+  `triggerEmote`, `changeRealm`, …) returns `{ success: true }` without acting,
+  and `Runtime.getWorldTime` always returns 0. Treat the registration list as
+  "the scene's call resolves", not "the effect happened".
 - CRDT message passing between scene and kernel
 
 **CLI Interface (`src/cli.ts`)**

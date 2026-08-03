@@ -69,11 +69,23 @@ console.log('Headless scene running:', !!scene)
 - **Avatar Renderer** - Multiplayer entities without UI textures
 
 ### Scene Support  
-- **ECS7 Scenes** - Full Decentraland SDK7 compatibility
-- **Component Systems** - Transform, mesh, avatar, pointer events
+- **ECS7 Scenes** - Runs SDK7 scene bundles against a subset of the SDK
+  component set (see below)
+- **Component Systems** - Transform, mesh renderer/collider, glTF, material,
+  animator, billboard, raycast, pointer events, avatar and realm/engine info
 - **CRDT Protocol** - Entity state synchronization
-- **Asset Loading** - Models, textures, audio (headless)
+- **Asset Loading** - glTF/GLB models and their textures
 - **Spatial Queries** - Raycasting and collision detection
+
+> **Not a full client.** Roughly a third of the SDK components are implemented,
+> and the ones that are missing are mostly the render/UI/audio side that a
+> headless server has no use for (`UiTransform` and friends, `TextShape`,
+> `NftShape`, `AudioSource`/`AudioStream`, `VideoPlayer`, `LightSource`,
+> `ParticleSystem`). Some absent ones do affect scene logic, though — notably
+> `TweenState`/`TweenSequence`, `TriggerArea`/`TriggerAreaResult`,
+> `AvatarAttach` and `CameraMode`. There is no audio or video support of any
+> kind. Scene code that depends on those components will run, but will never
+> observe the state it is waiting for.
 
 ## Development
 
