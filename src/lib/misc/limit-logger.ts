@@ -34,6 +34,21 @@ export const MAX_DETAIL_LEN = 200
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]+/g
 const URL_USERINFO = /(:\/\/)[^/\s@]+@/g
 
+/**
+ * Make an untrusted string (a peer address, a url, a header value) safe to put on a
+ * single operator log line: collapse control chars, redact URL userinfo, then bound the
+ * length to {@link MAX_DETAIL_LEN}. Sanitization happens BEFORE truncation so the cut
+ * cannot re-expose a stripped character.
+ *
+ * Exported so other throttled, operator-facing logs (e.g. the unhandled-comms-variant
+ * report in `CommsTransportWrapper`) reuse this one implementation instead of
+ * re-deriving the regexes.
+ */
+export function sanitizeLogDetail(detail: string): string {
+  const sanitized = detail.replace(CONTROL_CHARS, ' ').replace(URL_USERINFO, '$1***@')
+  return sanitized.length > MAX_DETAIL_LEN ? sanitized.slice(0, MAX_DETAIL_LEN) + '…' : sanitized
+}
+
 export interface ThrottledLimitLoggerOptions {
   /** Minimum gap between emissions for the same key. Defaults to {@link DEFAULT_LIMIT_LOG_INTERVAL_MS}. */
   intervalMs?: number
@@ -73,12 +88,7 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
       if (t - s.lastLogAt >= intervalMs) {
         const windowSec = s.lastLogAt === Number.NEGATIVE_INFINITY ? null : Math.round((t - s.lastLogAt) / 1000)
         const suffix = s.suppressed > 0 ? ` (${s.suppressed} more in ${windowSec ?? '?'}s)` : ''
-        let shownDetail = detail
-        if (shownDetail) {
-          // Sanitize BEFORE truncating so the cut cannot re-expose a stripped char.
-          shownDetail = shownDetail.replace(CONTROL_CHARS, ' ').replace(URL_USERINFO, '$1***@')
-          if (shownDetail.length > MAX_DETAIL_LEN) shownDetail = shownDetail.slice(0, MAX_DETAIL_LEN) + '…'
-        }
+        const shownDetail = detail ? sanitizeLogDetail(detail) : detail
         emit(`${key} reached${shownDetail ? `: ${shownDetail}` : ''}${suffix}`)
         s.lastLogAt = t
         s.suppressed = 0

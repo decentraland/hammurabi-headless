@@ -2,7 +2,7 @@ import * as proto from '@dcl/protocol/out-js/decentraland/kernel/comms/rfc4/comm
 import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, TransportMessageEvent, commsLogger } from './types'
 import { limits } from '../../misc/limits'
-import { limitLogger } from '../../misc/limit-logger'
+import { DEFAULT_LIMIT_LOG_INTERVAL_MS, limitLogger, sanitizeLogDetail } from '../../misc/limit-logger'
 
 export enum RoomConnectionStatus {
   NONE,
@@ -49,6 +49,19 @@ const MAX_MESSAGES_PER_WINDOW = limits.maxMessagesPerWindow // HAMMURABI_MAX_MES
 // the map without limit; entries are tiny and the oldest is evicted first.
 const MAX_RATE_ENTRIES = limits.maxRateEntries // HAMMURABI_MAX_RATE_ENTRIES
 
+// Throttle window for the unhandled-packet-variant report below. Reuses the
+// limit-logger cadence so every throttled, operator-facing log in this process shares
+// one rhythm. Like that constant it is deliberately NOT an env knob: it is a log-volume
+// cadence, not a resource cap.
+const UNHANDLED_VARIANT_LOG_INTERVAL_MS = DEFAULT_LIMIT_LOG_INTERVAL_MS
+// Global ceiling on unhandled-variant lines emitted per interval, across ALL peers and
+// variants. The per-(peer, variant) throttle alone does not bound log volume: peer
+// address is remote-controlled, so a peer cycling identities would get a fresh throttle
+// slot — and therefore an immediate line — for every new address. Since stderr is
+// blocking, that is an event-loop stall vector, so total emissions are capped too.
+// 6 unhandled variants across a handful of distinct peers fits comfortably under this.
+const MAX_UNHANDLED_VARIANT_LOGS_PER_INTERVAL = 20
+
 export class CommsTransportWrapper {
   readonly events = mitt<CommsEvents>()
   readonly sceneId: string
@@ -57,6 +70,18 @@ export class CommsTransportWrapper {
   // Per-peer fixed-window inbound rate counters (address -> window state).
   private readonly inboundRate = new Map<string, { windowStart: number; count: number }>()
 
+  // Throttle state for unhandled rfc4 packet variants: address -> $case -> state.
+  // Nested (rather than a composite `address|case` key) so a disconnect prunes a peer's
+  // whole subtree in one O(1) delete, exactly like `inboundRate`. The outer map is
+  // remote-keyed and so is bounded by MAX_RATE_ENTRIES with oldest-first eviction; the
+  // inner map is keyed by decoder-produced `$case` values, so it is bounded by the rfc4
+  // oneof itself (currently at most the 6 variants listed in `dispatchMessage`).
+  private readonly unhandledVariants = new Map<string, Map<string, { lastLogAt: number; suppressed: number }>>()
+  // Global fixed window backing MAX_UNHANDLED_VARIANT_LOGS_PER_INTERVAL.
+  private unhandledVariantWindowStart = Number.NEGATIVE_INFINITY
+  private unhandledVariantEmitted = 0
+  private unhandledVariantOverBudget = 0
+
   constructor(private transport: MinimumCommunicationsTransport, sceneId: string) {
     this.sceneId = sceneId
     this.transport.events.on('message', this.handleMessage.bind(this))
@@ -64,6 +89,7 @@ export class CommsTransportWrapper {
     this.transport.events.on('PEER_CONNECTED', (event) => this.events.emit('PEER_CONNECTED', event))
     this.transport.events.on('PEER_DISCONNECTED', (event) => {
       this.inboundRate.delete(event.address)
+      this.unhandledVariants.delete(event.address)
       this.events.emit('PEER_DISCONNECTED', event)
     })
   }
@@ -264,7 +290,94 @@ export class CommsTransportWrapper {
         this.events.emit('movement', { address, data: message.movement })
         break
       }
+      // The rfc4 `Packet` oneof currently has 14 members; the 8 cases above are the ones
+      // this server implements. The remaining 6 are NOT handled and land here:
+      //
+      //   playerEmote (9), sceneEmote (10), movementCompressed (12),
+      //   lookAtPosition (13), reaction (14), chatReaction (15)
+      //
+      // They are still dropped — implementing them is out of scope — but the drop is no
+      // longer silent, which it was: no log, no metric, no trace of any kind. That made
+      // real protocol gaps invisible. The shipped Unity explorer sends `playerEmote`
+      // (decentraland/sdk-multiplayer-server#117), and `movementCompressed` carries
+      // avatar position, so a client flipping its `compressed` flag would make that
+      // peer's avatar simply never exist for this authoritative server — with nothing in
+      // the logs to say so. A NEW variant added to rfc4 upstream now surfaces here too
+      // instead of vanishing.
+      default: {
+        this.reportUnhandledVariant(address, message.$case)
+        break
+      }
     }
+  }
+
+  /**
+   * Report an unhandled rfc4 packet variant, THROTTLED per (peer address, variant) so a
+   * flood of unrecognized packets cannot become an event-loop stall on blocking stderr.
+   *
+   * This deliberately does not go through `limitLogger`: its key space is `keyof Limits`
+   * and an unimplemented protocol variant is not a resource cap (there is no numeric
+   * ceiling and no `HAMMURABI_*` knob to add), so adding a `Limits` field for it would be
+   * wrong. limit-logger also documents why its keys must stay bounded — a remote-
+   * controlled key would grow its state map without limit. So this reuses the same
+   * throttling *approach* (emit first hit, count and then report intervening ones) with
+   * local state, keyed finely enough to tell peers apart while staying bounded: the
+   * address map is capped and oldest-evicted like `inboundRate`, and a global
+   * per-interval emission budget bounds total log volume however many addresses appear.
+   */
+  private reportUnhandledVariant(address: string, variant: string) {
+    const now = Date.now()
+
+    let byVariant = this.unhandledVariants.get(address)
+    if (!byVariant) {
+      // Evict the oldest peer (Map preserves insertion order) once the remote-keyed map
+      // reaches its cap, so it can't grow without bound.
+      if (this.unhandledVariants.size >= MAX_RATE_ENTRIES) {
+        const oldest = this.unhandledVariants.keys().next().value
+        if (oldest !== undefined) this.unhandledVariants.delete(oldest)
+      }
+      byVariant = new Map()
+      this.unhandledVariants.set(address, byVariant)
+    }
+
+    let state = byVariant.get(variant)
+    if (!state) {
+      // NEGATIVE_INFINITY so the very first hit always clears the interval and emits.
+      state = { lastLogAt: Number.NEGATIVE_INFINITY, suppressed: 0 }
+      byVariant.set(variant, state)
+    }
+    if (now - state.lastLogAt < UNHANDLED_VARIANT_LOG_INTERVAL_MS) {
+      state.suppressed++
+      return
+    }
+
+    // Roll the global budget window before charging this emission against it.
+    if (now - this.unhandledVariantWindowStart >= UNHANDLED_VARIANT_LOG_INTERVAL_MS) {
+      this.unhandledVariantWindowStart = now
+      this.unhandledVariantEmitted = 0
+      state.suppressed += this.unhandledVariantOverBudget
+      this.unhandledVariantOverBudget = 0
+    }
+    if (this.unhandledVariantEmitted >= MAX_UNHANDLED_VARIANT_LOGS_PER_INTERVAL) {
+      // Over the global budget: count it, and leave `lastLogAt` untouched so this
+      // (peer, variant) pair can still report as soon as the budget refreshes.
+      this.unhandledVariantOverBudget++
+      state.suppressed++
+      return
+    }
+    this.unhandledVariantEmitted++
+
+    const windowSec = state.lastLogAt === Number.NEGATIVE_INFINITY ? null : Math.round((now - state.lastLogAt) / 1000)
+    const suffix = state.suppressed > 0 ? ` (${state.suppressed} more in ${windowSec ?? '?'}s)` : ''
+    state.lastLogAt = now
+    state.suppressed = 0
+
+    // `variant` is a `$case` produced by the generated decoder, so it is one of a fixed
+    // set of literals; `address` is remote-controlled and must be sanitized.
+    commsLogger.error(
+      `Dropped unhandled rfc4 packet variant "${variant}" from ${sanitizeLogDetail(address)}` +
+        ` — this protocol feature is not implemented${suffix}`
+    )
   }
 
   private async sendMessage(reliable: boolean, topicMessage: proto.Packet, destination: string[]) {

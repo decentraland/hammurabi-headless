@@ -149,3 +149,204 @@ describe('comms: CommsTransportWrapper bounds untrusted inbound traffic', () => 
     expect(dispatched).toBe(20)
   })
 })
+
+// Every member of the rfc4 `Packet` oneof, split by whether `dispatchMessage` implements
+// it. Payloads are protobuf defaults (`fromPartial`) on purpose: what matters here is
+// which `$case` gets dispatched vs. reported, not the payload contents.
+const HANDLED_VARIANTS: ReadonlyArray<readonly [string, string]> = [
+  ['position', 'position'],
+  ['profileVersion', 'profileMessage'],
+  ['profileRequest', 'profileRequest'],
+  ['profileResponse', 'profileResponse'],
+  ['chat', 'chatMessage'],
+  ['scene', 'sceneMessageBus'],
+  ['voice', 'voiceMessage'],
+  ['movement', 'movement']
+]
+
+const UNHANDLED_VARIANTS: readonly string[] = [
+  'playerEmote',
+  'sceneEmote',
+  'movementCompressed',
+  'lookAtPosition',
+  'reaction',
+  'chatReaction'
+]
+
+function packetForVariant(variant: string): Uint8Array {
+  return proto.Packet.encode(
+    proto.Packet.fromPartial({ message: { $case: variant, [variant]: {} } } as any)
+  ).finish()
+}
+
+// A variant the switch does not implement used to be dropped with no log, no metric and
+// no trace at all, so an unimplemented protocol feature (or a variant newly added to
+// rfc4) was indistinguishable from one that worked. It must now be reported — but only
+// under a throttle, since the sender is an untrusted peer and stderr is blocking.
+describe('when CommsTransportWrapper receives an rfc4 packet variant it does not implement', () => {
+  let transport: {
+    events: ReturnType<typeof makeEmitter>
+    connect(): Promise<void>
+    disconnect(): Promise<void>
+    send(): void
+    setVoicePosition(): void
+  }
+  let wrapper: CommsTransportWrapper
+  let logged: string[]
+  let consoleErrorSpy: jest.SpyInstance
+  let nowSpy: jest.SpyInstance
+  let clock: number
+  let advance: (ms: number) => void
+
+  beforeEach(() => {
+    clock = 1_000_000 // arbitrary non-zero epoch
+    advance = (ms: number) => (clock += ms)
+    nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock)
+    logged = []
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation((...args: any[]) => {
+      logged.push(args.join(' '))
+    })
+    transport = {
+      events: makeEmitter(),
+      async connect() {},
+      async disconnect() {},
+      send() {},
+      setVoicePosition() {}
+    }
+    wrapper = new CommsTransportWrapper(transport as any, 'scene')
+  })
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore()
+    nowSpy.mockRestore()
+  })
+
+  it('should name the dropped variant and the sender address so an operator can grep for either', () => {
+    transport.events.emit('message', { data: packetForVariant('playerEmote'), address: '0xpeer' })
+
+    expect(logged).toEqual([expect.stringContaining('unhandled rfc4 packet variant "playerEmote" from 0xpeer')])
+  })
+
+  it.each(UNHANDLED_VARIANTS)('should report a dropped %s packet', (variant) => {
+    transport.events.emit('message', { data: packetForVariant(variant), address: '0xpeer' })
+
+    expect(logged).toEqual([expect.stringContaining(`"${variant}"`)])
+  })
+
+  it.each(UNHANDLED_VARIANTS)('should not emit any wrapper event for a %s packet', (variant) => {
+    let dispatched = 0
+    for (const [, event] of HANDLED_VARIANTS) wrapper.events.on(event as any, () => dispatched++)
+
+    transport.events.emit('message', { data: packetForVariant(variant), address: '0xpeer' })
+
+    expect(dispatched).toBe(0)
+  })
+
+  it('should report all six unimplemented variants, since each is throttled on its own', () => {
+    for (const variant of UNHANDLED_VARIANTS) {
+      transport.events.emit('message', { data: packetForVariant(variant), address: '0xpeer' })
+    }
+
+    expect(logged).toHaveLength(UNHANDLED_VARIANTS.length)
+  })
+
+  it('should strip control characters from the remote-controlled address so it cannot forge log lines', () => {
+    transport.events.emit('message', {
+      data: packetForVariant('playerEmote'),
+      address: '0xpeer\n[FAKE] injected'
+    })
+
+    expect(logged[0]).not.toContain('\n')
+  })
+
+  describe('and the same peer keeps sending that variant', () => {
+    beforeEach(() => {
+      const packet = packetForVariant('movementCompressed')
+      // 100 identical packets, all inside one throttle interval (the clock is frozen).
+      for (let i = 0; i < 100; i++) {
+        transport.events.emit('message', { data: packet, address: '0xflood' })
+      }
+    })
+
+    it('should log once for the whole throttle interval instead of once per packet', () => {
+      expect(logged).toHaveLength(1)
+    })
+
+    it('should report how many were suppressed on the first log after the interval elapses', () => {
+      advance(10_000) // UNHANDLED_VARIANT_LOG_INTERVAL_MS
+      transport.events.emit('message', { data: packetForVariant('movementCompressed'), address: '0xflood' })
+
+      expect(logged[1]).toContain('(99 more in 10s)')
+    })
+  })
+
+  describe('and a different peer sends the same variant', () => {
+    beforeEach(() => {
+      const packet = packetForVariant('playerEmote')
+      transport.events.emit('message', { data: packet, address: '0xpeerA' })
+      transport.events.emit('message', { data: packet, address: '0xpeerB' })
+    })
+
+    it("should report both peers rather than letting the first one's throttle mask the second", () => {
+      expect(logged).toEqual([expect.stringContaining('0xpeerA'), expect.stringContaining('0xpeerB')])
+    })
+  })
+
+  describe('and a peer cycles through many distinct addresses', () => {
+    beforeEach(() => {
+      const packet = packetForVariant('reaction')
+      // Each address is a fresh (address, variant) throttle slot, so per-pair throttling
+      // alone would emit one line per address — the global budget is what bounds it.
+      for (let i = 0; i < 50; i++) {
+        transport.events.emit('message', { data: packet, address: `0xchurn${i}` })
+      }
+    })
+
+    it('should stop at the global per-interval budget so the flood cannot stall the event loop', () => {
+      // MAX_UNHANDLED_VARIANT_LOGS_PER_INTERVAL is 20.
+      expect(logged).toHaveLength(20)
+    })
+
+    it('should carry the over-budget drops into the count reported after the interval', () => {
+      advance(10_000)
+      transport.events.emit('message', { data: packetForVariant('reaction'), address: '0xchurn0' })
+
+      expect(logged[20]).toContain('more in 10s)')
+    })
+  })
+})
+
+describe('when CommsTransportWrapper receives an rfc4 packet variant it does implement', () => {
+  let transport: { events: ReturnType<typeof makeEmitter>; setVoicePosition(): void }
+  let wrapper: CommsTransportWrapper
+  let logged: string[]
+  let consoleErrorSpy: jest.SpyInstance
+
+  beforeEach(() => {
+    logged = []
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation((...args: any[]) => {
+      logged.push(args.join(' '))
+    })
+    transport = { events: makeEmitter(), setVoicePosition() {} }
+    wrapper = new CommsTransportWrapper(transport as any, 'scene')
+  })
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore()
+  })
+
+  it.each(HANDLED_VARIANTS)('should dispatch a %s packet to the %s event', (variant, event) => {
+    let dispatched = 0
+    wrapper.events.on(event as any, () => dispatched++)
+
+    transport.events.emit('message', { data: packetForVariant(variant), address: '0xpeer' })
+
+    expect(dispatched).toBe(1)
+  })
+
+  it.each(HANDLED_VARIANTS)('should log nothing for a %s packet', (variant) => {
+    transport.events.emit('message', { data: packetForVariant(variant), address: '0xpeer' })
+
+    expect(logged).toEqual([])
+  })
+})
