@@ -8,6 +8,7 @@ import { realmInfoComponent } from '../../../decentraland/sdk-components/realm-i
 import { EntityUtils } from '../../../decentraland/crdt-internal/generational-index-pool'
 import { playerEntityAtom, currentRealm } from '../../../decentraland/state'
 import { isLocalhostRealm } from '../../../decentraland/realm/resolution'
+import { OTHER_PLAYER_ENTITIES_RANGE } from '../../../decentraland/communications/player-entity-manager'
 
 export const StaticEntities = {
   RootEntity: 0 as Entity,
@@ -16,8 +17,45 @@ export const StaticEntities = {
 } as const
 
 export const PLAYER_HEIGHT = 1.7
+/**
+ * Half of PLAYER_HEIGHT: the offset between a player capsule's origin and its feet.
+ *
+ * `CreateCapsule({ height, radius })` builds a mesh spanning `y ∈ [-height/2,
+ * +height/2]` in local space (`capsuleBuilder`: `halfHeight = (height - 2r)/2`, so
+ * the extreme cap vertices sit at `±(halfHeight + r) = ±height/2`), so
+ * `capsule.position` is its CENTER. Scene-facing player transforms are
+ * feet-anchored — that is what the explorers put on the wire (unity-explorer sends
+ * `Character.transform.position`, godot-explorer the avatar root origin) and what
+ * scene authors expect, though note it is a de-facto convention: rfc4
+ * `Position`/`Movement` document these fields only as `// world position` and
+ * specify no anchor.
+ *
+ * Reporting the raw capsule position therefore leaks a +PLAYER_HEIGHT/2 error into
+ * every scene that reads the player transform. Every site converting between
+ * capsule space and scene-facing player space must apply this offset; the values
+ * that used to sit at those sites (0, 1, and PLAYER_HEIGHT) were all wrong, in
+ * three different ways.
+ */
+export const PLAYER_CAPSULE_HALF_HEIGHT = PLAYER_HEIGHT / 2
 export const MAX_RESERVED_ENTITY = 512
-export const AVATAR_ENTITY_RANGE: [number, number] = [128, MAX_RESERVED_ENTITY]
+/**
+ * The avatar-comms entity range, sourced from the player entity manager so the
+ * avatar-range write guard (scene-context) and the avatar system's subscription
+ * range can never disagree. (This was [128, 512] — the wrong half of the
+ * reserved space — while the avatar system allocated [32, 256).)
+ *
+ * Same frozen alias as OTHER_PLAYER_ENTITIES_RANGE — treat as read-only.
+ */
+export const AVATAR_ENTITY_RANGE: readonly [number, number] = OTHER_PLAYER_ENTITIES_RANGE
+/**
+ * The whole host-owned reserved entity space `[0, MAX_RESERVED_ENTITY)` — static
+ * entities (RootEntity 0, PlayerEntity 1, CameraEntity 2), the avatar range, and
+ * everything else the scene does not own. Used to deny scene-sourced
+ * DELETE_ENTITY: unlike component writes (scenes legitimately set InputModifier
+ * on PlayerEntity, camera components, …), a scene must never DELETE a host entity.
+ */
+export const RESERVED_ENTITY_RANGE: readonly [number, number] =
+  Object.freeze([0, MAX_RESERVED_ENTITY]) as readonly [number, number]
 
 // Reused temporaries for the per-frame static-entity update (single-threaded).
 // The read-only constants are never mutated — they only feed copyFrom/compares.
@@ -28,7 +66,7 @@ const READONLY_IDENTITY = Quaternion.Identity()
 
 // this function defines if the engine should accept updates to the entity by its
 // entity number
-export function entityIsInRange(entity: Entity, range: [number, number]) {
+export function entityIsInRange(entity: Entity, range: readonly [number, number]) {
   const [entityNumber, _version] = EntityUtils.fromEntityId(entity)
   return entityNumber < range[1] && entityNumber >= range[0]
 }
@@ -103,6 +141,9 @@ export function updateStaticEntities(context: SceneContext) {
 
     // convert the player position to scene-space coordinates (into a reused temp)
     globalCoordinatesToSceneCoordinatesToRef(context, player?.absolutePosition ?? READONLY_ZERO, tmpPosition)
+    // The atom holds the CharacterController capsule, whose position is its
+    // CENTER — report feet to the scene (see PLAYER_CAPSULE_HALF_HEIGHT).
+    if (player) tmpPosition.y -= PLAYER_CAPSULE_HALF_HEIGHT
     const rotation = player?.absoluteRotationQuaternion ?? READONLY_IDENTITY
 
     // Only dirty (re-serialize + re-send) the transform when it actually moved.

@@ -1,5 +1,5 @@
 import { ArcRotateCamera, TransformNode, Vector3 } from "@babylonjs/core";
-import { PLAYER_HEIGHT, StaticEntities } from "./static-entities";
+import { PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_HEIGHT, StaticEntities } from "./static-entities";
 import { CharacterController } from "../../avatars/CharacterController";
 import { BabylonEntity } from "../BabylonEntity";
 import { Transform, applyNewTransform, transformComponent } from "../../../decentraland/sdk-components/transform-component";
@@ -14,7 +14,11 @@ export function createCameraFollowsPlayerSystem(camera: ArcRotateCamera, playerE
   // this function updates the PlayerEntity position using the CharacterController.capsule's position
   function updatePlayerEntityPositionFromCapsule(playerEntity: BabylonEntity, capsule: TransformNode) {
     tmpCapsulePosition.copyFrom(capsule.absolutePosition)
-    tmpCapsulePosition.y -= 1 // don't know why
+    // Capsule position is its CENTER; scene-facing player transforms are
+    // feet-anchored (see PLAYER_CAPSULE_HALF_HEIGHT). This was a magic `-= 1`
+    // ("don't know why") — close enough to half the 1.7m capsule that nobody
+    // noticed, but inconsistent with updateStaticEntities' player write.
+    tmpCapsulePosition.y -= PLAYER_CAPSULE_HALF_HEIGHT
 
     const localAvatarScene = playerEntity.context.deref()!
     const store = localAvatarScene.components[transformComponent.componentId]

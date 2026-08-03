@@ -1,8 +1,10 @@
 import { ByteBuffer } from "./ByteBuffer";
 
 export type VirtualScene = {
-  // [from,to] range of entity numbers. the range is [) (inclusive, exclusive)
-  readonly range: [number, number]
+  // [from,to] range of entity numbers. the range is [) (inclusive, exclusive).
+  // readonly tuple: the value is often a shared/frozen constant (e.g. the avatar
+  // system's OTHER_PLAYER_ENTITIES_RANGE), so consumers must not mutate it.
+  readonly range: readonly [number, number]
 
   createSubscription(): VirtualSceneSubscription
 
@@ -12,7 +14,7 @@ export type VirtualScene = {
 
 export type VirtualSceneSubscription = {
   // range of entity numbers that this subscription writes to. the range is [) (inclusive, exclusive)
-  range: [number, number]
+  readonly range: readonly [number, number]
 
   // nullifies this subscription internal state
   dispose(): void

@@ -466,6 +466,12 @@ export class CharacterController implements DecentralandSystem {
   act: _Action
   capsule: AbstractMesh
 
+  /**
+   * @param position - the capsule's CENTER, not the player's feet. Callers holding
+   * a feet-anchored position (spawn points, comms positions) must add
+   * PLAYER_CAPSULE_HALF_HEIGHT; see the constant's docs for why the two spaces
+   * differ and what a wrong offset here costs.
+   */
   teleport(position: Vector3) {
     this.moveVector.setAll(0)
     this.act.reset()
