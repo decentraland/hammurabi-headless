@@ -95,15 +95,14 @@ function requestRenewal(): Promise<StorageDelegation | null> {
     const onMessage = (message: any) => {
       if (!message || message.type !== STORAGE_DELEGATION_RESPONSE) return
       const parsed = typeof message.delegation === 'string' ? parseStorageDelegation(message.delegation) : undefined
-      // Defense-in-depth: only accept a renewal that stays bound to the same scene
-      // this worker already holds. The parent mints per-child, so a differing
-      // world/sceneId/parcel means a confused/misrouted reply — reject it rather
-      // than silently rebind to another scene's credential.
       const current = storageDelegation.getOrNull()
-      const sameScene =
-        !current ||
-        (parsed?.world === current.world && parsed?.sceneId === current.sceneId && parsed?.parcel === current.parcel)
-      if (parsed && sameScene) {
+      const sameWorld = !current || parsed?.world === current.world
+      if (parsed && sameWorld) {
+        if (current && (parsed.sceneId !== current.sceneId || parsed.parcel !== current.parcel)) {
+          console.log(
+            `Storage delegation renewed with rotated scene identity (sceneId ${current.sceneId} -> ${parsed.sceneId}, parcel ${current.parcel} -> ${parsed.parcel})`
+          )
+        }
         storageDelegation.swap(parsed)
         finish(parsed)
         return
