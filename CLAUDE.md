@@ -72,7 +72,10 @@ not the cross-isolate callback volume, so a scene hammering a cap must not enque
 one host task per rejected call. Wire a new cap by
 adding a `limitLogger.hit(...)` at its drop/reject/truncate site. Not every knob is a
 discrete hit: frame-pacing/shutdown/raycast are cooperative yields (not logged);
-`profileFetchCooldownMs` is normal debounce (deliberately not logged);
+`profileFetchCooldownMs` is normal debounce (deliberately not logged), whereas
+`emoteMetadataFetchCooldownMs` IS logged because tripping it substitutes a
+possibly-wrong `loop` flag into what the scene observes — closer to a truncation
+than to a debounce;
 `fetchTimeoutMs`/`fetchRetries` already log per-failure inside `robustFetch`;
 `livekitConnectTimeoutMs`/`wsHandshakeTimeoutMs` surface as ordinary connection
 errors; `isolateMemoryLimitBytes` is a fatal V8 abort (no hook to log from); and
@@ -192,6 +195,47 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   rate-limits per peer before decoding; the avatar system dedupes + rate-limits
   per-peer profile fetches (`avatar-communication-system.ts`) to bound Catalyst
   amplification, drops non-finite peer transforms, and caps its tombstone map.
+  Emotes (`playerEmote` → `AvatarEmoteCommand`) add several: the peer-controlled
+  emote urn is length-capped (in BYTES) before it can reach any scene's CRDT, the
+  pending-append log (`emote-append-log.ts`) is bounded because a stalled scene stops
+  draining it while peers keep emoting, and the `loop`-metadata lookup
+  (`emote-metadata.ts`) caps its cache, caches "no such emote" so an unknown urn
+  costs one registry request rather than one per packet, and is bounded BOTH by a
+  per-peer debounce AND by a global in-flight ceiling. These bound DIFFERENT things
+  and neither replaces the other. Sustained rate is
+  `min(peers_with_avatar_slots ÷ cooldown, ceiling ÷ latency)` — 224/s by the first
+  term under defaults, since a lookup requires an allocated avatar slot. The ceiling is
+  what bounds CONCURRENCY (entries and sockets, so a slow registry cannot accumulate
+  thousands); it bounds rate only weakly and latency-dependently, so setting the
+  cooldown to 0 leaves just `ceiling ÷ latency` — thousands of requests per second
+  against a fast registry, and raising the ceiling multiplies that term directly.
+  Unlike `profileFetchCooldownMs` nothing sits behind this cooldown (there is no
+  `attemptedVersion`-style dedupe), so 0 removes the only rate control. A THIRD cap
+  bounds waiters, not lookups: repeats of an in-flight urn are deliberately coalesced
+  onto the shared promise (a repeat should get the real answer), but each handout costs
+  the caller a continuation living until the lookup settles — peer packet rate × lookup
+  deadline, which neither of the other two caps touches — so the excess degrades to the
+  default like a cooldown hit. The urn is also rejected outright if it contains
+  whitespace or control characters: no real identifier does, and it keeps a crafted
+  string out of registry pointers, cache keys and log lines. That is deliberately not a
+  charset allowlist — a false reject would silently drop a legitimate emote. The BODY read
+  carries its OWN deadline and needs to: `robustFetch` swaps in its internal
+  controller's signal and unbridges the caller's in the same `finally` that returns the
+  response, so the request signal stops covering anything once the response is in hand,
+  and `readBodyCapped` locks the stream so it cannot be cancelled from outside either.
+  That deadline bounds the in-flight SLOT (the part that turns a sick registry into a
+  permanent outage — every wedged slot means every peer gets the default); the
+  abandoned read keeps its socket until undici's own body timeout fires.
+  A 5xx/429 is deliberately NOT cached (`robustFetch` returns those once retries are
+  exhausted): caching a server error would pin the wrong `loop` on a real emote for
+  the life of the process. Note both brakes DEGRADE the flag to `false` rather than
+  defer, so a scene cannot distinguish "not looping" from "we did not know". The
+  embedded-emote table is a `Map`, not an object literal: a peer sending
+  `urn: "constructor"` would otherwise read a function off `Object.prototype`. With a
+  `Map` that key is simply unknown and takes the ordinary lookup path. The handler's
+  thenable check is independent belt-and-braces, and it takes BOTH being absent to turn
+  a crafted packet into a throw out of the transport dispatch — which aborts the
+  remaining listeners for that packet and logs unthrottled once per packet.
 - **isolated-vm execution deadline (`isolated-vm/index.ts`).** Each synchronous
   turn (eval / onStart / onUpdate's sync part / each setImmediate drain) is bounded
   by a `timeout` on `evalSync` / `ref.apply`; on overrun V8 terminates and

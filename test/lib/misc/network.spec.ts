@@ -1,4 +1,5 @@
-import { robustFetch } from '../../../src/lib/misc/network'
+import { readBodyCapped, robustFetch } from '../../../src/lib/misc/network'
+import { limitLogger } from '../../../src/lib/misc/limit-logger'
 
 describe('robustFetch', () => {
   const realFetch = globalThis.fetch
@@ -102,5 +103,142 @@ describe('robustFetch', () => {
     controller.abort()
     await p
     expect(calls).toBe(1)
+  })
+})
+
+// A caller holding a Response cannot abort it — robustFetch unbridges the caller's signal in
+// the same `finally` that returns it — and cannot cancel the stream either, because the read
+// locks it. So a body that stalls mid-stream is bounded only by this deadline, and only the
+// reader can release the socket and the chunks it has accumulated.
+describe('readBodyCapped with a time budget', () => {
+  let cancelled: boolean
+  let response: Response
+
+  beforeEach(() => {
+    cancelled = false
+    response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([123, 125])) // "{}" — then stalls forever
+        },
+        cancel() {
+          cancelled = true
+        }
+      })
+    )
+  })
+
+  describe('when the body stalls part-way through', () => {
+    let error: Error
+
+    beforeEach(async () => {
+      error = await readBodyCapped(response, 1024, { timeoutMs: 30 }).catch((e) => e)
+    })
+
+    it('should reject rather than wait on the stream forever', () => {
+      expect(error).toBeInstanceOf(Error)
+    })
+
+    it('should name the timeout so the failure is diagnosable', () => {
+      expect(error.message).toMatch(/timed out/)
+    })
+
+    it('should cancel the reader, releasing the socket and the buffered chunks', () => {
+      expect(cancelled).toBe(true)
+    })
+  })
+
+  describe('when no budget is given', () => {
+    let complete: Response
+
+    beforeEach(() => {
+      complete = new Response('{"ok":true}')
+    })
+
+    it('should still read a complete body to the end', async () => {
+      await expect(readBodyCapped(complete, 1024)).resolves.toBe('{"ok":true}')
+    })
+  })
+
+  describe('when the body completes inside the budget', () => {
+    let complete: Response
+
+    beforeEach(() => {
+      complete = new Response('{"ok":true}')
+    })
+
+    it('should return it rather than time out', async () => {
+      await expect(readBodyCapped(complete, 1024, { timeoutMs: 5_000 })).resolves.toBe('{"ok":true}')
+    })
+  })
+})
+
+// The size cap is what stops a hostile or misconfigured endpoint streaming unbounded bytes
+// into host memory, so it is load-bearing (CLAUDE.md) — and it was untested.
+describe('readBodyCapped size cap', () => {
+  let hit: jest.SpyInstance
+
+  beforeEach(() => {
+    hit = jest.spyOn(limitLogger, 'hit').mockImplementation(() => void 0)
+  })
+
+  afterEach(() => {
+    hit.mockRestore()
+  })
+
+  describe('when the declared content-length already exceeds the cap', () => {
+    let response: Response
+    let error: Error
+
+    beforeEach(async () => {
+      response = new Response('too much', { headers: { 'content-length': '9999' } })
+      error = await readBodyCapped(response, 8).catch((e) => e)
+    })
+
+    it('should reject rather than start reading', () => {
+      expect(error.message).toMatch(/exceeds 8 bytes/)
+    })
+
+    it('should release the body it is refusing', () => {
+      expect(response.bodyUsed).toBe(true)
+    })
+
+    it('should report the limit hit naming the declared size', () => {
+      expect(hit).toHaveBeenCalledWith('maxBodyBytes', expect.stringContaining('content-length 9999'))
+    })
+  })
+
+  describe('when a body without a declared length streams past the cap', () => {
+    let cancelled: boolean
+    let error: Error
+
+    beforeEach(async () => {
+      cancelled = false
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(4))
+            controller.enqueue(new Uint8Array(4))
+            controller.enqueue(new Uint8Array(4))
+          },
+          cancel() {
+            cancelled = true
+          }
+        })
+      )
+      error = await readBodyCapped(response, 8).catch((e) => e)
+    })
+
+    it('should reject once the streamed total passes the cap', () => {
+      expect(error.message).toMatch(/exceeds 8 bytes/)
+    })
+
+    it('should cancel the reader instead of draining the rest', () => {
+      expect(cancelled).toBe(true)
+    })
+
+    it('should report the limit hit naming the streamed overflow', () => {
+      expect(hit).toHaveBeenCalledWith('maxBodyBytes', expect.stringContaining('streamed'))
+    })
   })
 })

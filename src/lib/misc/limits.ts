@@ -47,6 +47,13 @@ export interface Limits {
   maxSessionsPerPeer: number
   profileFetchCooldownMs: number
   livekitConnectTimeoutMs: number
+  maxEmoteUrnBytes: number
+  maxEmoteAppendLog: number
+  maxEmoteMetadataCacheEntries: number
+  maxEmoteMetadataInflight: number
+  maxEmoteMetadataWaiters: number
+  emoteMetadataFetchCooldownMs: number
+  emoteMetadataLookupTimeoutMs: number
 
   // --- Scene RPC capabilities ---
   maxSendPeers: number
@@ -130,6 +137,48 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxSessionsPerPeer', env: 'HAMMURABI_MAX_SESSIONS_PER_PEER', def: 8, min: 1 },
   { key: 'profileFetchCooldownMs', env: 'HAMMURABI_PROFILE_FETCH_COOLDOWN_MS', def: 10_000, min: 0 },
   { key: 'livekitConnectTimeoutMs', env: 'HAMMURABI_LIVEKIT_CONNECT_TIMEOUT_MS', def: 30_000, min: 1_000 },
+  // Emote (playerEmote -> AvatarEmoteCommand). The urn is a peer-controlled string that
+  // ends up in every scene's CRDT, the append log is drained per subscription, and the
+  // metadata lookup is an outbound fetch keyed by that same peer-controlled urn.
+  { key: 'maxEmoteUrnBytes', env: 'HAMMURABI_MAX_EMOTE_URN_BYTES', def: 256, min: 1 },
+  { key: 'maxEmoteAppendLog', env: 'HAMMURABI_MAX_EMOTE_APPEND_LOG', def: 256, min: 1 },
+  // Bounds the resolved-urn cache AND, deliberately, the per-peer cooldown map beside it:
+  // both are keyed by peer-supplied data and neither needs a ceiling of its own (1024 is
+  // already far above the 224 avatar slots a peer needs to reach either).
+  {
+    key: 'maxEmoteMetadataCacheEntries',
+    env: 'HAMMURABI_MAX_EMOTE_METADATA_CACHE_ENTRIES',
+    def: 1_024,
+    min: 1
+  },
+  // The two metadata-lookup brakes bound DIFFERENT things and neither substitutes for the
+  // other. Sustained rate is min(peers_with_avatar_slots ÷ cooldown, ceiling ÷ latency);
+  // under defaults the first term binds at ~224/s, because a lookup requires an allocated
+  // avatar slot. The ceiling's job is CONCURRENCY (in-flight entries and sockets, so a slow
+  // registry cannot accumulate thousands); it bounds rate only weakly and latency-
+  // dependently, and raising it multiplies that term directly — 16 -> 32 measured 3.1k ->
+  // 6.3k req/s against a 5ms registry with the cooldown disabled. Setting the cooldown to 0
+  // therefore leaves only that weak bound, and unlike profileFetchCooldownMs nothing sits
+  // behind it (no attemptedVersion-style dedupe), so 0 removes the only rate control.
+  { key: 'maxEmoteMetadataInflight', env: 'HAMMURABI_MAX_EMOTE_METADATA_INFLIGHT', def: 32, min: 1 },
+  // Callers allowed to wait on ONE in-flight lookup. The ceiling above counts lookups, so
+  // without this a peer repeating an emote at its full packet rate stacks continuations for
+  // as long as that lookup takes, which is rate x deadline rather than any cap.
+  { key: 'maxEmoteMetadataWaiters', env: 'HAMMURABI_MAX_EMOTE_METADATA_WAITERS', def: 64, min: 1 },
+  {
+    key: 'emoteMetadataFetchCooldownMs',
+    env: 'HAMMURABI_EMOTE_METADATA_FETCH_COOLDOWN_MS',
+    def: 1_000,
+    min: 0
+  },
+  // Deadline for a whole lookup, body read included — robustFetch's timeout only covers
+  // getting the response, so without this a stalled body holds an in-flight slot for good.
+  {
+    key: 'emoteMetadataLookupTimeoutMs',
+    env: 'HAMMURABI_EMOTE_METADATA_LOOKUP_TIMEOUT_MS',
+    def: 30_000,
+    min: 1_000
+  },
 
   // Scene RPC
   { key: 'maxSendPeers', env: 'HAMMURABI_MAX_SEND_PEERS', def: 256, min: 1 },

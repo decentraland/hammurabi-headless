@@ -47,10 +47,24 @@ export const DEFAULT_MAX_BODY_BYTES = limits.maxBodyBytes // HAMMURABI_MAX_BODY_
  * which broke JSON.parse on BOM-prefixed bodies that `response.json()` used to
  * accept (common from Windows/.NET backends).
  */
+/**
+ * `timeoutMs` bounds the whole read in TIME as `maxBytes` bounds it in VOLUME. It is
+ * opt-in because most callers already sit behind a bounded pool or a one-shot startup
+ * path; reach for it when a stalled body would hold a scarce slot.
+ *
+ * It has to live HERE rather than in the caller: an aborted request would do the job, but
+ * `robustFetch` swaps in its own controller's signal and unbridges the caller's in the same
+ * `finally` that returns the response, so a caller holding a Response has no way to abort
+ * it — and cannot cancel the stream either, because this function locks it with
+ * `getReader()`. Racing outside would release the caller's slot while leaving this loop
+ * accumulating chunks on a live socket, which trades a stalled slot for unbounded sockets
+ * and memory. Racing inside lets `finally` cancel the reader, freeing both.
+ */
 export async function readBodyCappedBytes(
   response: Response,
   maxBytes: number,
-  limitKey: LimitKey = 'maxBodyBytes'
+  limitKey: LimitKey = 'maxBodyBytes',
+  opts: { timeoutMs?: number } = {}
 ): Promise<Buffer> {
   const declared = Number(response.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > maxBytes) {
@@ -65,9 +79,14 @@ export async function readBodyCappedBytes(
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
+  // One deadline for the whole read, not per chunk: a body dribbling one byte just inside
+  // any per-chunk limit would otherwise never trip it.
+  const deadlineAt = opts.timeoutMs === undefined ? undefined : Date.now() + opts.timeoutMs
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await (deadlineAt === undefined
+        ? reader.read()
+        : readWithinDeadline(reader.read(), deadlineAt, response.url))
       if (done) break
       total += value.byteLength
       if (total > maxBytes) {
@@ -84,8 +103,35 @@ export async function readBodyCappedBytes(
   return Buffer.concat(chunks)
 }
 
-export async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
-  const text = (await readBodyCappedBytes(response, maxBytes)).toString('utf-8')
+/**
+ * Await one chunk, or reject once the read as a whole has run out of budget. The rejection
+ * unwinds `readBodyCappedBytes`, whose `finally` cancels the reader — which is what
+ * releases the socket and drops the chunks accumulated so far.
+ */
+async function readWithinDeadline<T>(read: Promise<T>, deadlineAt: number, url: string): Promise<T> {
+  const remainingMs = deadlineAt - Date.now()
+  if (remainingMs <= 0) throw new Error(`response body read timed out (${url})`)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      read,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`response body read timed out (${url})`)), remainingMs)
+        // Never hold the event loop open: a stalled read must not delay shutdown.
+        timer.unref?.()
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function readBodyCapped(
+  response: Response,
+  maxBytes: number,
+  opts: { timeoutMs?: number } = {}
+): Promise<string> {
+  const text = (await readBodyCappedBytes(response, maxBytes, 'maxBodyBytes', opts)).toString('utf-8')
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
 }
 
