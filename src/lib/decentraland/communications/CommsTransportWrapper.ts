@@ -3,6 +3,7 @@ import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, TransportMessageEvent, commsLogger } from './types'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
+import { decodeCompressedMovement, readCompressedMovement } from './movement-compression'
 
 export enum RoomConnectionStatus {
   NONE,
@@ -195,6 +196,28 @@ export class CommsTransportWrapper {
     // distinct peers each sending oversized packets would otherwise flood the log.
     if (data.length > MAX_INBOUND_PACKET_BYTES) {
       limitLogger.hit('maxInboundPacketBytes', `${address}: ${data.length} bytes`)
+      return
+    }
+
+    // MovementCompressed is handled BEFORE the generated decoder, because the
+    // generated decoder cannot read it: `movementData` is an int64 routed
+    // through ts-proto's `longToNumber`, which throws above MAX_SAFE_INTEGER,
+    // and the packed value uses 62-64 bits. Every such packet would otherwise
+    // fail to decode as a whole and cost an (unthrottled) log line at the
+    // sender's packet rate. See movement-compression.ts.
+    try {
+      const words = readCompressedMovement(data)
+      if (words) {
+        this.events.emit('movement', {
+          address,
+          data: decodeCompressedMovement(words.temporalData, words.movementData, words.headSyncData, words.pointAtData)
+        })
+        return
+      }
+    } catch (error: any) {
+      // A malformed frame must cost the same as any other bad packet: one
+      // throttled log, no listener aborted.
+      commsLogger.error(`Failed to decode compressed movement from ${address}: ${error?.message ?? error}`)
       return
     }
 
