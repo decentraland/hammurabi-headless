@@ -3,6 +3,8 @@ import mitt from 'mitt'
 import { CommsTransportEvents, MinimumCommunicationsTransport, TransportMessageEvent, commsLogger } from './types'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
+import { createRateLimitedErrorLogger } from '../../misc/logger'
+import { decodeCompressedMovement, readCompressedMovement } from './movement-compression'
 
 export enum RoomConnectionStatus {
   NONE,
@@ -57,6 +59,14 @@ export class CommsTransportWrapper {
 
   // Per-peer fixed-window inbound rate counters (address -> window state).
   private readonly inboundRate = new Map<string, { windowStart: number; count: number }>()
+
+  // Both of these fire on a path a remote peer drives at its full packet rate,
+  // and the per-peer rate limit above is 300/s: a bare console.error would let
+  // one peer emit ~300 stderr lines per second and a full room ~67k/s, which is
+  // the very amplification this decoder exists to remove. One instance each so a
+  // flood of one kind cannot suppress the other's rarer error.
+  private readonly logCompressedMovementError = createRateLimitedErrorLogger()
+  private readonly logMovementDispatchError = createRateLimitedErrorLogger()
 
   constructor(private transport: MinimumCommunicationsTransport, sceneId: string) {
     this.sceneId = sceneId
@@ -195,6 +205,50 @@ export class CommsTransportWrapper {
     // distinct peers each sending oversized packets would otherwise flood the log.
     if (data.length > MAX_INBOUND_PACKET_BYTES) {
       limitLogger.hit('maxInboundPacketBytes', `${address}: ${data.length} bytes`)
+      return
+    }
+
+    // MovementCompressed is handled BEFORE the generated decoder, because the
+    // generated decoder cannot read it: `movementData` is an int64 routed
+    // through ts-proto's `longToNumber`, which throws above MAX_SAFE_INTEGER,
+    // and the packed value uses 62-64 bits. Every such packet would otherwise
+    // fail to decode as a whole and cost an (unthrottled) log line at the
+    // sender's packet rate. See movement-compression.ts.
+    let compressedMovement: proto.Movement | undefined
+    try {
+      const words = readCompressedMovement(data)
+      if (words) {
+        compressedMovement = decodeCompressedMovement(
+          words.temporalData,
+          words.movementData,
+          words.headSyncData,
+          words.pointAtData
+        )
+      }
+    } catch (error: any) {
+      // Not reachable from a malformed packet: readCompressedMovement turns
+      // every parse failure into null so the packet falls through to
+      // Packet.decode below. What reaches here is a fault in this build (see
+      // Int64DecodingUnavailableError), which would otherwise fire once per
+      // compressed packet from every peer — hence the throttled logger. Drop
+      // the packet: Packet.decode cannot read it either.
+      this.logCompressedMovementError(`Failed to decode compressed movement from ${address}`, error)
+      return
+    }
+
+    if (compressedMovement) {
+      // Dispatched OUTSIDE the decode try, and contained the same way
+      // dispatchMessage is below. mitt invokes listeners synchronously, so a
+      // throwing listener DOES abort the remaining listeners for this packet;
+      // what the containment buys is that a remote peer cannot turn a listener
+      // bug into an uncaught exception, and that the failure is reported as a
+      // dispatch failure instead of being mis-blamed on the decoder. Throttled,
+      // because a listener that throws on one packet throws on all of them.
+      try {
+        this.events.emit('movement', { address, data: compressedMovement })
+      } catch (error: any) {
+        this.logMovementDispatchError(`Failed to dispatch compressed movement from ${address}`, error)
+      }
       return
     }
 
