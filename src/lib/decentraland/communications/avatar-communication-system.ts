@@ -20,6 +20,19 @@ import { createEmoteAppendLog } from "./emote-append-log"
 import { EmoteMetadataResolver, emoteMetadataResolver } from "./emote-metadata"
 
 /**
+ * The canonical spelling of a peer address.
+ *
+ * Comms identities arrive in whatever case the peer's client used (LiveKit hands back
+ * checksummed addresses), while every map in this system — and the entity allocator it
+ * shares — is keyed lowercase. Exported so callers that report an address back to a
+ * scene (`~system/Players`) hand out the SAME string this system does, instead of
+ * echoing the caller's spelling.
+ */
+export function normalizeAddress(address: string): string {
+  return address.toLowerCase()
+}
+
+/**
  * Single avatar communication system that handles avatar entities for a specific scene transport.
  * This system manages player entities, profiles, and avatar data for multiplayer scenarios.
  *
@@ -527,10 +540,6 @@ export function createAvatarCommunicationSystem(
   const profileFetchState = new Map<string, { attemptedVersion: number; lastFetchAt: number }>()
   const PROFILE_FETCH_COOLDOWN_MS = limits.profileFetchCooldownMs // HAMMURABI_PROFILE_FETCH_COOLDOWN_MS
 
-  function normalizeAddress(address: string) {
-    return address.toLowerCase()
-  }
-
   async function fetchProfileFromCatalyst(address: string, _lambdasEndpoint?: string): Promise<any> {
     try {
       const response = await robustFetch(`${getAssetBundleRegistryUrl()}/profiles`, {
@@ -693,9 +702,15 @@ export function createAvatarCommunicationSystem(
     lastWorldPosition.delete(normalizedAddress)
   }
 
-  function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
-    const normalizedAddress = normalizeAddress(address)
-
+  /**
+   * Resolve (and optionally allocate) the entity for an ALREADY-normalized address.
+   *
+   * Split from `findPlayerEntityByAddress` so a caller that needs the normalized key
+   * for its own bookkeeping normalizes ONCE. Position and movement packets both do —
+   * they key `lastWorldPosition` by it — and at the 224-slot pool times 30Hz the second
+   * `toLowerCase()` was ~6.7k throwaway strings a second for nothing.
+   */
+  function findPlayerEntityByNormalizedAddress(normalizedAddress: string, createIfMissing: boolean): Entity | null {
     // Refuse a peer we already saw depart BEFORE consulting the allocator. The global
     // mapping may still exist — a sibling system that has not processed the departure
     // yet, or one this system never adopted — and honouring it here would let a
@@ -746,6 +761,10 @@ export function createAvatarCommunicationSystem(
     registry.noteObserved(normalizedAddress)
 
     return entity
+  }
+
+  function findPlayerEntityByAddress(address: string, createIfMissing: boolean): Entity | null {
+    return findPlayerEntityByNormalizedAddress(normalizeAddress(address), createIfMissing)
   }
 
   // Event handlers (stored for cleanup on dispose)
@@ -862,12 +881,15 @@ export function createAvatarCommunicationSystem(
       !Number.isFinite(d.rotationX) || !Number.isFinite(d.rotationY) || !Number.isFinite(d.rotationZ) ||
       !Number.isFinite(d.rotationW)
     ) return
-    const entity = findPlayerEntityByAddress(event.address, true)
+    // Normalized ONCE per packet and threaded through: this is the hottest path in the
+    // system (every peer, ~30Hz).
+    const address = normalizeAddress(event.address)
+    const entity = findPlayerEntityByNormalizedAddress(address, true)
     if (entity) {
       // Log only after allocation succeeds, so the throttle map gets an entry
       // only for an address that has an entity (cleaned up in removePlayerEntity).
-      if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('position', normalizeAddress(event.address), d)
-      putPlayerTransform(entity, normalizeAddress(event.address), event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
+      if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('position', address, d)
+      putPlayerTransform(entity, address, event.data, new Quaternion(event.data.rotationX, event.data.rotationY, event.data.rotationZ, event.data.rotationW))
     }
   }
 
@@ -877,12 +899,13 @@ export function createAvatarCommunicationSystem(
       !Number.isFinite(d.positionX) || !Number.isFinite(d.positionY) || !Number.isFinite(d.positionZ) ||
       !Number.isFinite(d.rotationY)
     ) return
-    const entity = findPlayerEntityByAddress(event.address, true)
+    const address = normalizeAddress(event.address)
+    const entity = findPlayerEntityByNormalizedAddress(address, true)
 
     if (entity) {
       // Log only after allocation succeeds (see handlePosition).
-      if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('movement', normalizeAddress(event.address), d)
-      putPlayerTransform(entity, normalizeAddress(event.address), event.data, Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY))
+      if (DEBUG_COMMS_POSITIONS) debugLogCommsPosition('movement', address, d)
+      putPlayerTransform(entity, address, event.data, Quaternion.RotationAxis(Vector3.Up(), event.data.rotationY))
     }
   }
 
@@ -923,10 +946,10 @@ export function createAvatarCommunicationSystem(
       return
     }
 
-    const entity = findPlayerEntityByAddress(event.address, true)
+    const normalizedAddress = normalizeAddress(event.address)
+    const entity = findPlayerEntityByNormalizedAddress(normalizedAddress, true)
     if (!entity) return
 
-    const normalizedAddress = normalizeAddress(event.address)
     const loop = metadataResolver.resolveLoop(emoteUrn, normalizedAddress)
     if (typeof loop === 'boolean') {
       appendEmote(entity, emoteUrn, loop)
@@ -962,7 +985,7 @@ export function createAvatarCommunicationSystem(
     const address = normalizeAddress(event.address)
     const announcedVersion = event.data.profileVersion
 
-    const entity = findPlayerEntityByAddress(event.address, true)
+    const entity = findPlayerEntityByNormalizedAddress(address, true)
     if (entity) {
       await handleProfileVersionAnnouncement(entity, address, announcedVersion)
     }
@@ -1115,9 +1138,25 @@ export function createAvatarCommunicationSystem(
 
     /**
      * Read-only view of the peers this system currently owns an entity for, for
-     * `~system/Players`. Positions are WORLD-space (pre-`worldToScene`) so a
-     * caller can test them against any scene's parcels; a peer that has been
-     * adopted but has not sent a position yet reports `null`.
+     * `~system/Players`. Positions are WORLD-space (pre-`worldToScene`) so a caller can
+     * test them against any scene's parcels.
+     *
+     * MEMBERSHIP: one entry per address in `ownedEntities` — every peer this system has
+     * adopted, from ANY packet (position, movement, profile, chat, emote) or from the
+     * registry replay of peers already in the room when this system attached. An entry
+     * appears when the peer is adopted and disappears only when the transport reports it
+     * gone (PEER_DISCONNECTED -> `removePlayerEntity`).
+     *
+     * `worldPosition` IS NULL until the peer's first position/movement packet, and only
+     * those two packets ever write it. So:
+     *  - a peer adopted by a profile/chat/emote packet, and every peer replayed from the
+     *    registry, reports `null` until it moves. A stationary peer that never sends a
+     *    position packet reports `null` forever. That is deliberate: this system does not
+     *    know where it stands, and no caller should be able to mistake a guess for an
+     *    answer.
+     *  - the converse: a peer that STOPS sending keeps its last reported position for as
+     *    long as it stays connected. There is no staleness timeout — standing still is
+     *    the normal reason a client sends nothing.
      *
      * Returns a snapshot: the caller must not retain the vectors, which are
      * reused in place as packets arrive.

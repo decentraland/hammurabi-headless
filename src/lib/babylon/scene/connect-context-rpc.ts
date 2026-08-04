@@ -23,6 +23,7 @@ import { signedFetch, getSignedHeaders } from '../../decentraland/identity/signe
 import { getFreshStorageDelegation } from '../../decentraland/identity/storage-delegation'
 import { assertPublicSceneUrl } from '../../misc/ssrf'
 import { isLocalhostRealm } from '../../decentraland/realm/resolution'
+import { normalizeAddress } from '../../decentraland/communications/avatar-communication-system'
 import { limits } from '../../misc/limits'
 import { limitLogger } from '../../misc/limit-logger'
 import { encodeMessage, MsgType, SceneContext } from './scene-context'
@@ -127,44 +128,112 @@ function isPreviewRealm(): boolean {
   return (realm.aboutResponse?.configurations as any)?.isPreview ?? isLocalhostRealm(realm.baseUrl)
 }
 
+// Every string a Catalyst profile carries is announced by the peer it describes, and
+// `getPlayerData` copies it into the scene's isolate. Bound both the strings and the
+// wearable count on the way out.
+const MAX_PROFILE_STRING_CHARS = limits.maxProfileStringChars // HAMMURABI_MAX_PROFILE_STRING_CHARS
+const MAX_PROFILE_WEARABLES = limits.maxProfileWearables // HAMMURABI_MAX_PROFILE_WEARABLES
+
+// `UserData.version` is an int32 on the wire: a larger value silently wraps on encode.
+const MAX_PROFILE_VERSION = 0x7fffffff
+
 /**
  * Catalyst profiles carry colors as {r,g,b} floats in 0..1; `UserData.avatar`
  * declares them as strings, and the reference client renders them as hex. Kept
  * consistent with the hard-coded values in UserIdentity.getUserData below.
+ *
+ * The channels are checked for being FINITE NUMBERS, not merely present: a
+ * peer-announced `skin.color.r = "abc"` produced "#NaN0000" and `hair.color.r = {}`
+ * produced "#NaNffff" — a value no scene can parse, from an input any peer can send.
  */
-function colorToHex(color: { r?: number; g?: number; b?: number } | undefined, fallback: string): string {
-  if (!color || color.r === undefined || color.g === undefined || color.b === undefined) return fallback
+function colorToHex(color: { r?: unknown; g?: unknown; b?: unknown } | undefined, fallback: string): string {
+  if (!color) return fallback
+  const { r, g, b } = color
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return fallback
   const channel = (value: number) =>
     Math.max(0, Math.min(255, Math.round(value * 255)))
       .toString(16)
       .padStart(2, '0')
-  return `#${channel(color.r)}${channel(color.g)}${channel(color.b)}`
+  return `#${channel(r as number)}${channel(g as number)}${channel(b as number)}`
 }
 
 /**
- * Projects a cached Catalyst profile onto the protocol's `UserData`.
+ * One peer-announced string, or `fallback` when it is absent, not a string, or
+ * over the cap.
+ *
+ * DROPS rather than truncates. Every field this guards is an identifier a scene
+ * acts on (a body-shape urn, a wearable urn, a snapshot url); half a urn is a
+ * different urn, and handing one back would be worse than admitting we have none.
+ */
+function profileString(value: unknown, fallback: string, userId: string): string {
+  if (typeof value !== 'string') return fallback
+  if (value.length > MAX_PROFILE_STRING_CHARS) {
+    limitLogger.hit('maxProfileStringChars', userId)
+    return fallback
+  }
+  return value
+}
+
+/**
+ * The wearable urns of a peer-announced profile, capped in count and per-entry length.
+ *
+ * The SCAN is capped too, not just the result: this projection runs once per
+ * `getPlayerData` call and a scene may poll that every frame, so the walk must not be
+ * proportional to a length the peer chose. A profile whose first entries are junk
+ * therefore loses the valid ones behind them — real profiles have no junk entries, and
+ * the alternative is a peer-sized loop at the scene's polling rate.
+ */
+function profileWearables(value: unknown, userId: string): string[] {
+  if (!Array.isArray(value)) return []
+  if (value.length > MAX_PROFILE_WEARABLES) limitLogger.hit('maxProfileWearables', userId)
+  const scanned = Math.min(value.length, MAX_PROFILE_WEARABLES)
+  const wearables: string[] = []
+  for (let i = 0; i < scanned; i++) {
+    const wearable = value[i]
+    if (typeof wearable !== 'string') continue
+    if (wearable.length > MAX_PROFILE_STRING_CHARS) {
+      limitLogger.hit('maxProfileStringChars', userId)
+      continue
+    }
+    wearables.push(wearable)
+  }
+  return wearables
+}
+
+/**
+ * Projects a cached Catalyst profile onto the protocol's `UserData`. Exported for tests.
+ *
+ * `userId` must already be normalized by the caller: it is the identity the scene keys
+ * its own maps on, and it has to be the same string `getConnectedPlayers` reports.
  *
  * The profile is peer-announced and therefore untrusted, so every field is
- * defaulted rather than asserted — a malformed profile must produce a dull
- * UserData, never a throw out of an RPC handler.
+ * TYPE-checked and bounded rather than asserted — a malformed profile must produce a
+ * dull UserData, never a throw out of an RPC handler and never a value a scene cannot
+ * parse.
  */
-function userDataFromProfile(userId: string, profile: any) {
+export function userDataFromProfile(userId: string, profile: any) {
+  const avatar = profile?.avatar
   return {
-    displayName: typeof profile?.name === 'string' ? profile.name : 'Unknown',
+    displayName: profileString(profile?.name, 'Unknown', userId),
     hasConnectedWeb3: profile?.hasConnectedWeb3 === true,
     userId,
-    version: Number.isFinite(profile?.version) ? profile.version : 0,
+    // A profile version is a counter. `Number.isFinite` alone accepted 1.5 (which then
+    // int32-truncates to 1 on the wire, so the scene saw a version the peer never
+    // announced) and negatives; floor + clamp makes what the scene sees the value the
+    // wire carries.
+    version:
+      typeof profile?.version === 'number' && Number.isFinite(profile.version) && profile.version > 0
+        ? Math.min(Math.floor(profile.version), MAX_PROFILE_VERSION)
+        : 0,
     avatar: {
-      bodyShape: typeof profile?.avatar?.bodyShape === 'string' ? profile.avatar.bodyShape : '',
-      skinColor: colorToHex(profile?.avatar?.skin?.color, '#443322'),
-      hairColor: colorToHex(profile?.avatar?.hair?.color, '#663322'),
-      eyeColor: colorToHex(profile?.avatar?.eyes?.color, '#332211'),
-      wearables: Array.isArray(profile?.avatar?.wearables)
-        ? profile.avatar.wearables.filter((w: unknown) => typeof w === 'string')
-        : [],
+      bodyShape: profileString(avatar?.bodyShape, '', userId),
+      skinColor: colorToHex(avatar?.skin?.color, '#443322'),
+      hairColor: colorToHex(avatar?.hair?.color, '#663322'),
+      eyeColor: colorToHex(avatar?.eyes?.color, '#332211'),
+      wearables: profileWearables(avatar?.wearables, userId),
       snapshots: {
-        face256: typeof profile?.avatar?.snapshots?.face256 === 'string' ? profile.avatar.snapshots.face256 : '',
-        body: typeof profile?.avatar?.snapshots?.body === 'string' ? profile.avatar.snapshots.body : ''
+        face256: profileString(avatar?.snapshots?.face256, '', userId),
+        body: profileString(avatar?.snapshots?.body, '', userId)
       }
     }
   }
@@ -397,20 +466,44 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
   registerService(port, PlayersServiceDefinition, async () => ({
     async getPlayerData(req, context) {
-      const profile = context.avatarSystem?.getKnownProfile(req.userId) ?? null
-      const data = profile ? userDataFromProfile(req.userId, profile) : undefined
+      // Report the NORMALIZED address, never the scene-supplied spelling. The lookup
+      // normalizes anyway, so `getPlayerData({ userId: '0xAliCE' })` used to answer
+      // `{ userId: '0xAliCE' }` while `getConnectedPlayers` reported `0xalice` — a scene
+      // keying a map on `data.userId` ended up with two entries for one player.
+      const userId = normalizeAddress(req.userId)
+      const profile = context.avatarSystem?.getKnownProfile(userId) ?? null
+      const data = profile ? userDataFromProfile(userId, profile) : undefined
       return { data }
     },
+    /**
+     * The peers this server can PLACE on one of this scene's parcels right now.
+     *
+     * Membership is driven exclusively by position/movement packets, which is what
+     * makes both edges of this list intentional:
+     *
+     *  - a peer with no position yet is EXCLUDED, even though it is connected. That
+     *    includes every peer already in the room when this worker joined (adopted by
+     *    the registry replay), and any peer adopted by a profile/chat/emote packet.
+     *    A stationary peer that never sends one stays excluded indefinitely. This
+     *    server does not know where they stand, and inventing a position — the scene
+     *    base, the origin — would answer a question it cannot answer, with a lie a
+     *    scene would act on.
+     *  - a peer that STOPS sending keeps its last known position and stays in this
+     *    list until the transport reports it gone (PEER_DISCONNECTED). There is no
+     *    staleness timeout: a player standing still legitimately sends nothing.
+     */
     async getPlayersInScene(_req, context) {
       const peers = context.avatarSystem?.listKnownPeers() ?? []
       return {
         players: peers
-          // A peer that has been adopted but not yet reported a position cannot
-          // be placed, so it is not claimed to be in the scene.
           .filter((peer) => peer.worldPosition !== null && context.isWorldPositionInsideScene(peer.worldPosition))
           .map((peer) => ({ userId: peer.address }))
       }
     },
+    /**
+     * Every peer with an allocated avatar slot, placed or not — see
+     * `getPlayersInScene` for why the two lists differ.
+     */
     async getConnectedPlayers(_req, context) {
       const peers = context.avatarSystem?.listKnownPeers() ?? []
       return { players: peers.map((peer) => ({ userId: peer.address })) }
@@ -446,7 +539,11 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       if (!realm) return { currentRealm: undefined }
 
       const roomInfo = context.transport?.getRoomInfo?.()
-      const serverName = realm.aboutResponse?.configurations?.realmName ?? ''
+      // `|| 'Unknown'`, exactly as `updateStaticEntities` fills RealmInfo.realmName:
+      // a scene reading the realm name off the component and off this API must not get
+      // two different answers for the same realm (isPreview above is aligned for the
+      // same reason). `||` and not `??` so an empty realmName degrades too.
+      const serverName = realm.aboutResponse?.configurations?.realmName || 'Unknown'
 
       return {
         currentRealm: {

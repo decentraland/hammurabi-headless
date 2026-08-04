@@ -46,6 +46,8 @@ export interface Limits {
   maxTrackedPeerSessions: number
   maxSessionsPerPeer: number
   profileFetchCooldownMs: number
+  maxProfileStringChars: number
+  maxProfileWearables: number
   livekitConnectTimeoutMs: number
   maxEmoteUrnBytes: number
   maxEmoteAppendLog: number
@@ -136,6 +138,13 @@ const KNOBS: readonly Knob[] = [
   },
   { key: 'maxSessionsPerPeer', env: 'HAMMURABI_MAX_SESSIONS_PER_PEER', def: 8, min: 1 },
   { key: 'profileFetchCooldownMs', env: 'HAMMURABI_PROFILE_FETCH_COOLDOWN_MS', def: 10_000, min: 0 },
+  // A Catalyst profile is announced by the peer it describes, so every string in it is
+  // peer-controlled. `~system/Players.getPlayerData` copies those strings into the
+  // scene's isolate on demand, so they are bounded on the way out: a name/urn/snapshot
+  // longer than this is dropped (never truncated — half a urn is a different urn), and
+  // at most this many wearables are projected.
+  { key: 'maxProfileStringChars', env: 'HAMMURABI_MAX_PROFILE_STRING_CHARS', def: 512, min: 1 },
+  { key: 'maxProfileWearables', env: 'HAMMURABI_MAX_PROFILE_WEARABLES', def: 64, min: 1 },
   { key: 'livekitConnectTimeoutMs', env: 'HAMMURABI_LIVEKIT_CONNECT_TIMEOUT_MS', def: 30_000, min: 1_000 },
   // Emote (playerEmote -> AvatarEmoteCommand). The urn is a peer-controlled string that
   // ends up in every scene's CRDT, the append log is drained per subscription, and the
