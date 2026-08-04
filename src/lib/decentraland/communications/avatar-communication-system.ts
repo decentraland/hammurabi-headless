@@ -382,17 +382,7 @@ export function createAvatarCommunicationSystem(
   // Injectable so a test can drive a resolver whose cache/debounce/in-flight state it
   // owns. The default is process-wide on purpose (emote urns repeat across peers and
   // scenes), which is exactly what makes it unusable as shared test state.
-  metadataResolver: EmoteMetadataResolver = emoteMetadataResolver,
-  /**
-   * Fired for every accepted remote emote, after validation and entity
-   * resolution but BEFORE the loop-metadata lookup — the SDK's
-   * `playerExpression` observable carries only the expression id, so making it
-   * wait on a registry round-trip (which can be a cooldown or ceiling miss)
-   * would delay or drop an event that does not depend on the answer.
-   *
-   * Optional so the avatar system stays usable without an owning SceneContext.
-   */
-  onPlayerExpression?: (address: string, emoteUrn: string) => void
+  metadataResolver: EmoteMetadataResolver = emoteMetadataResolver
 ) {
   const PlayerIdentityData = createLwwStore(playerIdentityDataComponent)
   const AvatarBase = createLwwStore(avatarBaseComponent)
@@ -960,18 +950,6 @@ export function createAvatarCommunicationSystem(
     const entity = findPlayerEntityByNormalizedAddress(normalizedAddress, true)
     if (!entity) return
 
-    // Contained: this dispatches into scene-owned code, and a throw here would
-    // abort the transport emit for this packet (skipping every later listener)
-    // and log unthrottled once per packet — the same peer-triggerable stderr
-    // flood the thenable check below guards against.
-    if (onPlayerExpression) {
-      try {
-        onPlayerExpression(normalizedAddress, emoteUrn)
-      } catch (error: any) {
-        logEmoteError('player expression observer threw', error)
-      }
-    }
-
     const loop = metadataResolver.resolveLoop(emoteUrn, normalizedAddress)
     if (typeof loop === 'boolean') {
       appendEmote(entity, emoteUrn, loop)
@@ -1180,14 +1158,21 @@ export function createAvatarCommunicationSystem(
      *    long as it stays connected. There is no staleness timeout — standing still is
      *    the normal reason a client sends nothing.
      *
+     * `entity` is the allocated avatar entity. Peer entity ids are generationally
+     * versioned, so a RECONNECT gets a different id for the same address — which is the
+     * only thing that distinguishes "still here" from "left and came back" for a caller
+     * that only ever sees whole snapshots (the address alone does not: a disconnect and
+     * a reconnect between two frames leave it present in both).
+     *
      * Returns a snapshot: the caller must not retain the vectors, which are
      * reused in place as packets arrive.
      */
-    listKnownPeers(): Array<{ address: string; worldPosition: Vector3 | null; profile: any | null }> {
-      const result: Array<{ address: string; worldPosition: Vector3 | null; profile: any | null }> = []
-      for (const address of ownedEntities.keys()) {
+    listKnownPeers(): Array<{ address: string; entity: Entity; worldPosition: Vector3 | null; profile: any | null }> {
+      const result: Array<{ address: string; entity: Entity; worldPosition: Vector3 | null; profile: any | null }> = []
+      for (const [address, entity] of ownedEntities) {
         result.push({
           address,
+          entity,
           worldPosition: lastWorldPosition.get(address) ?? null,
           profile: profileCache.get(address)?.profile ?? null
         })

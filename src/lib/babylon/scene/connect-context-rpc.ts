@@ -353,7 +353,9 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
   registerService(port, EngineApiServiceDefinition, async () => ({
     async subscribe(req, context) {
-      context.observableEvents.subscribe(req.eventId)
+      // Through the context, not straight into the queue: the scene's first
+      // peer-event subscription is also when the current room is snapshotted.
+      context.subscribeObservableEvent(req.eventId)
       return {}
     },
     async unsubscribe(req, context) {

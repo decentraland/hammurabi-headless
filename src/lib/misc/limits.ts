@@ -63,6 +63,7 @@ export interface Limits {
   maxCommsMessageBytes: number
   maxSignedFetchRedirects: number
   maxObservableEventQueue: number
+  maxObservableEventQueueBytes: number
 
   // --- Fetch / network / assets / WebSocket ---
   fetchTimeoutMs: number
@@ -199,6 +200,11 @@ const KNOBS: readonly Knob[] = [
   // subscribe and then never poll (the SDK only polls while an observable has
   // listeners), so peer churn and chat would otherwise grow this without bound.
   { key: 'maxObservableEventQueue', env: 'HAMMURABI_MAX_OBSERVABLE_EVENT_QUEUE', def: 1_024, min: 1 },
+  // ...and the same queue in BYTES, which is what actually bounds its memory. A `comms`
+  // event embeds the whole peer-supplied message body (up to maxCommsMessageBytes), so
+  // the count cap alone admitted ~1024 x 30KB = 30MB per scene — and those same bytes
+  // are simultaneously queued in `incomingNetworkMessages` under its own count cap.
+  { key: 'maxObservableEventQueueBytes', env: 'HAMMURABI_MAX_OBSERVABLE_EVENT_QUEUE_BYTES', def: 4 * MB, min: 1 * KB },
 
   // Fetch / network / assets / WS
   { key: 'fetchTimeoutMs', env: 'HAMMURABI_FETCH_TIMEOUT_MS', def: 15_000, min: 100 },
