@@ -16,6 +16,8 @@ const LIMIT_LOGGER_PATH = '../../../src/lib/misc/limit-logger'
 const SCENE_FETCH_PATH = '../../../src/lib/misc/scene-fetch'
 const MARSHAL_UTILS_PATH = '../../../src/lib/common-runtime/marshal-utils'
 const PRIMITIVE_MESHES_PATH = '../../../src/lib/babylon/scene/logic/primitive-meshes'
+const RAYCASTS_PATH = '../../../src/lib/babylon/scene/logic/raycasts'
+const RAYCAST_COMPONENT_PATH = '../../../src/lib/decentraland/sdk-components/raycast-component'
 
 describe('limit logging wiring', () => {
   let server: http.Server
@@ -99,6 +101,62 @@ describe('limit logging wiring', () => {
     try {
       createCylinderMesh(scene, 'cylinder_collider', 1e30, 0.5)
       expect(hit.mock.calls[0]?.[0]).toBe('maxPrimitiveRadiusMeters')
+    } finally {
+      scene.dispose()
+      engine.dispose()
+    }
+  })
+
+  // The raycast ceilings report through the same throttled logger. Asserting the
+  // KEY (not just that something was logged) is the point: CLAUDE.md constrains it
+  // to `keyof Limits` so the per-key state map stays bounded, and the two raycast
+  // keys are easy to transpose — measured, swapping them failed no test.
+  it('reports the maxRaycastIntersectionsPerFrame key when one raycast spans too many colliders', () => {
+    const hit = jest.fn()
+    jest.resetModules()
+    jest.doMock(LIMIT_LOGGER_PATH, () => ({ limitLogger: { hit } }))
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const BABYLON = require('@babylonjs/core')
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { processRaycasts } = require(RAYCASTS_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { raycastComponent, raycastResultComponent } = require(RAYCAST_COMPONENT_PATH)
+
+    const engine = new BABYLON.NullEngine()
+    const scene = new BABYLON.Scene(engine)
+    try {
+      const plane = BABYLON.MeshBuilder.CreatePlane('p_collider', { width: 1, height: 1 }, scene)
+      plane.position.set(0, 0, 50)
+      plane.computeWorldMatrix(true)
+      // Past the 50_000 mesh ceiling, so the mesh branch answers before any scan.
+      const meshes = new Array(60_000).fill(plane)
+      const raycast = {
+        queryType: 0,
+        continuous: false,
+        timestamp: 0,
+        collisionMask: undefined,
+        direction: undefined,
+        originOffset: undefined
+      }
+      processRaycasts({
+        currentTick: 0,
+        entityId: 'logger-spec',
+        rootNode: { position: BABYLON.Vector3.Zero(), getChildMeshes: () => meshes },
+        pendingRaycastOperations: new Set([1]),
+        components: {
+          [raycastComponent.componentId]: { getOrNull: () => raycast },
+          [raycastResultComponent.componentId]: { createOrReplace: () => undefined }
+        },
+        getEntityOrNull: (id: number) => ({
+          entityId: id,
+          appliedComponents: {
+            raycast: { ray: new BABYLON.Ray(BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 999) }
+          },
+          getWorldMatrix: () => BABYLON.Matrix.Identity()
+        })
+      })
+
+      expect(hit).toHaveBeenCalledWith('maxRaycastIntersectionsPerFrame', expect.stringContaining('60000 colliders'))
     } finally {
       scene.dispose()
       engine.dispose()

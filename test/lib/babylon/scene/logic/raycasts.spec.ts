@@ -125,6 +125,41 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       expect(processed).toEqual([1])
     })
 
+    it('should charge the mesh budget for a raycast it refused, so the frame stays bounded', () => {
+      // #1 is past the ceiling and skips its scan — but getting there already walked
+      // the subtree and swept every world matrix for its mask. Uncharged, a scene
+      // could queue many of those and repeat that work every frame for free.
+      const processed: number[] = []
+      const pending = new Set<number>([1, 2])
+
+      isolatedProcessRaycasts(
+        makeFakeSceneWithPerEntityMeshes(
+          pending,
+          { 1: { meshes: new Array(60_000).fill(plane) }, 2: { meshes: [plane] } },
+          (id) => processed.push(id)
+        )
+      )
+
+      // #1 answers (empty) and spends the budget; #2 finds none left.
+      expect(processed).toEqual([1])
+    })
+
+    it('should keep a CONTINUOUS raycast pending after refusing it on the mesh ceiling', () => {
+      const pending = new Set<number>([1])
+
+      isolatedProcessRaycasts(
+        makeFakeSceneWithPerEntityMeshes(
+          pending,
+          { 1: { meshes: new Array(60_000).fill(plane), continuous: true } },
+          () => undefined
+        )
+      )
+
+      // Removing it here retired it permanently: nothing re-arms a continuous
+      // raycast except the scene re-PUTting the component.
+      expect(Array.from(pending)).toEqual([1])
+    })
+
     it('should answer a raycast past the whole mesh ceiling with an empty result', () => {
       const meshes = new Array(60_000).fill(plane)
       const pending = new Set<number>([1])
@@ -174,26 +209,154 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     })
   })
 
-  it('processes only as many raycasts as the 50k budget allows and leaves the rest pending', () => {
-    // 30k meshes per raycast against a 50k budget: #1 spends 30k leaving 20k, and
-    // #2 would need another 30k, so it is deferred BEFORE running rather than
-    // allowed to overshoot. (The budget used to be charged after the fact and was
-    // permitted to go negative, so a second raycast ran every frame no matter how
-    // far past the ceiling it took the frame.)
-    // PLANES (2 triangles each), so 30k meshes is 60k triangles and the triangle
-    // ceiling stays far out of the way — this test is about the MESH ceiling, and
-    // with boxes the triangle ceiling would bind first and mask it.
-    const meshes = new Array(30_000).fill(plane)
-    const pending = new Set<number>([1, 2, 3, 4, 5])
-    const processed: number[] = []
+  // glTF lets a primitive omit `indices`; Babylon's glTF 2.0 loader answers that with
+  // `babylonMesh.isUnIndexed = true` and no index buffer, so `getTotalIndices()` is 0
+  // while the geometry is whole. Such a mesh IS ray-tested — `SubMesh.intersects`
+  // routes `!indices.length && _mesh._unIndexed` to `_intersectUnIndexedTriangles`,
+  // which walks `verticesStart .. verticesStart + verticesCount` in steps of 3 — so
+  // costing it off its index count bills the 12-triangle floor for a mesh that tests
+  // `vertices / 3` triangles on EVERY ray, and 50k of them (the whole mesh ceiling)
+  // came to exactly the triangle ceiling and ran in a single frame.
+  describe('and a candidate collider is authored without an index buffer', () => {
+    // 300 copies x 2001 triangles = 600_300, just past the 600_000 triangle ceiling,
+    // while 300 candidates is 0.6% of the 50k mesh ceiling — so only the triangle
+    // ceiling can be what refuses the raycast below. Billed off `getTotalIndices()`
+    // the same set is 300 x 12 = 3_600, and the raycast runs and hits instead.
+    const UNINDEXED_TRIANGLES = 2_001
+    const UNINDEXED_COPIES = 300
+    let unindexedCollider: BABYLON.Mesh
 
-    processRaycasts(makeFakeScene(pending, meshes, undefined, (id) => processed.push(id)))
+    beforeEach(() => {
+      // Built the way the glTF loader builds an index-less primitive: `isUnIndexed`
+      // set, positions applied through a Geometry, no index buffer. Every triangle
+      // spans the ray's path so none of them is prefiltered away.
+      unindexedCollider = new BABYLON.Mesh('unindexed_collider', scene)
+      unindexedCollider.isUnIndexed = true
+      const positions = new Float32Array(UNINDEXED_TRIANGLES * 9)
+      for (let t = 0; t < UNINDEXED_TRIANGLES; t++) {
+        const o = t * 9
+        positions[o + 0] = -2; positions[o + 1] = -2; positions[o + 2] = 50
+        positions[o + 3] = 2; positions[o + 4] = -2; positions[o + 5] = 50
+        positions[o + 6] = 0; positions[o + 7] = 2; positions[o + 8] = 50
+      }
+      const geometry = new BABYLON.Geometry('unindexed_collider_geometry', scene)
+      geometry.setVerticesData(BABYLON.VertexBuffer.PositionKind, positions, false)
+      geometry.applyToMesh(unindexedCollider)
+      unindexedCollider.computeWorldMatrix(true)
+    })
 
-    // Only what fits whole runs this frame...
-    expect(processed).toEqual([1])
-    // ...and the rest are left pending (not silently dropped).
-    expect(Array.from(pending).sort()).toEqual([2, 3, 4, 5])
+    afterEach(() => {
+      unindexedCollider.dispose()
+    })
+
+    it('should report a hit against it rather than dropping it from the candidate set', () => {
+      const pending = new Set<number>([1])
+      const results: any[] = []
+
+      processRaycasts(makeFakeSceneCapturing(pending, [unindexedCollider], undefined, (r) => results.push(r)))
+
+      // Naming the mesh is what distinguishes "the un-indexed collider was tested and
+      // hit" from "something produced a result": excluding un-indexed meshes as
+      // uncostable would answer this raycast with an empty hit list.
+      expect(results[0]?.hits.map((hit: any) => hit.meshName)).toEqual(['unindexed_collider'])
+    })
+
+    it('should cost it from its vertices, refusing a raycast its index count would have let through', () => {
+      const meshes = new Array(UNINDEXED_COPIES).fill(unindexedCollider)
+      const pending = new Set<number>([1])
+      const results: any[] = []
+
+      processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+
+      expect(results[0]?.hits).toEqual([])
+    })
+
+    it('should keep a CONTINUOUS over-ceiling raycast pending so it can recover', () => {
+      const meshes = new Array(UNINDEXED_COPIES).fill(unindexedCollider)
+      const pending = new Set<number>([1])
+      const fakeScene = makeFakeSceneCapturing(pending, meshes, undefined, () => undefined)
+      fakeScene.components[raycastComponent.componentId].getOrNull().continuous = true
+
+      processRaycasts(fakeScene)
+
+      // Over-budget is not a death sentence for a continuous raycast: the collider
+      // set can shrink later, and nothing re-arms it except the scene re-PUTting the
+      // component, which a scene has no reason to do. Dropping it here retired it
+      // permanently after one empty result.
+      expect(Array.from(pending)).toEqual([1])
+    })
+
+    it('should still remove a ONE-SHOT over-ceiling raycast', () => {
+      const meshes = new Array(UNINDEXED_COPIES).fill(unindexedCollider)
+      const pending = new Set<number>([1])
+      const fakeScene = makeFakeSceneCapturing(pending, meshes, undefined, () => undefined)
+
+      processRaycasts(fakeScene)
+
+      // A one-shot is answered once and retired, over budget or not.
+      expect(Array.from(pending)).toEqual([])
+    })
   })
+
+  // Per-entity candidate lists. The shared fake above hands every raycast the same
+  // meshes, which cannot express "raycast 1 is over the ceiling and raycast 2 is
+  // cheap" — the case needed to observe whether an over-ceiling raycast CHARGED the
+  // budget it skipped.
+  function makeFakeSceneWithPerEntityMeshes(
+    pending: Set<number>,
+    byEntity: Record<number, { meshes: BABYLON.AbstractMesh[]; continuous?: boolean }>,
+    onResult: (id: number) => void
+  ) {
+    // A distinct mask per entity so meshesForMask cannot share one memoized list.
+    const maskFor = (id: number) => id
+    return {
+      currentTick: 0,
+      entityId: 'per-entity',
+      rootNode: {
+        position: Vector3.Zero(),
+        // pickMeshesForMask filters by collider layer; the fake ignores the predicate
+        // and answers from the mask it was given.
+        getChildMeshes: (_d: boolean, predicate: any) => {
+          const probe = { __mask: 0 } as any
+          void predicate
+          void probe
+          return currentMeshes
+        }
+      },
+      pendingRaycastOperations: pending,
+      components: {
+        [raycastComponent.componentId]: {
+          getOrNull: (id: number) => {
+            currentMeshes = byEntity[id]?.meshes ?? []
+            return {
+              queryType: RaycastQueryType.RQT_HIT_FIRST,
+              continuous: byEntity[id]?.continuous ?? false,
+              timestamp: 0,
+              collisionMask: maskFor(id),
+              direction: undefined,
+              originOffset: undefined
+            }
+          }
+        },
+        [raycastResultComponent.componentId]: { createOrReplace: (id: number) => onResult(id) }
+      },
+      getEntityOrNull: (id: number) => ({
+        entityId: id,
+        appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
+        getWorldMatrix: () => Matrix.Identity()
+      })
+    } as any
+  }
+  let currentMeshes: BABYLON.AbstractMesh[] = []
+
+  // NOTE: there are deliberately no default-knob tests for the MESH ceiling here.
+  // Two used to sit at this spot, named for it, and both passed with the entire
+  // mesh ceiling deleted — verified by mutation. Every candidate is billed at least
+  // TRIANGLE_COST_FLOOR (12) and the triangle default is exactly 50_000 x 12, so at
+  // default knobs no candidate set can reach the mesh ceiling without having already
+  // reached the triangle one. There is no shape cheaper than the floor, which makes
+  // the mesh ceiling unobservable by construction here. Its real coverage lives in
+  // the "tuned far above" describe below, which separates the two knobs.
 
   // Mirrors the triangle ceiling's over-budget path. A scene of CHEAP colliders
   // passes the triangle ceiling easily (60k planes is 120k triangles, well under
