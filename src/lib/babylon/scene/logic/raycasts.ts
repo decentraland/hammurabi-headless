@@ -10,6 +10,7 @@ import { BabylonEntity } from "../BabylonEntity";
 import { pickMeshesForMask } from "./colliders";
 import { ColliderLayer } from "@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen";
 import { limits } from "../../../misc/limits";
+import { limitLogger } from "../../../misc/limit-logger";
 
 const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
 // Per-frame ceiling on total ray↔mesh intersection tests across ALL of a scene's
@@ -42,11 +43,14 @@ const MAX_RAYCAST_INTERSECTIONS_PER_FRAME = limits.maxRaycastIntersectionsPerFra
  * default, so an operator who already tuned it is not silently retuned by an
  * upgrade. Whichever ceiling is reached first stops the frame.
  *
- * RESIDUAL (deliberate): this bounds raycasts against EACH OTHER, not a single
- * raycast. The budget is tested before a raycast runs, never during, because a
- * partially-tested mesh set would resolve the wrong nearest hit — a silently
- * wrong answer is worse than a slow one. One raycast is therefore still bounded
- * only by the scene's total collider triangles, i.e. by `maxLiveEntities`.
+ * Bounds a SINGLE raycast as well as raycasts against each other. Each one's cost
+ * is measured (after the bounding-box prefilter) before any triangle work runs, so
+ * `intersectsMeshes` is never entered with a set that could outrun the ceiling:
+ *   - costs more than a whole frame's budget -> cannot fit on ANY frame, so it is
+ *     answered with an empty result and logged, never left pending forever;
+ *   - costs more than what is LEFT of this frame -> deferred whole to the next
+ *     frame, never truncated (a partial mesh set resolves the wrong NEAREST hit
+ *     and would look authoritative).
  */
 const MAX_RAYCAST_TRIANGLES_PER_FRAME = limits.maxRaycastTrianglesPerFrame // HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
 
@@ -73,19 +77,6 @@ export function processRaycasts(scene: SceneContext) {
     }
     return meshes
   }
-  // Triangle count per mask, memoized beside the mesh list it is derived from so
-  // the sum is walked once per mask per frame rather than once per raycast.
-  const trianglesByMask = new Map<number, number>()
-  const trianglesForMask = (mask: number, meshes: BABYLON.AbstractMesh[]): number => {
-    let triangles = trianglesByMask.get(mask)
-    if (triangles === undefined) {
-      triangles = 0
-      for (const mesh of meshes) triangles += mesh.getTotalIndices() / 3
-      trianglesByMask.set(mask, triangles)
-    }
-    return triangles
-  }
-
   let intersectionBudget = MAX_RAYCAST_INTERSECTIONS_PER_FRAME
   let triangleBudget = MAX_RAYCAST_TRIANGLES_PER_FRAME
 
@@ -107,11 +98,67 @@ export function processRaycasts(scene: SceneContext) {
         // get a list of all possible meshes to project this ray to
         const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
         const intersectableMeshes = meshesForMask(mask)
-        intersectionBudget -= intersectableMeshes.length
-        triangleBudget -= trianglesForMask(mask, intersectableMeshes)
 
-        // then perform the actual raycast
-        const results = ray.intersectsMeshes(intersectableMeshes, false)
+        // The MESH ceiling pays for the bounding-box scan below: one cheap
+        // ray↔box test per candidate, whether or not it survives.
+        intersectionBudget -= intersectableMeshes.length
+
+        // Bounding-box prefilter, charged separately from the triangle work it
+        // gates. Babylon does an equivalent early-out inside intersectsMeshes, so
+        // this changes no result — it makes the cost VISIBLE before it is paid.
+        // Measured: 3000 spheres take 246ms when the ray enters every box and
+        // 14ms when it enters none, so charging every candidate's triangles bills
+        // a scene ~17x its real cost and throttles raycasts that were nearly free.
+        //
+        // Tested in WORLD space against `minimumWorld`/`maximumWorld`. Do NOT
+        // reach for `mesh.intersects(ray, …, onlyBoundingInfo)` here: that path
+        // compares a ray against the mesh's LOCAL bounding volume, and
+        // `Ray.intersectsMesh` is what transforms the ray into local space before
+        // calling it. Handing it a world-space ray silently admits every mesh
+        // whose local bounds contain the scene origin — i.e. every primitive
+        // collider — so the filter passes everything and quietly does nothing.
+        // The world AABB encloses the oriented box Babylon tests, so this is
+        // conservative: it can over-admit a grazing mesh, never wrongly reject.
+        const candidates: BABYLON.AbstractMesh[] = []
+        let candidateTriangles = 0
+        for (const mesh of intersectableMeshes) {
+          const boundingBox = mesh.getBoundingInfo().boundingBox
+          if (ray.intersectsBoxMinMax(boundingBox.minimumWorld, boundingBox.maximumWorld)) {
+            candidates.push(mesh)
+            candidateTriangles += mesh.getTotalIndices() / 3
+          }
+        }
+
+        // A raycast whose OWN cost exceeds a whole frame's budget can never fit,
+        // on this frame or any later one. Deferring it would starve it forever
+        // while a scene keeps re-queueing it, so answer explicitly instead: an
+        // empty result, plus a throttled log so an operator sees which scene is
+        // doing it. Wrong-but-bounded and observable beats a frame that stalls
+        // for seconds — and unlike testing a PARTIAL mesh set (which would
+        // resolve the wrong NEAREST hit and look authoritative) the emptiness is
+        // legible to whoever reads the log.
+        if (candidateTriangles > MAX_RAYCAST_TRIANGLES_PER_FRAME) {
+          limitLogger.hit(
+            'maxRaycastTrianglesPerFrame',
+            `scene ${scene.entityId}: one raycast spans ${candidateTriangles} triangles`
+          )
+          RaycastResult.createOrReplace(
+            entity.entityId,
+            raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
+          )
+          scene.pendingRaycastOperations.delete(entityId)
+          continue
+        }
+
+        // It fits in a frame, just maybe not in what is left of THIS one. Leave
+        // it pending and let it run whole on the next frame rather than
+        // truncating it.
+        if (candidateTriangles > triangleBudget) break
+
+        triangleBudget -= candidateTriangles
+
+        // then perform the actual raycast, against the prefiltered set
+        const results = ray.intersectsMeshes(candidates, false)
 
         const raycastResult = raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
 
