@@ -156,10 +156,19 @@ export function processRaycasts(scene: SceneContext) {
       // `Ray.intersectsMesh` calls `getWorldMatrix()` per mesh and tests in
       // LOCAL space.
       //
-      // `computeWorldMatrix(false)`, not `getWorldMatrix()`: the latter gates on
-      // the render id and so does nothing when called within the frame that
-      // already bumped it. Not `(true)` either — forcing the whole parent chain
-      // costs ~122ns against ~16ns and buys nothing.
+      // `computeWorldMatrix(false)` over `getWorldMatrix()`, but only marginally,
+      // and NOT for the reason a previous version of this comment gave. Both gate
+      // on the render id (`transformNode.js:871`, `node.js:330`); `(false)`
+      // additionally recomputes when the node's own `_isDirty` is set. That is a
+      // strict superset at the same cost, so it is the better default — but it is
+      // not what makes the sweep work. The sweep works because a mesh
+      // `_evaluateActiveMeshes` SKIPPED never had its render id bumped, so either
+      // call recomputes it; substituting `getWorldMatrix()` keeps the stale-bounds
+      // spec green. Not `(true)` either — forcing the whole parent chain costs
+      // ~122ns against ~16ns, and the case it would additionally cover (a mesh
+      // evaluated this frame whose PARENT moved afterwards) is self-healing:
+      // measured with the root left enabled, the hit resolves correctly even with
+      // this sweep deleted entirely.
       //
       // Centralized here rather than in the per-raycast prefilter loop because
       // this runs once per mask per frame while that loop runs once per raycast:

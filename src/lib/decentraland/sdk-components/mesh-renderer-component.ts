@@ -34,18 +34,14 @@ const baseSphere = memoize((scene: BABYLON.Scene) => {
   return ret
 })
 
-export const planeMaterial = memoize((scene: BABYLON.Scene) => {
-  const material = new BABYLON.StandardMaterial(
-    'plane-material',
-    scene
-  )
-  material.specularColor.set(0, 0, 0)
-  material.specularPower = 0
-
-  material.diffuseTexture = new BABYLON.Texture('images/UV_checker_Map_byValle.jpg')
-
-  return material
-})
+// A memoized `planeMaterial` (a UV-checker StandardMaterial with the specular
+// highlight tuned out) used to be assigned to the plane branch's mesh. It was
+// DEAD: `setMeshRendererMaterial` at the end of this applier overwrites
+// `mesh.material` unconditionally with the Material component's material or
+// `baseMaterial`, so the checker texture and the specular tuning were discarded
+// on the next statement and a plane's material measured as 'base-box'. Removed
+// rather than reordered — applying it after would make planes the one shape that
+// ignores its Material component.
 
 // TODO: this component is a stub that will be replaced by the real implementation later in a dedicated PR
 export const meshRendererComponent = declareComponentUsingProtobufJs(PBMeshRenderer, 1018, (entity, component) => {
@@ -118,8 +114,6 @@ export const meshRendererComponent = declareComponentUsingProtobufJs(PBMeshRende
       if (uvs && uvs.length) {
         mesh.updateVerticesData(BABYLON.VertexBuffer.UVKind, uvs)
       }
-
-      mesh.material = planeMaterial(entity.getScene())
     }
 
     entity.appliedComponents.meshRenderer = {
