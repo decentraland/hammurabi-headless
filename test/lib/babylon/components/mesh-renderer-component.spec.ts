@@ -118,8 +118,11 @@ testWithEngine(
         })
 
         // The branch did not exist: `mesh` stayed null and the entity rendered nothing.
+        // `=== null` rather than `not.toBeNull()`: the latter prints its operand only
+        // when it FAILS, and the failing value here is a live mesh — the one case the
+        // header warns about.
         it('should build a cylinder mesh instead of leaving the entity empty', () => {
-          expect(meshOf(entity)).not.toBeNull()
+          expect(meshOf(entity) === null).toBe(false)
         })
 
         // Without a parent the mesh is not under the scene rootNode, so it is outside
@@ -141,11 +144,23 @@ testWithEngine(
         })
 
         // Weak on its own — MeshBuilder hands back an enabled mesh, so the branch's
-        // own setEnabled(true) is redundant here. It is the CLONED branches (box,
-        // sphere, plane) whose templates are disabled, and their copies of this
-        // assertion are the ones that can actually fail.
+        // own setEnabled(true) is redundant here. It is the CLONED branches, BOX and
+        // SPHERE ONLY, whose templates are built disabled, and their copies of this
+        // assertion are the only ones that can actually fail. The plane is built fresh
+        // like this one, so its copy is equally weak. Verified by mutation: dropping
+        // setEnabled(true) from the cylinder or plane branch kills nothing.
         it('should enable the mesh so it is part of the rendered scene', () => {
           expect(meshOf(entity)!.isEnabled()).toBe(true)
+        })
+
+        // Pins CYLINDER_TESSELLATION at 50 — the radial segment count primitive-meshes
+        // justifies at length as reference-client parity. Nothing else can: the
+        // collider-parity assertion below reads the SAME createCylinderMesh, so
+        // dropping `tessellation` moves both sides together and parity still holds.
+        // It is also a raycast-cost input, since the triangle budget bills per mesh.
+        // Babylon's default is 24, which measures as 102 vertices.
+        it('should build the 50 radial segments the reference client uses', () => {
+          expect(meshOf(entity)!.getTotalVertices()).toBe(206)
         })
 
         // Asserted by identity, not truthiness: the cylinder branch does not assign
@@ -313,14 +328,26 @@ testWithEngine(
         expect(meshOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
 
+      // Pins SPHERE_SEGMENTS at 16, for the same reason as the cylinder's
+      // tessellation: the collider-parity assertion below shares createSphereMesh and
+      // so cannot catch a dropped `segments`. The count is load-bearing for raycast
+      // cost specifically — primitive-meshes chose 16 (1296 triangles, 0.381% chord
+      // error) over Babylon's default 32 (4624 triangles), a 3.6x difference in what
+      // every sphere charges against the per-frame triangle budget. Default 32
+      // measures as 2415 vertices.
+      it('should build the 16 latitude segments the triangle budget is sized for', () => {
+        expect(meshOf(entity)!.getTotalVertices()).toBe(703)
+      })
+
       describe('and the same entity also carries a MeshCollider with a sphere', () => {
         beforeEach(async () => {
           await putCollider(entity, { mesh: { $case: 'sphere', sphere: {} } })
         })
 
         // Both come from createSphereMesh, so the pinned segment count cannot drift
-        // between what is drawn and what raycasts resolve against. Nothing but this
-        // stops one of the two picking up Babylon's implicit default again.
+        // between what is drawn and what raycasts resolve against. This catches
+        // DIVERGENCE only — a change to the shared function moves both sides at once,
+        // which is what the segment-count assertion above is for.
         it('should build vertex data identical to the collider it stands in for', () => {
           expect(Array.from(meshOf(entity)!.getVerticesData(VertexBuffer.PositionKind)!)).toEqual(
             Array.from(colliderOf(entity)!.getVerticesData(VertexBuffer.PositionKind)!)
@@ -382,6 +409,85 @@ testWithEngine(
         // template: the UVs are per entity.
         it('should write the scene UV map over the generated one', () => {
           expect(Array.from(meshOf(entity)!.getVerticesData(VertexBuffer.UVKind)!)).toEqual(uvs)
+        })
+      })
+    })
+
+    // Box and sphere are the two branches that clone a memoized, scene-wide template.
+    // Drop the `.clone()` and every entity of that shape is handed the TEMPLATE
+    // itself: they share one mesh, the last one to arrive steals the parent, and the
+    // first replace disposes the geometry out from under all of them. None of the
+    // single-entity assertions above can see any of that.
+    const clonedShapes: Array<{ name: string; value: PBMeshRenderer }> = [
+      { name: 'box', value: { mesh: { $case: 'box', box: { uvs: [] } } } },
+      { name: 'sphere', value: { mesh: { $case: 'sphere', sphere: {} } } }
+    ]
+
+    for (const shape of clonedShapes) {
+      describe(`when two entities each put a MeshRenderer with a ${shape.name} shape`, () => {
+        let first: Entity
+        let second: Entity
+
+        beforeEach(async () => {
+          first = nextEntityId++ as Entity
+          second = nextEntityId++ as Entity
+          await putRenderer(first, shape.value)
+          await putRenderer(second, shape.value)
+        })
+
+        // uniqueId rather than the meshes themselves: see the header.
+        it('should give each entity its own copy rather than the shared template', () => {
+          expect(meshOf(first)!.uniqueId === meshOf(second)!.uniqueId).toBe(false)
+        })
+
+        // Sharing one mesh is not merely wasteful — `mesh.parent = entity` on the
+        // second PUT moves it, so the first entity silently loses its geometry.
+        it('should leave the first entity still parenting its own mesh', () => {
+          expect(meshOf(first)!.parent === $.ctx.entities.get(first)).toBe(true)
+        })
+
+        describe('and the second entity then replaces its shape', () => {
+          beforeEach(async () => {
+            await putRenderer(second, { mesh: { $case: 'cylinder', cylinder: {} } })
+          })
+
+          // The replace path disposes the mesh it replaced. On a shared template that
+          // destroys the geometry of every entity of this shape, including ones the
+          // scene never touched, and poisons the memo for the rest of the process.
+          it('should not dispose the mesh the first entity is still rendering', () => {
+            expect(meshOf(first)!.isDisposed()).toBe(false)
+          })
+        })
+      })
+    }
+
+    describe('when a scene puts a MeshRenderer with no shape set', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await putRenderer(entity, {})
+      })
+
+      it('should leave the entity without a mesh rather than defaulting to one', () => {
+        expect($.ctx.entities.get(entity)!.appliedComponents.meshRenderer!.mesh === null).toBe(true)
+      })
+
+      // The entry is stored even with no mesh, which is precisely why the applier's
+      // clear gates on the ENTRY and not on `entry?.mesh`.
+      it('should still record the applied component so a later clear can find it', () => {
+        expect($.ctx.entities.get(entity)!.appliedComponents.meshRenderer === undefined).toBe(false)
+      })
+
+      describe('and the scene then deletes the component', () => {
+        beforeEach(async () => {
+          await deleteRenderer(entity)
+        })
+
+        // A mesh-gated clear reads `{ mesh: null }` as nothing to do and leaves the
+        // stale entry attached forever, so the next PUT's clear never runs either.
+        it('should clear the mesh-less entry instead of leaving it attached forever', () => {
+          expect($.ctx.entities.get(entity)!.appliedComponents.meshRenderer === undefined).toBe(true)
         })
       })
     })

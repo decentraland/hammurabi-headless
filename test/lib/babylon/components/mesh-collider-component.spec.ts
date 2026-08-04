@@ -23,6 +23,28 @@ import { CrdtBuilder, testWithEngine } from '../babylon-test-helper'
 // whole array, and every element is a Babylon mesh whose object graph reaches the
 // entire scene — measured, that OOMs the jest worker at 4GB instead of printing a
 // diff, so the one run that matters is the one you cannot read.
+//
+// The rule is NOT specific to `toContain`. Every matcher hands its received (and
+// expected) value to pretty-format on failure, so `toBe`, `toEqual`, `toBeNull` and
+// `toBeUndefined` are the same hazard the moment the value could be a mesh, an
+// entity or an object holding one — a mesh reaches its parent, the scene, every
+// other mesh in it and back, and this file ends with ~53 of them.
+//
+// Measured, by making an unset `mesh` oneof fall through to a box (the historical
+// bug this spec exists to catch) and running the file three ways:
+//   `toBeNull()` on the collider + `toEqual()` on the live component entry
+//       -> FATAL ERROR: JavaScript heap out of memory at 117s, exit code null, NO
+//          test names and no JSON report. The run looks like a crash rather than a
+//          failure, and the mutant reads as SURVIVING because jest never wrote a
+//          result.
+//   `toBeNull()` alone            -> 72s to report one failure.
+//   boolean + projected (current) -> 2.8s, three named failures, ~2KB each.
+//
+// So nothing that can hold a Babylon object is passed to a matcher directly. It is
+// compared as a BOOLEAN or a SCALAR (`expect(colliderOf(entity) === null).toBe(true)`,
+// `expect(mesh.parent === entity).toBe(true)`) or projected onto plain data first.
+// Numbers, booleans, strings and arrays of numbers are safe and stay as they are.
+// A failure that cannot be read is not a test.
 
 // Babylon's unit box: 4 vertices per face x 6 faces, the count a cloned box
 // template would carry into any other shape.
@@ -73,6 +95,38 @@ function ringSegmentCount(mesh: AbstractMesh): number {
     if (gap > 1e-6) step = Math.min(step, gap)
   }
   return Math.round((2 * Math.PI) / step)
+}
+
+/**
+ * Side triangles that twist across the axis: those carrying both a top-ring and a
+ * bottom-ring vertex whose radial directions oppose each other.
+ *
+ * This is the only reading here that is not sign-blind, and it is what tells a
+ * frustum from an hourglass. `endCapRadius` measures with `Math.hypot`, so a ring
+ * built at -1 reads exactly like one built at +1; so do the bounding box, the
+ * vertex count and the segment count. Handing a raw negative radius to the mesh
+ * builder mirrors that ring 180 degrees, and every side quad then crosses the axis:
+ * measured for `{radiusTop: -1, radiusBottom: 0.5}`, 200 twisted side triangles
+ * against 0 once the magnitude is taken. Without this, dropping the `Math.abs` in
+ * clampRadius changes nothing any other assertion in this file can see.
+ */
+function twistedSideTriangleCount(mesh: AbstractMesh): number {
+  const positions = mesh.getVerticesData(VertexBuffer.PositionKind)!
+  const indices = mesh.getIndices()!
+  let twisted = 0
+  for (let i = 0; i < indices.length; i += 3) {
+    const corners = [indices[i], indices[i + 1], indices[i + 2]].map((index) => ({
+      x: positions[index * 3],
+      y: positions[index * 3 + 1],
+      z: positions[index * 3 + 2]
+    }))
+    const top = corners.filter((corner) => corner.y > 0.4)
+    const bottom = corners.filter((corner) => corner.y < -0.4)
+    // A cap fan sits entirely on one ring, so it cannot twist.
+    if (top.length === 0 || bottom.length === 0) continue
+    if (top.some((t) => bottom.some((b) => t.x * b.x + t.z * b.z < 0))) twisted++
+  }
+  return twisted
 }
 
 /**
@@ -145,6 +199,24 @@ testWithEngine(
     let timestamp = 0
     let nextEntityId = 700
 
+    // The drift logger (createRateLimitedErrorLogger) keeps MODULE-level state with a
+    // 1s window, and the whole file runs inside one. So a test that has to observe a
+    // drift log — or to prove the ABSENCE of one — must run at an instant the
+    // throttle has not already consumed, otherwise it reads suppression as silence.
+    // Measured: without this, making the default arm log unconditionally still passed
+    // the unset-oneof describe, because the two tests declared before it had already
+    // spent the window.
+    //
+    // The counter is shared by every describe that pins the clock: each pin must be
+    // strictly LATER than the last, and two independent counters would eventually jump
+    // one describe backwards, re-arming the throttle for the other.
+    let clockSkewMs = 0
+    function pinClockPastTheDriftLogWindow(): jest.SpyInstance {
+      clockSkewMs += 3_600_000
+      const realNow = Date.now()
+      return jest.spyOn(Date, 'now').mockReturnValue(realNow + clockSkewMs)
+    }
+
     beforeEach(() => {
       $.startEngine()
     })
@@ -202,8 +274,11 @@ testWithEngine(
 
       // The template is built disabled and clone() inherits that, so the applier has
       // to re-enable. collisionCoordinator gates on mesh.isEnabled(), while
-      // Ray.intersectsMesh does not — forgetting this leaves every box collider
+      // Ray.intersectsMesh does not — forgetting this leaves every cloned collider
       // pickable but walk-through, silently killing the whole CL_PHYSICS half.
+      // Asserted once and only here: box, sphere and plane clones are re-enabled by
+      // the same single `collider.setEnabled(true)`, so a sphere and a plane copy of
+      // this test cannot fail without this one failing too.
       it('should enable the clone so the avatar collides with it instead of walking through', () => {
         expect(colliderOf(entity)!.isEnabled()).toBe(true)
       })
@@ -212,7 +287,7 @@ testWithEngine(
       // pickMeshesForMask only walks getChildMeshes(), so an unparented collider is
       // invisible to every raycast the scene makes.
       it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {
-        expect(colliderOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+        expect(colliderOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
     })
 
@@ -254,12 +329,8 @@ testWithEngine(
         expect(equatorSegmentCount(colliderOf(entity)!)).toBe(36)
       })
 
-      it('should enable the clone so the avatar collides with it instead of walking through', () => {
-        expect(colliderOf(entity)!.isEnabled()).toBe(true)
-      })
-
       it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {
-        expect(colliderOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+        expect(colliderOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
     })
 
@@ -300,12 +371,8 @@ testWithEngine(
         expect(colliderOf(entity)!.getTotalVertices()).toBe(4)
       })
 
-      it('should enable the clone so the avatar collides with it instead of walking through', () => {
-        expect(colliderOf(entity)!.isEnabled()).toBe(true)
-      })
-
       it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {
-        expect(colliderOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+        expect(colliderOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
     })
 
@@ -348,7 +415,7 @@ testWithEngine(
         // so it is the one that can end up outside rootNode: losing this line makes
         // every scene raycast silently stop hitting cylinders.
         it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {
-          expect(colliderOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+          expect(colliderOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
         })
       })
 
@@ -428,13 +495,13 @@ testWithEngine(
         })
 
         // NaN is only accidentally survivable today (Babylon's builder treats a falsy
-        // diameter as 1), which is an implementation detail, not a contract.
+        // diameter as 1), which is an implementation detail, not a contract. Kept
+        // alongside the Infinity case rather than folded into it: NaN is the input a
+        // guard is most likely to route somewhere else (`isFinite` narrowed to an
+        // infinity test, or NaN sent to 0), and a 0 here is the five-micron ring the
+        // whole clamp exists to prevent — which the Infinity case cannot see.
         it('should replace it with the 0.5 default instead of relying on the builder', () => {
           expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(0.5, 5)
-        })
-
-        it('should leave the finite bottom radius untouched', () => {
-          expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(1, 5)
         })
       })
 
@@ -457,10 +524,6 @@ testWithEngine(
 
         it('should build the ring at its absolute value, as the reference client does', () => {
           expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(3, 5)
-        })
-
-        it('should leave the valid bottom radius untouched', () => {
-          expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(1, 5)
         })
 
         // The consequence, not the coordinate: clamped to 0 this ray missed by six
@@ -492,6 +555,42 @@ testWithEngine(
         it('should build the positive end unchanged, giving a plain frustum', () => {
           expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(0.5, 5)
         })
+
+        // The two assertions above cannot see the hourglass at all: both read radii
+        // through Math.hypot, and the mirrored ring has the same magnitudes. This is
+        // the assertion that makes the `Math.abs` load-bearing — measured, the raw
+        // negative builds 200 twisted side triangles here while every other reading in
+        // this file, including the tessellation and the bounding box, is unchanged.
+        it('should build a frustum rather than the self-intersecting hourglass the raw signs give', () => {
+          expect(twistedSideTriangleCount(colliderOf(entity)!)).toBe(0)
+        })
+      })
+
+      // The one configuration where the docblock's "abs reproduces the reference
+      // surface exactly" claim actually holds: negating BOTH radii rotates the whole
+      // side surface 180 degrees, and the 50-gon is even, so it maps onto itself —
+      // same magnitudes, no twist. Untested, "identical surface" was asserted nowhere.
+      describe('and both radii are negative', () => {
+        let entity: Entity
+
+        beforeEach(async () => {
+          entity = nextEntityId++ as Entity
+          await putCollider(entity, {
+            mesh: { $case: 'cylinder', cylinder: { radiusTop: -2, radiusBottom: -1 } }
+          })
+        })
+
+        it('should build the top ring at its magnitude', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(2, 5)
+        })
+
+        it('should build the bottom ring at its magnitude', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(1, 5)
+        })
+
+        it('should leave the side surface untwisted, as negating both ends together does', () => {
+          expect(twistedSideTriangleCount(colliderOf(entity)!)).toBe(0)
+        })
       })
 
       describe('and a radius is far beyond any plausible primitive', () => {
@@ -508,6 +607,53 @@ testWithEngine(
         // metres away — every other client disagrees about what that ray hit.
         it('should clamp it to the configured primitive radius ceiling', () => {
           expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(limits.maxPrimitiveRadiusMeters, 5)
+        })
+      })
+
+      // Every hostile-radius case above puts the hostile value in radiusTop and a
+      // benign one in radiusBottom, so the two builder arguments are not equally
+      // covered: measured, `diameterBottom: (radiusBottom ?? 0.5) * 2` — the bottom
+      // radius skipping clampRadius outright — passed the whole file. The scene
+      // controls both fields, so both are guarded and both are read here.
+      describe('and the bottom radius is not a finite number', () => {
+        let entity: Entity
+
+        beforeEach(async () => {
+          entity = nextEntityId++ as Entity
+          await putCollider(entity, {
+            mesh: { $case: 'cylinder', cylinder: { radiusTop: 1, radiusBottom: Number.POSITIVE_INFINITY } }
+          })
+        })
+
+        it('should replace it with the 0.5 default rather than build an unhittable mesh', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(0.5, 5)
+        })
+
+        it('should produce vertex data a raycast can intersect', () => {
+          expect(everyVertexIsFinite(colliderOf(entity)!)).toBe(true)
+        })
+      })
+
+      describe('and the bottom radius is negative and far beyond any plausible primitive', () => {
+        let entity: Entity
+
+        beforeEach(async () => {
+          entity = nextEntityId++ as Entity
+          await putCollider(entity, {
+            mesh: { $case: 'cylinder', cylinder: { radiusTop: 1, radiusBottom: -1e30 } }
+          })
+        })
+
+        // One value exercising both halves of the bottom guard: the magnitude is
+        // taken, then the ceiling applies to it.
+        it('should clamp its magnitude to the configured primitive radius ceiling', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(limits.maxPrimitiveRadiusMeters, 5)
+        })
+
+        // The mirror of "should leave the finite bottom radius untouched": a hostile
+        // value in one field must not rewrite the other.
+        it('should leave the finite top radius untouched', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(1, 5)
         })
       })
 
@@ -544,36 +690,65 @@ testWithEngine(
 
     describe('when a scene puts a MeshCollider carrying no shape at all', () => {
       let entity: Entity
+      let errorSpy: jest.SpyInstance
+      let nowSpy: jest.SpyInstance
+      // Projected onto plain data in the setup, not asserted as the live entry: on
+      // failure `collider` holds a mesh, and pretty-format walks it into the scene
+      // graph (see the note at the top of this file). `collider === null` keeps the
+      // null-versus-undefined distinction the entry depends on.
+      let appliedEntry: { colliderIsNull: boolean; info: PBMeshCollider | undefined }
 
       beforeEach(async () => {
         entity = nextEntityId++ as Entity
+        errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
         await putCollider(entity, { collisionMask: ColliderLayer.CL_POINTER })
+        // Re-applied at an instant the drift logger's throttle has not consumed, so
+        // the silence asserted below is the applier's and not the rate limiter's. The
+        // spy covers the PUT above as well, so a log from either path is caught.
+        nowSpy = pinClockPastTheDriftLogWindow()
+        meshColliderComponent.applyChanges(
+          $.ctx.entities.get(entity)!,
+          $.ctx.components[meshColliderComponent.componentId]
+        )
+        const entry = $.ctx.entities.get(entity)!.appliedComponents.meshCollider
+        appliedEntry = { colliderIsNull: entry?.collider === null, info: entry?.info }
+      })
+
+      afterEach(() => {
+        errorSpy.mockRestore()
+        nowSpy.mockRestore()
       })
 
       // Matches the reference client, which returns early on MeshOneofCase.None.
       // Falling through to a box fabricated an invisible collider no client had.
       it('should not build any collider mesh', () => {
-        expect(colliderOf(entity)).toBeNull()
+        expect(colliderOf(entity) === null).toBe(true)
       })
 
       // The stored `info` is the value itself, not a placeholder: `info: {}` would
       // satisfy a truthiness check while losing the collisionMask the entry exists
       // to remember.
       it('should record the component value verbatim so a later delete has an entry to clear', () => {
-        expect($.ctx.entities.get(entity)!.appliedComponents.meshCollider).toEqual({
-          collider: null,
+        expect(appliedEntry).toEqual({
+          colliderIsNull: true,
           info: { collisionMask: ColliderLayer.CL_POINTER }
         })
+      })
+
+      // The drift log exists for an UNKNOWN $case. An unset oneof is the ordinary
+      // "no collider" case and reaches the same default arm, so a guard that stops
+      // distinguishing them turns every colliderless entity into an operator-facing
+      // protocol-drift error at the scene's PUT rate.
+      it('should not report protocol drift for a shape the scene legitimately left unset', () => {
+        expect(errorSpy).not.toHaveBeenCalled()
       })
     })
 
     describe('when the component carries a mesh shape this build does not implement', () => {
       let entity: Entity
       let errorSpy: jest.SpyInstance
-      // The rate-limited logger keeps MODULE-level state with a 1s window, so every
-      // test here shares one throttle. Each moves the clock further forward than the
-      // last, otherwise only the first test could ever observe a log line.
-      let clockSkewMs = 0
+      let getOrNullSpy: jest.SpyInstance
+      let nowSpy: jest.SpyInstance
 
       beforeEach(async () => {
         entity = nextEntityId++ as Entity
@@ -584,21 +759,29 @@ testWithEngine(
         // the storage the applier reads.
         const storage = $.ctx.components[meshColliderComponent.componentId]
         await putCollider(entity, { mesh: { $case: 'box', box: {} } })
-        jest
+        getOrNullSpy = jest
           .spyOn(storage, 'getOrNull')
           .mockReturnValue({ mesh: { $case: 'hyperboloid' } } as unknown as PBMeshCollider)
-        clockSkewMs += 3_600_000
-        const realNow = Date.now()
-        jest.spyOn(Date, 'now').mockReturnValue(realNow + clockSkewMs)
+        // Each test here needs its own un-consumed throttle window, otherwise only the
+        // first could ever observe a log line.
+        nowSpy = pinClockPastTheDriftLogWindow()
         meshColliderComponent.applyChanges($.ctx.entities.get(entity)!, storage)
       })
 
+      // Restores exactly the three spies this describe installs. NOT
+      // jest.restoreAllMocks(): testWithEngine installs four spies of its own in a
+      // beforeAll (updateStaticEntities, crdtSendToRenderer, getElapsedTime, update),
+      // and restoreAllMocks strips those too — with no beforeAll left to reinstall
+      // them, every test declared after this one would run against a different
+      // SceneContext than the ones before it.
       afterEach(() => {
-        jest.restoreAllMocks()
+        errorSpy.mockRestore()
+        getOrNullSpy.mockRestore()
+        nowSpy.mockRestore()
       })
 
       it('should not build a collider for a shape it cannot represent', () => {
-        expect(colliderOf(entity)).toBeNull()
+        expect(colliderOf(entity) === null).toBe(true)
       })
 
       // Silence is correct for an UNSET oneof, but an unknown case means protocol
@@ -644,8 +827,17 @@ testWithEngine(
         expect(originalCollider.isDisposed()).toBe(true)
       })
 
+      // Disposal is what has to REMOVE it: addFloorMesh registers a one-shot
+      // onDisposeObservable for exactly this, and without that hook the list grows a
+      // dead mesh per deleted collider, which every avatar-grounding raycast then
+      // walks forever. Read as a boolean for the same reason as the membership
+      // assertions above.
+      it('should drop the disposed collider from the floor candidates', () => {
+        expect(floorMeshes.includes(originalCollider)).toBe(false)
+      })
+
       it('should clear the applied component so no stale reference to the disposed mesh remains', () => {
-        expect($.ctx.entities.get(entity)!.appliedComponents.meshCollider).toBeUndefined()
+        expect($.ctx.entities.get(entity)!.appliedComponents.meshCollider === undefined).toBe(true)
       })
     })
 
@@ -722,6 +914,46 @@ testWithEngine(
 
       it('should leave physics collisions disabled on it', () => {
         expect(colliderOf(entity)!.checkCollisions).toBe(false)
+      })
+    })
+
+    // The two describes above only ever apply SYMMETRIC masks — both layers or
+    // neither — which every wiring of the two bits satisfies: measured, swapping the
+    // CL_PHYSICS and CL_POINTER bits in setColliderMask, or setting isPickable for
+    // any non-zero mask, passed the whole file. The single-layer masks are the ones
+    // that pin which bit drives which flag, and they are also the ones a scene uses
+    // to make a trigger volume that pointer rays see but the avatar walks through.
+    describe('when a scene puts a shaped MeshCollider with only the CL_POINTER collision mask', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await putCollider(entity, { mesh: { $case: 'box', box: {} }, collisionMask: ColliderLayer.CL_POINTER })
+      })
+
+      it('should make the collider pickable so pointer rays hit it', () => {
+        expect(colliderOf(entity)!.isPickable).toBe(true)
+      })
+
+      it('should leave physics collisions disabled so the avatar walks through it', () => {
+        expect(colliderOf(entity)!.checkCollisions).toBe(false)
+      })
+    })
+
+    describe('when a scene puts a shaped MeshCollider with only the CL_PHYSICS collision mask', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await putCollider(entity, { mesh: { $case: 'box', box: {} }, collisionMask: ColliderLayer.CL_PHYSICS })
+      })
+
+      it('should enable physics collisions so the avatar cannot walk through it', () => {
+        expect(colliderOf(entity)!.checkCollisions).toBe(true)
+      })
+
+      it('should leave the collider unpickable so pointer rays pass through it', () => {
+        expect(colliderOf(entity)!.isPickable).toBe(false)
       })
     })
   }
