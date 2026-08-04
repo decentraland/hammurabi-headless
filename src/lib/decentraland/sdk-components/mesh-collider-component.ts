@@ -1,9 +1,14 @@
 import { declareComponentUsingProtobufJs } from "./pb-based-component-helper";
 import { ColliderLayer, PBMeshCollider } from "@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen";
 import { ComponentType } from "../crdt-internal/components";
-import { Mesh, MeshBuilder, Scene } from '@babylonjs/core';
+import { Mesh, Scene } from '@babylonjs/core';
 import { setColliderMask } from "../../babylon/scene/logic/colliders";
-import { createCylinderMesh, PRIMITIVE_UNIT_SIZE } from "../../babylon/scene/logic/primitive-meshes";
+import {
+  createBoxMesh,
+  createCylinderMesh,
+  createPlaneMesh,
+  createSphereMesh
+} from "../../babylon/scene/logic/primitive-meshes";
 import { memoize } from "../../misc/memoize";
 import { createRateLimitedErrorLogger } from "../../misc/logger";
 import type { BabylonEntity } from "../../babylon/scene/BabylonEntity";
@@ -12,24 +17,24 @@ import type { BabylonEntity } from "../../babylon/scene/BabylonEntity";
 // shares one geometry instead of building fresh vertex buffers per PUT (same
 // pattern as mesh-renderer-component's baseBox).
 //
+// The geometry itself comes from primitive-meshes, which the renderer also builds
+// from: sharing PRIMITIVE_UNIT_SIZE alone left `segments` and `sideOrientation`
+// free to drift between a collider and the mesh it stands in for.
+//
 // Every name ends in `_collider`: setColliderMask keys off that suffix to attach
 // the collider material and register the mesh as a floor candidate.
+//
+// Templates are built DISABLED and clones inherit that (Babylon's `isEnabled()`
+// walks to the parent-most flag and `clone()` copies the node's own), so every
+// call site below must re-enable its clone — see createColliderMesh's caller.
 const baseColliderBox = memoize((scene: Scene) => {
-  // Sizes stated rather than inherited from Babylon's defaults: the unit size is a
-  // protocol fact (the shape "contains the Entity" and is scaled by its Transform),
-  // and a Babylon default silently changing would move every collider.
-  const ret = MeshBuilder.CreateBox('base-box_collider', { size: PRIMITIVE_UNIT_SIZE, updatable: false }, scene)
+  const ret = createBoxMesh(scene, 'base-box_collider')
   ret.setEnabled(false)
   return ret
 })
 
 const baseColliderSphere = memoize((scene: Scene) => {
-  // Diameter 1 — the reference client's SPHERE_RADIUS 0.5.
-  const ret = MeshBuilder.CreateSphere(
-    'base-sphere_collider',
-    { diameter: PRIMITIVE_UNIT_SIZE, updatable: false },
-    scene
-  )
+  const ret = createSphereMesh(scene, 'base-sphere_collider')
   ret.setEnabled(false)
   return ret
 })
@@ -38,26 +43,20 @@ const baseColliderPlane = memoize((scene: Scene) => {
   // A real quad, matching the protocol's "2D rectangle described by the Entity's
   // Transform" and the geometry mesh-renderer-component builds for a PlaneMesh.
   //
-  // SINGLE-sided on purpose, and it is still hit from behind: Babylon's
-  // ray/triangle test does not backface-cull, and the collision engine culls back
-  // faces only for meshes with no material (`Collisions/collider.js`:
-  // `if (!hasMaterial && !trianglePlane.isFrontFacingTo(...)) return`) while
-  // setColliderMask assigns colliderMaterial to every `_collider` mesh. Nothing
-  // renders a collider, so Mesh.DOUBLESIDE would only double the vertex count
-  // (8 vertices / 4 triangles instead of 4 / 2) for no behavioural gain.
-  //
-  // (The reference client approximates this with a 0.01-deep box because Unity's
-  // BoxCollider cannot be flat; Babylon picks and collides against a genuine
-  // plane, so no thickness fudge is needed.)
-  const ret = MeshBuilder.CreatePlane(
-    'base-plane_collider',
-    {
-      width: PRIMITIVE_UNIT_SIZE,
-      height: PRIMITIVE_UNIT_SIZE,
-      updatable: false
-    },
-    scene
-  )
+  // SINGLE-sided on purpose, and it is still hit from behind on BOTH paths:
+  //  - raycasts: Babylon's ray/triangle test does not backface-cull at all.
+  //  - avatar collisions: `Collisions/collider.js` skips a triangle facing away
+  //    only when `hasMaterial` is false, and `hasMaterial` is
+  //    `!!subMesh.getMaterial()` (`abstractMesh._collideForSubMesh`).
+  //    `subMesh.getMaterial()` falls back to `scene.defaultMaterial` when the mesh
+  //    carries none, so it is ALWAYS truthy and that skip is unreachable —
+  //    measured, a mesh with `material === null` is not culled either. (An earlier
+  //    version of this comment credited setColliderMask's collider material for
+  //    that; it is real but irrelevant, and relying on it would tie a geometry
+  //    decision to a material assignment that has nothing to do with it.)
+  // Nothing renders a collider, so Mesh.DOUBLESIDE would only double the vertex
+  // count (8 vertices / 4 triangles instead of 4 / 2) for no behavioural gain.
+  const ret = createPlaneMesh(scene, 'base-plane_collider', { doubleSided: false, updatable: false })
   ret.setEnabled(false)
   return ret
 })
@@ -137,6 +136,13 @@ export const meshColliderComponent = declareComponentUsingProtobufJs(PBMeshColli
     const collider = createColliderMesh(entity, newValue!)
 
     if (collider) {
+      // Load-bearing for the box/sphere/plane clones: their templates are built
+      // disabled and `clone()` inherits that, so without this every one of them
+      // ships disabled and `collisionCoordinator.js` (`if (mesh.isEnabled() &&
+      // mesh.checkCollisions && ...)`) skips it — the avatar walks straight
+      // through, and the whole CL_PHYSICS half of the component is silently dead.
+      // `Ray.intersectsMesh` does NOT check isEnabled, so pointer picks keep
+      // working and hide the breakage.
       collider.setEnabled(true)
 
       const DEFAULT_COLLIDER_LAYERS = ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER

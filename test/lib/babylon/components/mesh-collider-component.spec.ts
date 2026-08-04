@@ -2,6 +2,7 @@ import { AbstractMesh, Ray, Vector3, VertexBuffer } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { ColliderLayer, PBMeshCollider } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { meshColliderComponent } from '../../../../src/lib/decentraland/sdk-components/mesh-collider-component'
+import { floorMeshes } from '../../../../src/lib/babylon/scene/logic/colliders'
 import { Entity } from '../../../../src/lib/decentraland/types'
 import { limits } from '../../../../src/lib/misc/limits'
 import { CrdtBuilder, testWithEngine } from '../babylon-test-helper'
@@ -14,10 +15,21 @@ import { CrdtBuilder, testWithEngine } from '../babylon-test-helper'
 // Assertions are deliberately GEOMETRIC rather than name-based: `name` is just the
 // literal passed to clone(), so `sphere -> baseColliderBox(scene).clone('sphere_collider')`
 // satisfies every name assertion while shipping a cube. Vertex data does not lie.
+// For the same reason the `_collider` suffix is checked through its CONSEQUENCE —
+// membership in floorMeshes, which setColliderMask only grants to a name ending in
+// `_collider` — rather than by comparing the string that was passed to clone().
+// That membership is asserted as `floorMeshes.includes(mesh)`, NOT
+// `expect(floorMeshes).toContain(mesh)`: on failure the latter pretty-prints the
+// whole array, and every element is a Babylon mesh whose object graph reaches the
+// entire scene — measured, that OOMs the jest worker at 4GB instead of printing a
+// diff, so the one run that matters is the one you cannot read.
 
 // Babylon's unit box: 4 vertices per face x 6 faces, the count a cloned box
 // template would carry into any other shape.
 const BOX_TEMPLATE_VERTEX_COUNT = 24
+
+/** Half the diagonal of a unit cube: where every one of its 24 vertices sits. */
+const UNIT_CUBE_VERTEX_DISTANCE = Math.sqrt(0.75)
 
 /**
  * Largest distance from the Y axis among the vertices of one end cap of a
@@ -63,6 +75,25 @@ function ringSegmentCount(mesh: AbstractMesh): number {
   return Math.round((2 * Math.PI) / step)
 }
 
+/**
+ * Sides of the polygon a sphere's equator is drawn as. Babylon's `segments` option
+ * counts LATITUDE steps, not longitude ones — the equator carries
+ * `2 * (segments + 2)` sides — and it is the equator polygon, not `segments`, whose
+ * chord error a grazing ray actually sees. Read from vertex data for the same reason
+ * as ringSegmentCount: the option is not observable, the geometry is.
+ */
+function equatorSegmentCount(mesh: AbstractMesh): number {
+  const positions = mesh.getVerticesData(VertexBuffer.PositionKind)!
+  const angles = new Set<number>()
+  for (let i = 0; i < positions.length; i += 3) {
+    if (Math.abs(positions[i + 1]) < 1e-6) {
+      // Rounded so the seam's duplicated vertex collapses onto its twin.
+      angles.add(Math.round((((Math.atan2(positions[i + 2], positions[i]) + 2 * Math.PI) % (2 * Math.PI)) * 1e6)))
+    }
+  }
+  return angles.size
+}
+
 /** Distance from the mesh origin of the vertex nearest to / farthest from it. */
 function vertexDistanceRange(mesh: AbstractMesh): [number, number] {
   const positions = mesh.getVerticesData(VertexBuffer.PositionKind)!
@@ -87,6 +118,16 @@ function isHitFromZ(mesh: AbstractMesh, distance: number): boolean {
   const origin = new Vector3(centre.x, centre.y, centre.z + distance)
   const direction = new Vector3(0, 0, -Math.sign(distance))
   return new Ray(origin, direction, Math.abs(distance) * 2).intersectsMesh(mesh).hit
+}
+
+/**
+ * Fires a downward ray through (x, 0) from well above the mesh. Reads the surface a
+ * raycast can actually reach, which is the property a radius clamp exists to keep —
+ * a mesh can have the right bounding box and still be unhittable.
+ */
+function isHitFromAbove(mesh: AbstractMesh, x: number): boolean {
+  mesh.computeWorldMatrix(true)
+  return new Ray(new Vector3(x, 5, 0), new Vector3(0, -1, 0), 10).intersectsMesh(mesh).hit
 }
 
 testWithEngine(
@@ -136,12 +177,35 @@ testWithEngine(
         await putCollider(entity, { mesh: { $case: 'box', box: {} } })
       })
 
-      it('should build a collider named box_collider so setColliderMask treats it as a collider', () => {
-        expect(colliderOf(entity)!.name).toBe('box_collider')
+      it('should register the collider as a floor candidate, which only a _collider name earns', () => {
+        expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
       })
 
       it('should build a unit cube spanning half a metre from the entity origin on every axis', () => {
         expect(colliderOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0.5])
+      })
+
+      // extendSize cannot tell a cube from a sphere — a diameter-1 sphere is
+      // [0.5,0.5,0.5] too. A cube puts every vertex on a corner, all at the same
+      // sqrt(0.75) from the centre, so this discriminates the two exactly.
+      it('should place every vertex on a cube corner rather than on a sphere surface', () => {
+        const [nearest, farthest] = vertexDistanceRange(colliderOf(entity)!)
+        expect([nearest, farthest]).toEqual([
+          expect.closeTo(UNIT_CUBE_VERTEX_DISTANCE, 5),
+          expect.closeTo(UNIT_CUBE_VERTEX_DISTANCE, 5)
+        ])
+      })
+
+      it('should carry the 24 vertices of a box template rather than a tessellated surface', () => {
+        expect(colliderOf(entity)!.getTotalVertices()).toBe(BOX_TEMPLATE_VERTEX_COUNT)
+      })
+
+      // The template is built disabled and clone() inherits that, so the applier has
+      // to re-enable. collisionCoordinator gates on mesh.isEnabled(), while
+      // Ray.intersectsMesh does not — forgetting this leaves every box collider
+      // pickable but walk-through, silently killing the whole CL_PHYSICS half.
+      it('should enable the clone so the avatar collides with it instead of walking through', () => {
+        expect(colliderOf(entity)!.isEnabled()).toBe(true)
       })
 
       // Colliders live under the entity, which lives under the scene rootNode.
@@ -160,8 +224,8 @@ testWithEngine(
         await putCollider(entity, { mesh: { $case: 'sphere', sphere: {} } })
       })
 
-      it('should build a collider named sphere_collider so setColliderMask treats it as a collider', () => {
-        expect(colliderOf(entity)!.name).toBe('sphere_collider')
+      it('should register the collider as a floor candidate, which only a _collider name earns', () => {
+        expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
       })
 
       it('should build a diameter-1 sphere that fits the unit box, matching the reference SPHERE_RADIUS 0.5', () => {
@@ -180,6 +244,23 @@ testWithEngine(
         const [nearest, farthest] = vertexDistanceRange(colliderOf(entity)!)
         expect([nearest, farthest]).toEqual([expect.closeTo(0.5, 5), expect.closeTo(0.5, 5)])
       })
+
+      // Segments are pinned (16, i.e. a 36-gon equator) rather than left to Babylon's
+      // implicit 32 because the sphere is the most expensive primitive collider and
+      // the reference client's is analytic, so no count "matches" it: 36 sides cost
+      // 1296 triangles against 4624 for a 0.38%-of-radius chord error against 0.11%.
+      // Left implicit, a Babylon default change would move every sphere collider.
+      it('should draw its equator as the pinned 36-gon rather than Babylon default segments', () => {
+        expect(equatorSegmentCount(colliderOf(entity)!)).toBe(36)
+      })
+
+      it('should enable the clone so the avatar collides with it instead of walking through', () => {
+        expect(colliderOf(entity)!.isEnabled()).toBe(true)
+      })
+
+      it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {
+        expect(colliderOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+      })
     })
 
     describe('when a scene puts a MeshCollider with a plane shape', () => {
@@ -194,8 +275,8 @@ testWithEngine(
         hitFromBehind = isHitFromZ(colliderOf(entity)!, 5)
       })
 
-      it('should build a collider named plane_collider so setColliderMask treats it as a collider', () => {
-        expect(colliderOf(entity)!.name).toBe('plane_collider')
+      it('should register the collider as a floor candidate, which only a _collider name earns', () => {
+        expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
       })
 
       it('should build a 1x1 quad with no depth instead of a cube', () => {
@@ -206,16 +287,25 @@ testWithEngine(
         expect(hitFromFront).toBe(true)
       })
 
-      // Babylon's ray/triangle test does not backface-cull, and the collision engine
-      // culls back faces only for meshes without a material — setColliderMask gives
-      // every `_collider` mesh the collider material. So a single-sided quad already
-      // collides from both sides and Mesh.DOUBLESIDE would only double the geometry.
+      // Babylon's ray/triangle test does not backface-cull at all, and the collision
+      // engine's back-face skip needs `!subMesh.getMaterial()`, which never holds
+      // (getMaterial falls back to scene.defaultMaterial). So a single-sided quad
+      // already answers from both sides and Mesh.DOUBLESIDE would only double the
+      // geometry.
       it('should be hit by a ray arriving from behind even though the quad is single sided', () => {
         expect(hitFromBehind).toBe(true)
       })
 
       it('should keep the cheaper single-sided geometry of 4 vertices', () => {
         expect(colliderOf(entity)!.getTotalVertices()).toBe(4)
+      })
+
+      it('should enable the clone so the avatar collides with it instead of walking through', () => {
+        expect(colliderOf(entity)!.isEnabled()).toBe(true)
+      })
+
+      it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {
+        expect(colliderOf(entity)!.parent).toBe($.ctx.entities.get(entity))
       })
     })
 
@@ -228,8 +318,8 @@ testWithEngine(
           await putCollider(entity, { mesh: { $case: 'cylinder', cylinder: {} } })
         })
 
-        it('should build a collider named cylinder_collider so setColliderMask treats it as a collider', () => {
-          expect(colliderOf(entity)!.name).toBe('cylinder_collider')
+        it('should register the collider as a floor candidate, which only a _collider name earns', () => {
+          expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
         })
 
         // A missing radius means 0.5 per the protocol, not 0: `?? 0` collapses the
@@ -348,6 +438,13 @@ testWithEngine(
         })
       })
 
+      // A negative radius used to be clamped to 0, which reintroduced the very
+      // failure the clamp exists to stop: Babylon widens a zero cap to a 5e-6 ring,
+      // so the scene got a five-micron surface holding isPickable, checkCollisions
+      // and a floorMeshes slot that no raycast could find. The reference client does
+      // not clamp; it builds a full radius-3 cone for -3, and taking the absolute
+      // value reproduces that exactly (negating a radius rotates the ring 180
+      // degrees and the 50-gon is even, so it maps onto itself).
       describe('and a radius is negative', () => {
         let entity: Entity
 
@@ -358,14 +455,42 @@ testWithEngine(
           })
         })
 
-        // Clamped to 0 (a cone tip) so the winding stays consistent; Babylon widens a
-        // zero cap to a 1e-5 diameter of its own, hence the tolerance.
-        it('should collapse it to a cone tip instead of inverting the winding', () => {
-          expect(endCapRadius(colliderOf(entity)!, 'top')).toBeLessThan(0.001)
+        it('should build the ring at its absolute value, as the reference client does', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(3, 5)
         })
 
         it('should leave the valid bottom radius untouched', () => {
           expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(1, 5)
+        })
+
+        // The consequence, not the coordinate: clamped to 0 this ray missed by six
+        // orders of magnitude while every downstream check still passed.
+        it('should be hit by a raycast out at the radius the scene asked for', () => {
+          expect(isHitFromAbove(colliderOf(entity)!, 2.5)).toBe(true)
+        })
+      })
+
+      // The one place taking the absolute value deliberately does NOT reproduce the
+      // reference client: fed one negative and one positive radius it builds a
+      // self-intersecting hourglass (half its side triangles twist across the axis).
+      // A collider is not worth reproducing that faithfully, so both ends are read as
+      // their magnitudes and the result is an ordinary frustum.
+      describe('and the two radii have opposite signs', () => {
+        let entity: Entity
+
+        beforeEach(async () => {
+          entity = nextEntityId++ as Entity
+          await putCollider(entity, {
+            mesh: { $case: 'cylinder', cylinder: { radiusTop: -1, radiusBottom: 0.5 } }
+          })
+        })
+
+        it('should build the negative end at its magnitude', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'top')).toBeCloseTo(1, 5)
+        })
+
+        it('should build the positive end unchanged, giving a plain frustum', () => {
+          expect(endCapRadius(colliderOf(entity)!, 'bottom')).toBeCloseTo(0.5, 5)
         })
       })
 
@@ -431,8 +556,14 @@ testWithEngine(
         expect(colliderOf(entity)).toBeNull()
       })
 
-      it('should still record the component so a later delete has an entry to clear', () => {
-        expect($.ctx.entities.get(entity)!.appliedComponents.meshCollider).toBeTruthy()
+      // The stored `info` is the value itself, not a placeholder: `info: {}` would
+      // satisfy a truthiness check while losing the collisionMask the entry exists
+      // to remember.
+      it('should record the component value verbatim so a later delete has an entry to clear', () => {
+        expect($.ctx.entities.get(entity)!.appliedComponents.meshCollider).toEqual({
+          collider: null,
+          info: { collisionMask: ColliderLayer.CL_POINTER }
+        })
       })
     })
 
@@ -474,6 +605,25 @@ testWithEngine(
       // drift: the entity is colliderless while the scene believes otherwise.
       it('should report the unsupported shape so the drift is visible to an operator', () => {
         expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('hyperboloid'), undefined)
+      })
+
+      describe('and the same drift is applied again inside the logger rate-limit window', () => {
+        beforeEach(() => {
+          // Date.now is still pinned by the outer beforeEach, so this second apply
+          // lands at the same instant as the first — inside the 1s window.
+          meshColliderComponent.applyChanges(
+            $.ctx.entities.get(entity)!,
+            $.ctx.components[meshColliderComponent.componentId]
+          )
+        })
+
+        // The drift log is rate limited because it fires once per ACCEPTED PUT: a
+        // scene re-PUTting an unknown shape every frame would otherwise flood
+        // stdout at the render rate. Every other test in this describe exists to
+        // work around that throttle, so it needs one test that asserts it.
+        it('should log the drift only once so a per-frame PUT cannot flood stdout', () => {
+          expect(errorSpy).toHaveBeenCalledTimes(1)
+        })
       })
     })
 

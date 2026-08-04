@@ -2,6 +2,7 @@ import { AbstractMesh, VertexBuffer } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { PBMeshCollider } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { PBMeshRenderer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_renderer.gen'
+import { baseMaterial } from '../../../../src/lib/babylon/scene/BabylonEntity'
 import { meshColliderComponent } from '../../../../src/lib/decentraland/sdk-components/mesh-collider-component'
 import { meshRendererComponent } from '../../../../src/lib/decentraland/sdk-components/mesh-renderer-component'
 import { Entity } from '../../../../src/lib/decentraland/types'
@@ -14,6 +15,11 @@ import { CrdtBuilder, testWithEngine } from '../babylon-test-helper'
 // crucially, that it is the SAME geometry the collider gets for the same value — a
 // collider that disagrees with the mesh it stands in for reports hits at coordinates
 // no client agrees with.
+//
+// The box/sphere/plane branches are covered too even though they predate this change:
+// every one of them clones or builds through the same primitive-meshes functions the
+// collider uses now, so an untested renderer branch is a place the two can drift apart
+// unnoticed.
 
 /**
  * Largest distance from the Y axis among the vertices of one end cap. Bounding
@@ -31,6 +37,22 @@ function endCapRadius(mesh: AbstractMesh, end: 'top' | 'bottom'): number {
   }
   return radius
 }
+
+/** Distance from the mesh origin of the vertex nearest to / farthest from it. */
+function vertexDistanceRange(mesh: AbstractMesh): [number, number] {
+  const positions = mesh.getVerticesData(VertexBuffer.PositionKind)!
+  let min = Number.POSITIVE_INFINITY
+  let max = 0
+  for (let i = 0; i < positions.length; i += 3) {
+    const distance = Math.hypot(positions[i], positions[i + 1], positions[i + 2])
+    min = Math.min(min, distance)
+    max = Math.max(max, distance)
+  }
+  return [min, max]
+}
+
+/** Half the diagonal of a unit cube: where every one of its 24 vertices sits. */
+const UNIT_CUBE_VERTEX_DISTANCE = Math.sqrt(0.75)
 
 testWithEngine(
   'mesh renderer component',
@@ -53,6 +75,12 @@ testWithEngine(
     async function putRenderer(entity: Entity, value: PBMeshRenderer): Promise<void> {
       await $.ctx.crdtSendToRenderer({
         data: new CrdtBuilder().put(meshRendererComponent, entity, ++timestamp, value).finish()
+      })
+    }
+
+    async function deleteRenderer(entity: Entity): Promise<void> {
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder().delete(meshRendererComponent, entity, ++timestamp).finish()
       })
     }
 
@@ -102,12 +130,20 @@ testWithEngine(
           expect(meshOf(entity)!.getBoundingInfo().boundingBox.extendSize.y).toBeCloseTo(0.5, 5)
         })
 
+        // Weak on its own — MeshBuilder hands back an enabled mesh, so the branch's
+        // own setEnabled(true) is redundant here. It is the CLONED branches (box,
+        // sphere, plane) whose templates are disabled, and their copies of this
+        // assertion are the ones that can actually fail.
         it('should enable the mesh so it is part of the rendered scene', () => {
           expect(meshOf(entity)!.isEnabled()).toBe(true)
         })
 
-        it('should give it a material, as every other renderer shape gets', () => {
-          expect(meshOf(entity)!.material).toBeTruthy()
+        // Asserted by identity, not truthiness: the cylinder branch does not assign
+        // a material of its own (unlike the cloned templates, which inherit one), so
+        // this is entirely setMeshRendererMaterial's doing and a truthiness check
+        // could not tell the two sources apart.
+        it('should be given the shared base material by setMeshRendererMaterial', () => {
+          expect(meshOf(entity)!.material).toBe(baseMaterial($.scene))
         })
       })
 
@@ -199,6 +235,170 @@ testWithEngine(
         it('should build the unit cube in its place', () => {
           expect(meshOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0.5])
         })
+      })
+    })
+
+    describe('when a scene puts a MeshRenderer with a box shape', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        // uvs is a non-optional repeated field on a BoxMesh: the encoder iterates it,
+        // so an absent list throws before the CRDT is even built.
+        await putRenderer(entity, { mesh: { $case: 'box', box: { uvs: [] } } })
+      })
+
+      it('should build a unit cube spanning half a metre from the entity origin on every axis', () => {
+        expect(meshOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0.5])
+      })
+
+      // extendSize cannot tell a cube from a diameter-1 sphere; vertex positions can.
+      it('should place every vertex on a cube corner rather than on a sphere surface', () => {
+        const [nearest, farthest] = vertexDistanceRange(meshOf(entity)!)
+        expect([nearest, farthest]).toEqual([
+          expect.closeTo(UNIT_CUBE_VERTEX_DISTANCE, 5),
+          expect.closeTo(UNIT_CUBE_VERTEX_DISTANCE, 5)
+        ])
+      })
+
+      // The template is built disabled and clone() inherits that, so the branch has
+      // to re-enable: without it the entity carries geometry nothing ever draws or
+      // traverses, and no other assertion here notices.
+      it('should enable the clone so it is part of the rendered scene', () => {
+        expect(meshOf(entity)!.isEnabled()).toBe(true)
+      })
+
+      // Unparented, the mesh is outside the scene rootNode subtree that culling,
+      // picking and raycasts walk — present in the scene and reachable by nothing.
+      it('should attach the mesh to the entity', () => {
+        expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+      })
+    })
+
+    describe('when a scene puts a MeshRenderer with a sphere shape', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await putRenderer(entity, { mesh: { $case: 'sphere', sphere: {} } })
+      })
+
+      // Left to Babylon's default the diameter is 1 anyway, so a dropped `diameter`
+      // is invisible here — but the constant is what keeps renderer and collider in
+      // step, and this pins the size the protocol specifies rather than the default.
+      it('should build a diameter-1 sphere that fits the unit box the Transform scales', () => {
+        expect(meshOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0.5])
+      })
+
+      it('should place every vertex on the sphere surface rather than at cube corners', () => {
+        const [nearest, farthest] = vertexDistanceRange(meshOf(entity)!)
+        expect([nearest, farthest]).toEqual([expect.closeTo(0.5, 5), expect.closeTo(0.5, 5)])
+      })
+
+      it('should enable the clone so it is part of the rendered scene', () => {
+        expect(meshOf(entity)!.isEnabled()).toBe(true)
+      })
+
+      it('should attach the mesh to the entity', () => {
+        expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+      })
+
+      describe('and the same entity also carries a MeshCollider with a sphere', () => {
+        beforeEach(async () => {
+          await putCollider(entity, { mesh: { $case: 'sphere', sphere: {} } })
+        })
+
+        // Both come from createSphereMesh, so the pinned segment count cannot drift
+        // between what is drawn and what raycasts resolve against. Nothing but this
+        // stops one of the two picking up Babylon's implicit default again.
+        it('should build vertex data identical to the collider it stands in for', () => {
+          expect(Array.from(meshOf(entity)!.getVerticesData(VertexBuffer.PositionKind)!)).toEqual(
+            Array.from(colliderOf(entity)!.getVerticesData(VertexBuffer.PositionKind)!)
+          )
+        })
+      })
+    })
+
+    describe('when a scene puts a MeshRenderer with a plane shape', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        // uvs is a non-optional repeated field on a PlaneMesh, like BoxMesh's.
+        await putRenderer(entity, { mesh: { $case: 'plane', plane: { uvs: [] } } })
+      })
+
+      it('should build a 1x1 quad with no depth instead of a cube', () => {
+        expect(meshOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0])
+      })
+
+      // DOUBLESIDE, unlike the collider's quad: this one is DRAWN and a PlaneMesh is
+      // visible from both sides. It shows up as doubled geometry — 8 vertices / 4
+      // triangles against 4 / 2 — which is the only observable difference and so the
+      // only way a dropped sideOrientation can be caught.
+      it('should double the geometry so the plane is visible from behind as well', () => {
+        expect(meshOf(entity)!.getTotalVertices()).toBe(8)
+      })
+
+      // Pins what a deleted `else` branch used to write by hand. Babylon already
+      // generates exactly these 16 values for a DOUBLESIDE plane, so the branch was a
+      // no-op copy of a Babylon internal; this asserts the internal still produces
+      // the layout the protocol describes ("2D * 1 face * 2 sides * 4 vertices")
+      // instead of keeping a second copy of it in the source.
+      it('should carry the default 16-value UV map a double-sided quad needs', () => {
+        expect(Array.from(meshOf(entity)!.getVerticesData(VertexBuffer.UVKind)!)).toEqual([
+          0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1
+        ])
+      })
+
+      it('should enable the mesh so it is part of the rendered scene', () => {
+        expect(meshOf(entity)!.isEnabled()).toBe(true)
+      })
+
+      it('should attach the mesh to the entity', () => {
+        expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+      })
+
+      describe('and the scene supplies its own UV map', () => {
+        let uvs: number[]
+
+        beforeEach(async () => {
+          uvs = [0, 0, 0.5, 0, 0.5, 0.5, 0, 0.5, 0, 0, 0.5, 0, 0.5, 0.5, 0, 0.5]
+          entity = nextEntityId++ as Entity
+          await putRenderer(entity, { mesh: { $case: 'plane', plane: { uvs } } })
+        })
+
+        // The whole reason the plane is built `updatable` rather than cloned from a
+        // template: the UVs are per entity.
+        it('should write the scene UV map over the generated one', () => {
+          expect(Array.from(meshOf(entity)!.getVerticesData(VertexBuffer.UVKind)!)).toEqual(uvs)
+        })
+      })
+    })
+
+    describe('when a scene deletes the MeshRenderer component', () => {
+      let entity: Entity
+      let originalMesh: AbstractMesh
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await putRenderer(entity, { mesh: { $case: 'box', box: { uvs: [] } } })
+        originalMesh = meshOf(entity)!
+        await deleteRenderer(entity)
+      })
+
+      // A mesh surviving its component keeps rendering and stays in the entity's
+      // child list forever.
+      it('should dispose the mesh it was rendering', () => {
+        expect(originalMesh.isDisposed()).toBe(true)
+      })
+
+      // Nothing below the clear reassigns the entry on a DELETE, so leaving it in
+      // place hands the DISPOSED mesh to setMeshRendererMaterial on the next
+      // Material PUT — and blocks the next MeshRenderer PUT's own clear from
+      // finding a live mesh to dispose.
+      it('should clear the applied component so no stale reference to the disposed mesh remains', () => {
+        expect($.ctx.entities.get(entity)!.appliedComponents.meshRenderer).toBeUndefined()
       })
     })
   }
