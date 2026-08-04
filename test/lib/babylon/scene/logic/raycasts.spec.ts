@@ -400,15 +400,48 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     // budget, two do not — so the ceiling binds BETWEEN raycasts (the deferral
     // path, not the over-budget path below). 400 meshes is under 1% of the 50k
     // mesh budget, so only the triangle ceiling can be what stops this.
+    //
+    // RQT_QUERY_ALL, deliberately. Under RQT_HIT_FIRST the nearest-first early-out
+    // tests one sphere and refunds the other 399, so the budget is barely touched
+    // and all three raycasts fit — correct behaviour, but it measures the refund
+    // rather than the ceiling. QUERY_ALL genuinely needs every candidate, so the
+    // full cost is charged and the ceiling is what stops the frame.
     const spheres = new Array(400).fill(sphere)
     const pending = new Set<number>([1, 2, 3])
     const processed: number[] = []
+    const fake = makeFakeScene(pending, spheres, undefined, (id) => processed.push(id))
+    fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
 
-    processRaycasts(makeFakeScene(pending, spheres, undefined, (id) => processed.push(id)))
+    processRaycasts(fake)
 
     expect(processed).toEqual([1])
     // The rest stay pending rather than being dropped, same as the mesh-budget path.
     expect(Array.from(pending).sort()).toEqual([2, 3])
+  })
+
+  // The other half of the same knob: what the early-out refund buys. Same 400
+  // spheres, same budget, but RQT_HIT_FIRST — the nearest hit settles on the first
+  // sphere tested and every remaining candidate starts further away than that hit,
+  // so none of them can beat it and none is tested.
+  describe('when RQT_HIT_FIRST raycasts share a frame with the triangle ceiling', () => {
+    let processed: number[]
+    let pending: Set<number>
+
+    beforeEach(() => {
+      processed = []
+      pending = new Set<number>([1, 2, 3])
+      processRaycasts(makeFakeScene(pending, new Array(400).fill(sphere), undefined, (id) => processed.push(id)))
+    })
+
+    // Charged conservatively up front (518_400 each, so only one would fit) and
+    // refunded after, which is what lets the second and third run at all.
+    it('should fit all three in one frame rather than billing them for untested candidates', () => {
+      expect(processed).toEqual([1, 2, 3])
+    })
+
+    it('should leave nothing pending, since every one-shot actually ran', () => {
+      expect(Array.from(pending)).toEqual([])
+    })
   })
 
   // A raycast whose own candidate set outruns a whole frame's budget can never fit
