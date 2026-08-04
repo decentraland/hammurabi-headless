@@ -13,9 +13,9 @@ import { REMOTE_PLAYER_ENTITY_CAPACITY } from '../decentraland/communications/pl
  * out-of-range or non-numeric override is ignored (default kept) and logged once.
  *
  * Units are named in the env var: `_MS` = milliseconds, `_BYTES` = bytes,
- * `_MB` = megabytes, otherwise a plain count. Spec-compliance validators (WebSocket
- * close codes, redirect method rewrites) are deliberately NOT configurable — only
- * resource/DoS caps and timeouts are.
+ * `_MB` = megabytes, `_METERS` = metres of scene space, otherwise a plain count.
+ * Spec-compliance validators (WebSocket close codes, redirect method rewrites) are
+ * deliberately NOT configurable — only resource/DoS caps and timeouts are.
  */
 export interface Limits {
   // --- Isolate sandbox (per-scene V8 isolate) ---
@@ -72,6 +72,9 @@ export interface Limits {
   maxWsMessageBytes: number
   maxWsBufferedBytes: number
   wsHandshakeTimeoutMs: number
+
+  // --- Scene primitives (MeshRenderer / MeshCollider geometry) ---
+  maxPrimitiveRadiusMeters: number
 
   // --- Render loop / scheduling / shutdown ---
   minFrameTimeMs: number
@@ -197,6 +200,15 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxWsMessageBytes', env: 'HAMMURABI_MAX_WS_MESSAGE_BYTES', def: 1 * MB, min: 1 },
   { key: 'maxWsBufferedBytes', env: 'HAMMURABI_MAX_WS_BUFFERED_BYTES', def: 8 * MB, min: 1 },
   { key: 'wsHandshakeTimeoutMs', env: 'HAMMURABI_WS_HANDSHAKE_TIMEOUT_MS', def: 15_000, min: 100 },
+
+  // Scene primitives. A CylinderMesh's radiusTop/radiusBottom are untrusted protobuf
+  // floats that reach MeshBuilder directly, and the protocol states no maximum — so this
+  // is a sanity ceiling, not a protocol rule. 4096m is orders of magnitude past any
+  // legitimate primitive (they are unit-sized and scaled by the entity Transform, and a
+  // parcel is 16m), while still keeping vertex coordinates far inside float range; without
+  // it a scene builds a collider hittable from a million metres away, which no other
+  // client agrees with.
+  { key: 'maxPrimitiveRadiusMeters', env: 'HAMMURABI_MAX_PRIMITIVE_RADIUS_METERS', def: 4_096, min: 1 },
 
   // Render loop / scheduling / shutdown
   { key: 'minFrameTimeMs', env: 'HAMMURABI_MIN_FRAME_TIME_MS', def: 24, min: 1 },

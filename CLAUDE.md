@@ -43,7 +43,7 @@ comms peer, or a content-server response is centralized in
 **`src/lib/misc/limits.ts`** and overridable via `HAMMURABI_*` environment variables.
 That module's `KNOBS` table is the single source of truth: it lists every knob's env
 var name, default (equal to the former hard-coded value), unit (named in the suffix:
-`_MS`/`_BYTES`/`_MB`, else a count), and hard minimum. `readLimits(env)` parses and
+`_MS`/`_BYTES`/`_MB`/`_METERS`, else a count), and hard minimum. `readLimits(env)` parses and
 validates each — a non-integer / below-minimum / non-numeric override is ignored
 (default kept) and logged once at startup — and exports a `limits` singleton read once
 from `process.env` at first import. Consumers import `limits` instead of declaring a

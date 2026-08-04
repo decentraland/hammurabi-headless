@@ -4,13 +4,18 @@ import { PBMeshRenderer } from "@dcl/protocol/out-js/decentraland/sdk/components
 import { ComponentType } from "../crdt-internal/components";
 import { memoize } from "../../misc/memoize";
 import { baseMaterial } from '../../babylon/scene/BabylonEntity';
-import { createCylinderMesh } from '../../babylon/scene/logic/primitive-meshes';
+import { createCylinderMesh, PRIMITIVE_UNIT_SIZE } from '../../babylon/scene/logic/primitive-meshes';
 import { setMeshRendererMaterial } from './material-component';
 
+// Unit sizes stated rather than inherited from Babylon's defaults: they are a
+// protocol fact (the shape "contains the Entity" and is scaled by its Transform)
+// shared with the collider templates, and a renderer that drifts from the collider
+// reports hits at coordinates the picture disagrees with.
 const baseBox = memoize((scene: BABYLON.Scene) => {
   const ret = BABYLON.MeshBuilder.CreateBox(
     'base-box',
     {
+      size: PRIMITIVE_UNIT_SIZE,
       updatable: false
     },
     scene
@@ -24,6 +29,7 @@ const baseSphere = memoize((scene: BABYLON.Scene) => {
   const ret = BABYLON.MeshBuilder.CreateSphere(
     'base-sphere',
     {
+      diameter: PRIMITIVE_UNIT_SIZE,
       updatable: false
     },
     scene
@@ -92,12 +98,15 @@ export const meshRendererComponent = declareComponentUsingProtobufJs(PBMeshRende
       mesh.parent = entity
       mesh.setEnabled(true)
     } else if (info.mesh?.$case === 'plane') {
+      // Double-sided here (unlike the collider's single-sided quad): this one is
+      // DRAWN, a PlaneMesh is visible from both sides, and the UV data written
+      // below carries the eight pairs a double-sided quad needs.
       mesh = BABYLON.MeshBuilder.CreatePlane(
         'plane-shape',
         {
-          width: 1,
-          height: 1,
-          sideOrientation: 2,
+          width: PRIMITIVE_UNIT_SIZE,
+          height: PRIMITIVE_UNIT_SIZE,
+          sideOrientation: BABYLON.Mesh.DOUBLESIDE,
           updatable: true
         },
         entity.getScene()
