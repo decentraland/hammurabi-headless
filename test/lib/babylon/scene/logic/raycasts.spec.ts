@@ -1,5 +1,5 @@
 import * as BABYLON from '@babylonjs/core'
-import { Ray, Vector3, Matrix } from '@babylonjs/core'
+import { Quaternion, Ray, Vector3, Matrix } from '@babylonjs/core'
 import { RaycastQueryType } from '@dcl/protocol/out-js/decentraland/sdk/components/raycast.gen'
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
 import { limits } from '../../../../../src/lib/misc/limits'
@@ -94,7 +94,9 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       getEntityOrNull: (id: number) => ({
         entityId: id,
         appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
-        getWorldMatrix: () => Matrix.Identity()
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
       })
     } as any
   }
@@ -363,7 +365,9 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       getEntityOrNull: (id: number) => ({
         entityId: id,
         appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
-        getWorldMatrix: () => Matrix.Identity()
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
       })
     } as any
   }
@@ -628,7 +632,9 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       getEntityOrNull: (id: number) => ({
         entityId: id,
         appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
-        getWorldMatrix: () => Matrix.Identity()
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
       })
     }
 

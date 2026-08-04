@@ -34,7 +34,17 @@ testWithEngine(
   'raycast direction resolution',
   {
     baseUrl: '/',
-    entity: { content: [], metadata: {} as Scene, type: 'scene' },
+    // Parcel 1,1 — rootNode at world (16,0,16) — deliberately NOT 0,0. The
+    // targetEntity branch used to convert an already-world `absolutePosition`
+    // through `sceneCoordinatesToBabylonGlobalCoordinates`, adding the scene root
+    // twice. At 0,0 that offset is zero and the bug is invisible: this spec passed
+    // against it. Every scene-space conversion below is now exercised against a
+    // non-zero root.
+    entity: {
+      content: [],
+      metadata: { scene: { base: '1,1', parcels: ['1,1'] } } as unknown as Scene,
+      type: 'scene'
+    },
     urn: 'raycast-direction'
   },
   ($) => {

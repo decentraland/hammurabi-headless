@@ -162,7 +162,9 @@ describe('limit logging wiring', () => {
           appliedComponents: {
             raycast: { ray: new BABYLON.Ray(BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 999) }
           },
-          getWorldMatrix: () => BABYLON.Matrix.Identity()
+          getWorldMatrix: () => BABYLON.Matrix.Identity(),
+          absolutePosition: BABYLON.Vector3.Zero(),
+          absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
         })
       })
 
@@ -221,7 +223,9 @@ describe('limit logging wiring', () => {
           appliedComponents: {
             raycast: { ray: new BABYLON.Ray(BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 999) }
           },
-          getWorldMatrix: () => BABYLON.Matrix.Identity()
+          getWorldMatrix: () => BABYLON.Matrix.Identity(),
+          absolutePosition: BABYLON.Vector3.Zero(),
+          absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
         })
       })
 
@@ -282,7 +286,9 @@ describe('limit logging wiring', () => {
           appliedComponents: {
             raycast: { ray: new BABYLON.Ray(BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 999) }
           },
-          getWorldMatrix: () => BABYLON.Matrix.Identity()
+          getWorldMatrix: () => BABYLON.Matrix.Identity(),
+          absolutePosition: BABYLON.Vector3.Zero(),
+          absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
         })
       })
 

@@ -12,7 +12,23 @@ import { ColliderLayer } from "@dcl/protocol/out-js/decentraland/sdk/components/
 import { limits } from "../../../misc/limits";
 import { limitLogger } from "../../../misc/limit-logger";
 
-const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
+/**
+ * Default collision mask for a RAYCAST whose `collisionMask` is unset.
+ *
+ * `CL_PHYSICS` alone, matching the reference client
+ * (`PBRaycastDefaults.GetCollisionMask`: `HasCollisionMask ? mask : ClPhysics`).
+ *
+ * NOTE this deliberately contradicts raycast.proto, whose comment reads
+ * "Collision mask, by default CL_POINTER | CL_PHYSICS". Where the shipped client
+ * and the protocol text disagree, this server follows the CLIENT: a headless
+ * authoritative server that resolves hits differently from the client every
+ * player is running is worse than one that matches a documentation bug.
+ *
+ * The MeshCollider default is a separate question and does NOT diverge — the
+ * client's `PBMeshColliderDefaults.GetColliderLayer` returns
+ * `ClPhysics | ClPointer`, which is what mesh-collider-component.ts uses.
+ */
+const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_PHYSICS
 /**
  * Ray length used when a scene leaves `PBRaycast.maxDistance` unset. Matches the
  * value `raycast-component.ts` has always constructed the Ray with, so a scene
@@ -219,7 +235,19 @@ export function processRaycasts(scene: SceneContext) {
 
     const raycast = Raycast.getOrNull(entityId)
 
-    if (raycast) {
+    // RQT_NONE performs no raycast and writes no result, matching the reference
+    // client (`CreateRaycastData`: `if (raycast.QueryType == RqtNone) return`).
+    //
+    // This too contradicts raycast.proto, whose RQT_NONE comment reads "Do not
+    // perform the raycast, only set the raycast result with empty hits" — the
+    // client writes nothing at all. Following the client, as with the mask
+    // default above. It also stops an RQT_NONE raycast paying full price: the
+    // previous code walked the mask, prefiltered and intersected, then discarded
+    // every hit while emitting an empty result.
+    //
+    // Still falls through to the cleanup below, so a one-shot RQT_NONE leaves the
+    // pending set instead of being rewalked every frame forever.
+    if (raycast && raycast.queryType !== RaycastQueryType.RQT_NONE) {
       const entity = scene.getEntityOrNull(entityId)
       if (entity && entity.appliedComponents.raycast) {
         const ray = computeRayDirection(scene, raycast, entity.appliedComponents.raycast.ray, entity)
@@ -559,30 +587,39 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
   // done here.
   ray.length = Number.isFinite(raycast.maxDistance) && raycast.maxDistance > 0 ? raycast.maxDistance : DEFAULT_RAY_LENGTH
 
-  const globalOrigin = Vector3.TransformCoordinatesToRef(
+  // World-space add, NOT `TransformCoordinates` through the entity matrix. The
+  // reference client is `rayOrigin = entityPosition + sdkRaycast.OriginOffset`
+  // (RaycastUtils.TryCreateRay), so the offset is neither rotated by the entity
+  // nor scaled by it. Running it through the world matrix agreed only for an
+  // unrotated, unscaled entity and silently diverged for every other one.
+  entity.getWorldMatrix() // refreshes absolutePosition / absoluteRotationQuaternion
+  const globalOrigin = entity.absolutePosition.addToRef(
     new Vector3(originOffset.x, originOffset.y, originOffset.z),
-    entity.getWorldMatrix(),
     ray.origin
-  );
+  )
 
   // and then calculate the global direction, relative to the
   if (!raycast.direction) {
     // the default value if direction is missing is a local-space forward vector
-    Vector3.TransformNormalToRef(Vector3.Forward(), entity.getWorldMatrix(), ray.direction);
+    Vector3.Forward().rotateByQuaternionToRef(entity.absoluteRotationQuaternion, ray.direction)
+    ray.direction.normalize()
   } else if (raycast.direction?.$case === 'localDirection') {
     // then localDirection, is used to detect collisions in a path
     // i.e. Vector3.Forward(), it takes into consideration the rotation of
     // the entity to perform the raycast in local coordinates
-
-    Vector3.TransformNormalToRef(
-      new Vector3(
-        raycast.direction.localDirection.x ?? 0,
-        raycast.direction.localDirection.y ?? 0,
-        raycast.direction.localDirection.z ?? 1
-      ),
-      entity.getWorldMatrix(),
-      ray.direction
-    );
+    //
+    // ROTATION ONLY, matching the client's `entityRotation * sdkRaycast.LocalDirection`.
+    // The world matrix would fold in the entity's SCALE, and since `ray.length` is
+    // now the scene's maxDistance, a scaled entity would silently multiply its own
+    // requested range. Normalized for the same reason: Babylon measures a ray in
+    // units of its direction vector, so an unnormalized one rescales maxDistance.
+    new Vector3(
+      raycast.direction.localDirection.x ?? 0,
+      raycast.direction.localDirection.y ?? 0,
+      raycast.direction.localDirection.z ?? 1
+    )
+      .rotateByQuaternionToRef(entity.absoluteRotationQuaternion, ray.direction)
+    ray.direction.normalize()
   } else if (raycast.direction?.$case === 'globalDirection') {
     ray.direction.set(
       raycast.direction?.globalDirection.x,
@@ -606,8 +643,19 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
     ).normalize()
   } else if (raycast.direction?.$case == 'targetEntity') {
     const targetEntity = scene.getEntityOrNull(raycast.direction.targetEntity)
-    const sceneTarget = targetEntity ? targetEntity.absolutePosition : Vector3.Zero()
-    const globalTarget = sceneCoordinatesToBabylonGlobalCoordinates(scene, sceneTarget)
+    // `absolutePosition` is ALREADY world space. Running it back through
+    // `sceneCoordinatesToBabylonGlobalCoordinates` added the scene root a second
+    // time, so every targetEntity ray in a scene away from parcel 0,0 pointed
+    // somewhere else entirely — measured at parcel 1,1, a target 10m along +Z
+    // produced (0.5241, 0, 0.8517) instead of (0, 0, 1). Invisible at 0,0, which
+    // is where the original test for this branch happened to run.
+    //
+    // The MISSING-target fallback keeps its conversion: the client falls back to
+    // `sceneRootPos - entityPosition`, which is what a scene-local Zero converts
+    // to. Odd, and the client's own source marks it "(why?)", but matched.
+    const globalTarget = targetEntity
+      ? targetEntity.absolutePosition
+      : sceneCoordinatesToBabylonGlobalCoordinates(scene, Vector3.Zero())
 
     // scene one is to make it easy to point towards a pin-pointed element
     // in global space, like a fixed tower

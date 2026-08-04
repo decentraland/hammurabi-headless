@@ -1,5 +1,5 @@
 import * as BABYLON from '@babylonjs/core'
-import { AbstractMesh, Ray, Vector3, Matrix } from '@babylonjs/core'
+import { AbstractMesh, Quaternion, Ray, Vector3, Matrix } from '@babylonjs/core'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { RaycastQueryType } from '@dcl/protocol/out-js/decentraland/sdk/components/raycast.gen'
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
@@ -76,7 +76,9 @@ describe('raycast prefilter and early-out', () => {
       getEntityOrNull: (id: number) => ({
         entityId: id,
         appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
-        getWorldMatrix: () => Matrix.Identity()
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
       })
     } as any
   }

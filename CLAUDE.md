@@ -202,6 +202,28 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   silently-dead collider the guard exists to prevent), and the magnitude is capped by
   `maxPrimitiveRadiusMeters`. This bounds LOCAL geometry only; world extent is that
   radius times the entity Transform scale, which is NOT validated anywhere. Raycasting
+  **Client parity (`raycasts.ts`, checked against unity-explorer's
+  `RaycastUtils.TryCreateRay` / `ExecuteRaycastSystem` / `PBRaycastDefaults`).** This
+  is an AUTHORITATIVE server, so a raycast that resolves differently from the client
+  every player runs is a correctness bug, not a rendering nicety. `originOffset` is
+  added in WORLD space (not rotated/scaled through the entity matrix);
+  `localDirection` is rotated by the entity's rotation ONLY and normalized (folding
+  in scale would silently rescale what `maxDistance` means, since Babylon measures a
+  ray in units of its direction vector); `targetEntity` uses `absolutePosition`
+  DIRECTLY — it is already world-space, and re-converting it through
+  `sceneCoordinatesToBabylonGlobalCoordinates` added the scene root twice, which is
+  invisible at parcel 0,0 and wrong everywhere else. TWO defaults deliberately follow
+  the CLIENT where it contradicts raycast.proto: an unset raycast `collisionMask`
+  defaults to `CL_PHYSICS` alone (the proto documents `CL_POINTER | CL_PHYSICS`), and
+  `RQT_NONE` writes NO result at all (the proto says "set the raycast result with
+  empty hits"). The MeshCollider mask default does NOT diverge — both say
+  `CL_PHYSICS | CL_POINTER`. Known REMAINING divergences, deliberate: unset
+  `maxDistance` falls back to 999 where the client would raycast zero distance; a
+  malformed/zero direction still fires where the client warns and skips; `QUERY_ALL`
+  caps at `maxRaycastHitsPerQuery` nearest-first where the client takes an arbitrary
+  10; the collider plane is a zero-thickness quad where the client uses a 1cm-deep
+  box; and sphere/box colliders are tessellated where the client uses analytic PhysX
+  primitives. Raycasting
   is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
   because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
   every primitive collider was a 12-triangle box; a sphere is 1296. Those two bound
