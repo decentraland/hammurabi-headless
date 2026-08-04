@@ -304,38 +304,44 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
 
   registerService(port, CommsApiServiceDefinition, async () => ({
     async getActiveVideoStreams() {
-      // Return list of active video streams
+      // Always empty here. Reporting real streams means enumerating remote
+      // participants' video track publications, which `MinimumCommunicationsTransport`
+      // does not expose — a LiveKit-specific seam this server has no other
+      // reason to open. Left as a known gap rather than a fake value.
       return {
         streams: []
       }
     },
-    async getConnectedPeers() {
-      // Return list of connected peers from the transport
-      return {
-        peers: []
-      }
-    },
-    async getRoomInfo() {
-      // Return information about the current communication room
-      return {
-        roomId: '',
-        maxPeers: 100,
-        currentPeers: 0
-      }
-    },
-    // Topic-based pub/sub is not wired to the comms transport yet; these accept
-    // the calls so scenes keep running, but no messages flow through them.
-    async subscribeToTopic() {
+    async subscribeToTopic(req, context) {
+      context.commsTopics.subscribe(req.topic)
       return {}
     },
-    async unsubscribeFromTopic() {
+    async unsubscribeFromTopic(req, context) {
+      context.commsTopics.unsubscribe(req.topic)
       return {}
     },
-    async publishData() {
+    async publishData(req, context) {
+      // encodePublish returns null for an empty topic or payload, an oversized
+      // topic, a message over the same per-message ceiling sendBinary applies
+      // (counted on the framed bytes INCLUDING the MsgType byte added below, so it
+      // is rejected before the frame is allocated rather than after this function
+      // has also copied it), or a publish-budget hit. Dropping silently is the
+      // documented contract (the reference client's JS module says as much) — a
+      // throw here would surface as a scene-visible rejection it has no way to act
+      // on.
+      const frame = context.commsTopics.encodePublish(req.topic, req.data)
+      if (!frame || !context.transport) return {}
+
+      // Broadcast: topics have no per-peer addressing, so the destination list
+      // is empty (every peer in the room, filtered by topic on receipt).
+      void context.transport.sendParcelSceneMessage(
+        { sceneId: context.entityId, data: encodeMessage(frame, MsgType.CommsData) },
+        []
+      )
       return {}
     },
-    async consumeMessages() {
-      return { messages: [] }
+    async consumeMessages(req, context) {
+      return { messages: context.commsTopics.consume(req.topic) }
     }
   }))
 

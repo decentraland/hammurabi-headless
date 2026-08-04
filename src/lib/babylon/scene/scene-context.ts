@@ -47,6 +47,7 @@ import { tweenComponent } from '../../decentraland/sdk-components/tween'
 import { materialComponent } from '../../decentraland/sdk-components/material-component'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { CommsTransportWrapper } from '../../decentraland/communications/CommsTransportWrapper'
+import { createCommsTopicRegistry } from '../../decentraland/communications/comms-api-topics'
 import {
   createAvatarCommunicationSystem,
   AvatarCommunicationSystem
@@ -825,6 +826,12 @@ export class SceneContext implements EngineApiInterface {
   }
 
   private incomingNetworkMessages: Uint8Array[] = []
+  /**
+   * CommsApi topic buffers for this scene. Owned per SceneContext (not process
+   * wide) so a hot reload starts with no subscriptions and cannot hand the new
+   * scene the previous one's buffered payloads.
+   */
+  readonly commsTopics = createCommsTopicRegistry()
   // kept so dispose() can unsubscribe it — without this, every hot reload leaked
   // a handler that kept filling its dead context's queue (same entityId check
   // passes for the reloaded scene)
@@ -849,7 +856,18 @@ export class SceneContext implements EngineApiInterface {
     this.sceneMessageBusHandler = (event) => {
       if (event.data.sceneId === this.entityId) {
         if (event.data.data.byteLength) {
-          const [_, data] = decodeMessage(event.data.data)
+          const [msgType, data] = decodeMessage(event.data.data)
+
+          // CommsApi topic traffic shares this packet with the MessageBus but is
+          // a different scene-facing API. Route it and stop: appending it to
+          // incomingNetworkMessages too would deliver every topic payload to
+          // MessageBus subscribers as an untagged blob (the type byte is
+          // stripped above, so the scene could not tell them apart).
+          if (msgType === MsgType.CommsData) {
+            this.commsTopics.ingest(event.address, data)
+            return
+          }
+
           const senderBytes = textEncoder.encode(event.address)
           // The sender length is framed in a single byte; a peer-controlled
           // identity longer than that would wrap and corrupt the framing scene
@@ -881,7 +899,12 @@ const textEncoder = new TextEncoder()
  */
 export enum MsgType {
   String = 1,
-  Uint8Array = 2
+  Uint8Array = 2,
+  // CommsApi topic-based data. Shares the rfc4 `Scene` packet with the two
+  // MessageBus types above and MUST keep this value: the reference client's
+  // ISceneCommunicationPipe.MsgType assigns CommsData = 3, and a mismatch would
+  // silently route real clients' topic traffic into the MessageBus (or drop it).
+  CommsData = 3
 }
 
 function decodeMessage(value: Uint8Array): [MsgType, Uint8Array] {

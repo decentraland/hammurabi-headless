@@ -74,7 +74,12 @@ export class CommsTransportWrapper {
   private isRateLimited(address: string): boolean {
     const now = Date.now()
     const entry = this.inboundRate.get(address)
-    if (!entry || now - entry.windowStart >= INBOUND_RATE_WINDOW_MS) {
+    // A negative elapsed means the clock stepped BACKWARDS (NTP): the window start
+    // is now in the future, so without this the counter never rolls over and a peer
+    // that happened to be over quota stays throttled until real time catches up.
+    // Treat it as a new window, same as an expired one.
+    const elapsed = entry ? now - entry.windowStart : 0
+    if (!entry || elapsed < 0 || elapsed >= INBOUND_RATE_WINDOW_MS) {
       // Evict the oldest entry (Map preserves insertion order) if a leaked/straggler
       // set has pushed the map past its cap, so it can't grow without bound.
       if (!entry && this.inboundRate.size >= MAX_RATE_ENTRIES) {

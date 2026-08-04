@@ -191,6 +191,36 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   into a fetch URL — a `../`-bearing hash would otherwise WHATWG-normalize into a
   path traversal on the realm origin. Scene→LiveKit `sendBinary` caps peers,
   messages, per-message size AND the per-message destination-identities list.
+  CommsApi topics (`comms-api-topics.ts`) are bounded on BOTH sides because both
+  are untrusted. Outbound, `encodePublish` validates the topic byte length and the
+  FRAMED message size BEFORE it touches anything keyed by the topic and before it
+  allocates the frame: the per-topic rate map does `set(topic, …)`, so validating
+  after it retained a topic the cap was about to reject (8 rejected 4MB publishes =
+  33.6MB), and the per-message ceiling applied by the caller only rejected AFTER the
+  frame had been built and copied. A topic over 65535 bytes is rejected regardless
+  of `maxCommsTopicBytes` — the frame's length prefix is a u16, so a longer one
+  wraps and the receiver reads part of the topic as DATA (silent corruption, not a
+  drop). There are TWO publish budgets: the per-topic one mirrors the reference
+  client and bounds nothing globally (it is keyed by a scene-chosen string, so N
+  publishes to N unique topics all pass, and evicting a full map hands a throttled
+  topic a fresh budget inside the same window), while the AGGREGATE one is a single
+  counter no scene-controlled key can evict and is what actually bounds
+  scene→LiveKit publish volume. `subscribe` has a churn budget too — the
+  subscription COUNT bounds how many buffers live at once, not how fast a scene
+  creates and destroys them. Inbound, only SUBSCRIBED topics allocate a buffer (a
+  peer cannot make the host allocate for a topic the scene never asked for) and each
+  buffer is bounded in MESSAGES and, because a message count is not a memory bound
+  (128KB packets × 1024 messages measured 72.6MB for ONE topic, ~33GB across 256),
+  in BYTES — per topic and in aggregate, both released as the scene consumes and on
+  unsubscribe. Peer addresses over 255 bytes are dropped here exactly as the
+  MessageBus branch beside it drops them. Every fixed window here — and the
+  per-peer inbound one in `CommsTransportWrapper` — treats a NEGATIVE elapsed (a
+  backwards NTP step) as a new window, or a counter whose start sits in the future
+  stays throttled until real time catches up.
+  Topic payloads share the rfc4 `Scene` packet with the SDK MessageBus and are
+  told apart ONLY by the leading `MsgType` byte (`CommsData = 3`, a value fixed by
+  the reference client): `sceneMessageBus` must route on that byte and return, or
+  every topic payload also lands in the MessageBus queue as an untagged blob.
   Inbound comms: `CommsTransportWrapper.handleMessage` drops oversized packets and
   rate-limits per peer before decoding; the avatar system dedupes + rate-limits
   per-peer profile fetches (`avatar-communication-system.ts`) to bound Catalyst
