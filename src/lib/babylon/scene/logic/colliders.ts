@@ -89,25 +89,37 @@ export function pickMeshesForMask(entity: BabylonEntity, mask: number): Iterable
   // Pre-order depth-first, matching `_getDescendants`' ordering exactly: the
   // raycast budget iterates this list in order and charges a prefix of it, so a
   // different order would silently change which raycasts a frame can afford.
-  const stack: Array<{ node: Node; depth: number }> = [{ node: entity, depth: 0 }]
+  //
+  // Two PARALLEL arrays rather than a stack of `{node, depth}`: this runs over
+  // every collider in the scene, and one object literal per node measured as real
+  // time at the ceiling (50_000 colliders).
+  const stackNodes: Node[] = [entity]
+  const stackDepths: number[] = [0]
   let truncated = false
 
-  while (stack.length) {
-    const { node, depth } = stack.pop()!
+  while (stackNodes.length) {
+    const node = stackNodes.pop()!
+    const depth = stackDepths.pop()!
 
     // The root is the entity itself, never one of its own descendants.
     if (node !== entity && node instanceof AbstractMesh && bitIntersectsAndContainsAny(getColliderLayers(node), mask)) {
       results.push(node)
     }
 
-    // `getChildren(_, true)` is NOT recursive — it delegates to `_getDescendants`
-    // with directDescendantsOnly, which skips the recursive arm. Called once per
-    // node, so the walk allocates one small array per node where Babylon's
-    // recursive version allocates one in total; that is the price of the
-    // unbounded depth, and it is paid once per mask per frame thanks to the
-    // caller's memoization.
-    const children = node.getChildren(undefined, true)
-    if (!children.length) continue
+    // `_children` is read directly rather than through `getChildren(_, true)`.
+    // That helper allocates a fresh array per call, and this walk calls it once
+    // per NODE where Babylon's recursive version allocated one array in total —
+    // measured at 50_000 colliders, that alone made this walk 15.8ms against the
+    // recursive 5.1ms, a 3x regression on a path that runs once per mask per
+    // frame. Reading the field is allocation-free and restores parity.
+    //
+    // `_children` is Babylon-internal, so it is treated as possibly absent: an
+    // `undefined` (rather than the documented null-or-array) means the field has
+    // gone away in an upgrade, and the walk falls back to the public helper
+    // instead of silently reporting that every entity has no colliders.
+    const internalChildren = (node as unknown as { _children?: Node[] | null })._children
+    const children = internalChildren === undefined ? node.getChildren(undefined, true) : internalChildren
+    if (!children || !children.length) continue
 
     if (depth >= maxDepth) {
       truncated = true
@@ -116,7 +128,8 @@ export function pickMeshesForMask(entity: BabylonEntity, mask: number): Iterable
 
     // Pushed in reverse so the leftmost child is popped — and so visited — first.
     for (let i = children.length - 1; i >= 0; i--) {
-      stack.push({ node: children[i], depth: depth + 1 })
+      stackNodes.push(children[i])
+      stackDepths.push(depth + 1)
     }
   }
 

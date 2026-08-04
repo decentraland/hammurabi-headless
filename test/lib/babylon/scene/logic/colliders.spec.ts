@@ -136,15 +136,29 @@ describe('pickMeshesForMask', () => {
     //
     // Asserted on the WALK, not the result: `bitIntersectsAndContainsAny(layers, 0)`
     // is false for every mesh, so deleting the short-circuit returns an empty array
-    // anyway and a result-only assertion cannot tell the two apart. Verified by
-    // mutation — this is the assertion that fails when the guard is removed.
+    // anyway and a result-only assertion cannot tell the two apart.
+    //
+    // Spied on `_children` rather than on `getChildren`. An earlier version of this
+    // test spied the latter, and a perf change that switched the walk to read
+    // `_children` directly made it VACUOUS — it then passed with the guard deleted,
+    // because `getChildren` was no longer called on any path. Verified by mutation
+    // that this form fails when the guard is removed.
     it('should short-circuit on an empty mask without walking the subtree at all', () => {
-      const walk = jest.spyOn(root, 'getChildren')
+      let childrenReads = 0
+      const actual = (root as any)._children
+      Object.defineProperty(root, '_children', {
+        configurable: true,
+        get: () => {
+          childrenReads++
+          return actual
+        }
+      })
 
       pickMeshesForMask(root as any, 0)
 
-      expect(walk).not.toHaveBeenCalled()
-      walk.mockRestore()
+      delete (root as any)._children
+      ;(root as any)._children = actual
+      expect(childrenReads).toBe(0)
     })
   })
 
