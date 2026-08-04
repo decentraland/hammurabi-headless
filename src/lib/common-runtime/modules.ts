@@ -15,6 +15,8 @@ import { RestrictedActionsServiceDefinition } from '@dcl/protocol/out-js/decentr
 import { CommunicationsControllerServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/communications_controller.gen'
 import { CommsApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/comms_api.gen'
 import { SignedFetchServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/signed_fetch.gen'
+import { PlayersServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/players.gen'
+import { EnvironmentApiServiceDefinition } from '@dcl/protocol/out-js/decentraland/kernel/apis/environment_api.gen'
 
 export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
   switch (moduleName) {
@@ -64,6 +66,10 @@ export function loadModuleForPort(port: RpcClientPort, moduleName: string) {
       return codegen.loadService(port, SignedFetchServiceDefinition)
     case '~system/CommsApi':
       return codegen.loadService(port, CommsApiServiceDefinition)
+    case '~system/Players':
+      return codegen.loadService(port, PlayersServiceDefinition)
+    case '~system/EnvironmentApi':
+      return codegen.loadService(port, EnvironmentApiServiceDefinition)
     case '~system/Testing':
       return codegen.loadService(port, TestingServiceDefinition)
     default:

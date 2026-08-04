@@ -280,7 +280,35 @@ export class SceneContext implements EngineApiInterface {
           new Vector3((maxX! + 1) * PARCEL_SIZE_METERS, height, (maxZ! + 1) * PARCEL_SIZE_METERS)
         )
       }
+
+      // Exact parcel set for `~system/Players.getPlayersInScene`. The bounding
+      // box above is deliberately NOT reused: it is the rectangular hull, so an
+      // L-shaped or scattered deployment would report players standing in the
+      // gaps as being inside the scene.
+      for (const position of this.metadata.scene.parcels) {
+        const vec = parseParcelPosition(position)
+        this.parcelKeys.add(`${vec.x},${vec.y}`)
+      }
     }
+  }
+
+  // Occupied parcels, as "x,y". See the constructor note above.
+  private readonly parcelKeys = new Set<string>()
+
+  /**
+   * Whether a WORLD-space position stands on one of this scene's parcels.
+   *
+   * Horizontal only, matching the protocol's wording ("players who are currently
+   * standing within the parcels of the scene") — a player on a tall structure is
+   * still in the scene, and the bounding box's synthetic height limit is a
+   * throttling heuristic, not a containment rule.
+   */
+  isWorldPositionInsideScene(worldPosition: BABYLON.Vector3): boolean {
+    if (this.parcelKeys.size === 0) return false
+    if (!Number.isFinite(worldPosition.x) || !Number.isFinite(worldPosition.z)) return false
+    const parcelX = Math.floor(worldPosition.x / PARCEL_SIZE_METERS)
+    const parcelZ = Math.floor(worldPosition.z / PARCEL_SIZE_METERS)
+    return this.parcelKeys.has(`${parcelX},${parcelZ}`)
   }
 
   async initAsyncJobs() {
@@ -822,6 +850,12 @@ export class SceneContext implements EngineApiInterface {
 
   get transport(): CommsTransportWrapper | undefined {
     return this._transport
+  }
+
+  // Read-only access for the Players RPC service. Undefined until a transport is
+  // attached (offline preview, or before comms connects).
+  get avatarSystem(): AvatarCommunicationSystem | undefined {
+    return this._avatarSystem
   }
 
   private incomingNetworkMessages: Uint8Array[] = []
