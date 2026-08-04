@@ -321,26 +321,23 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
       return {}
     },
     async publishData(req, context) {
+      // encodePublish returns null for an empty topic or payload, an oversized
+      // topic, a message over the same per-message ceiling sendBinary applies
+      // (counted on the framed bytes INCLUDING the MsgType byte added below, so it
+      // is rejected before the frame is allocated rather than after this function
+      // has also copied it), or a publish-budget hit. Dropping silently is the
+      // documented contract (the reference client's JS module says as much) — a
+      // throw here would surface as a scene-visible rejection it has no way to act
+      // on.
       const frame = context.commsTopics.encodePublish(req.topic, req.data)
-      // encodePublish returns null for an empty payload, an oversized topic, or
-      // a rate-limit hit. Dropping silently is the documented contract (the
-      // reference client's JS module says as much) — a throw here would surface
-      // as a scene-visible rejection it has no way to act on.
       if (!frame || !context.transport) return {}
-
-      const message = encodeMessage(frame, MsgType.CommsData)
-
-      // Same per-message ceiling sendBinary applies, and for the same reason:
-      // this is scene-controlled data going out over LiveKit. Checked on the
-      // FRAMED bytes, since the topic and the MsgType byte travel too.
-      if (message.byteLength > MAX_COMMS_MESSAGE_BYTES) {
-        limitLogger.hit('maxCommsMessageBytes', `${message.byteLength} bytes on a comms topic`)
-        return {}
-      }
 
       // Broadcast: topics have no per-peer addressing, so the destination list
       // is empty (every peer in the room, filtered by topic on receipt).
-      void context.transport.sendParcelSceneMessage({ sceneId: context.entityId, data: message }, [])
+      void context.transport.sendParcelSceneMessage(
+        { sceneId: context.entityId, data: encodeMessage(frame, MsgType.CommsData) },
+        []
+      )
       return {}
     },
     async consumeMessages(req, context) {

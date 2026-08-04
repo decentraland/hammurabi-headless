@@ -112,11 +112,27 @@ testWithEngine(
       })
     })
 
-    describe('when a peer sends an ordinary MessageBus packet', () => {
+    describe('when a peer sends an ordinary binary MessageBus packet', () => {
       beforeEach(() => {
         transport.events.emit('sceneMessageBus', {
           address: '0xpeer',
           data: { sceneId: $.ctx.entityId, data: new Uint8Array([MsgType.Uint8Array, 1, 2, 3]) }
+        })
+      })
+
+      it('should still route it to the MessageBus queue', () => {
+        expect($.ctx.getNetworkMessages()).toHaveLength(1)
+      })
+    })
+
+    // The routing added for topics keys off the type byte, so BOTH MessageBus
+    // types have to keep reaching the queue — the legacy string one is the older
+    // of the two and the easiest to strand.
+    describe('when a peer sends a legacy string MessageBus packet', () => {
+      beforeEach(() => {
+        transport.events.emit('sceneMessageBus', {
+          address: '0xpeer',
+          data: { sceneId: $.ctx.entityId, data: new Uint8Array([MsgType.String, 104, 105]) }
         })
       })
 

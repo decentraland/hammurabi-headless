@@ -63,8 +63,12 @@ export interface Limits {
   maxCommsTopicBytes: number
   maxCommsTopicSubscriptions: number
   maxCommsTopicBufferMessages: number
-  commsTopicPublishWindowMs: number
+  maxCommsTopicBufferBytes: number
+  maxCommsTopicBufferTotalBytes: number
+  commsTopicRateWindowMs: number
   maxCommsTopicPublishesPerWindow: number
+  maxCommsTopicPublishesTotalPerWindow: number
+  maxCommsTopicSubscribesPerWindow: number
 
   // --- Fetch / network / assets / WebSocket ---
   fetchTimeoutMs: number
@@ -200,8 +204,46 @@ const KNOBS: readonly Knob[] = [
   // memory without limit.
   { key: 'maxCommsTopicSubscriptions', env: 'HAMMURABI_MAX_COMMS_TOPIC_SUBSCRIPTIONS', def: 256, min: 1 },
   { key: 'maxCommsTopicBufferMessages', env: 'HAMMURABI_MAX_COMMS_TOPIC_BUFFER_MESSAGES', def: 1_024, min: 1 },
-  { key: 'commsTopicPublishWindowMs', env: 'HAMMURABI_COMMS_TOPIC_PUBLISH_WINDOW_MS', def: 1_000, min: 1 },
+  // A message count is not a memory bound: inbound packets are capped at
+  // maxInboundPacketBytes (128KB) and a peer may send maxMessagesPerWindow (300) of
+  // them per second, so one topic at 1024 messages measured 72.6MB retained — filled
+  // in about four seconds by a single peer — and 256 subscriptions extrapolated to
+  // ~33GB. These two caps are what actually bound inbound memory; the message count
+  // stays because a scene that polls also wants a bound on how far behind it can get.
+  // Per topic first (one topic cannot hog everything) and then in aggregate, since
+  // 256 x the per-topic cap would be a 256MB ceiling on its own.
+  { key: 'maxCommsTopicBufferBytes', env: 'HAMMURABI_MAX_COMMS_TOPIC_BUFFER_BYTES', def: 1 * MB, min: 1 * KB },
+  {
+    key: 'maxCommsTopicBufferTotalBytes',
+    env: 'HAMMURABI_MAX_COMMS_TOPIC_BUFFER_TOTAL_BYTES',
+    def: 8 * MB,
+    min: 1 * KB
+  },
+  // Window shared by the three topic rate budgets below (the reference client's
+  // RATE_LIMIT_WINDOW_MS).
+  { key: 'commsTopicRateWindowMs', env: 'HAMMURABI_COMMS_TOPIC_RATE_WINDOW_MS', def: 1_000, min: 1 },
+  // Per topic, mirroring the reference client's MAX_MESSAGES_PER_SECOND. On its own
+  // this bounds NOTHING globally: the budget is keyed by a scene-chosen string, so
+  // 5000 publishes to 5000 distinct topics in one window all pass it, and when the
+  // rate map is full the oldest counter is evicted — which hands a throttled topic a
+  // fresh budget inside the same window. Hence the aggregate budget below, which is a
+  // single counter no scene-controlled key can evict; it is the one that actually
+  // bounds scene -> LiveKit publish volume. Sized well above the per-topic budget so
+  // a scene legitimately using several topics is unaffected (10 topics at their full
+  // per-topic rate).
   { key: 'maxCommsTopicPublishesPerWindow', env: 'HAMMURABI_MAX_COMMS_TOPIC_PUBLISHES_PER_WINDOW', def: 10, min: 1 },
+  {
+    key: 'maxCommsTopicPublishesTotalPerWindow',
+    env: 'HAMMURABI_MAX_COMMS_TOPIC_PUBLISHES_TOTAL_PER_WINDOW',
+    def: 100,
+    min: 1
+  },
+  // subscribe() allocates a buffer keyed by a scene-chosen string. The subscription
+  // count caps how many live at once, but not the churn rate of
+  // subscribe/unsubscribe cycling, so this bounds the rate too. The default leaves
+  // room to subscribe to every allowed topic twice over in one window, which is far
+  // more than a scene's startup needs.
+  { key: 'maxCommsTopicSubscribesPerWindow', env: 'HAMMURABI_MAX_COMMS_TOPIC_SUBSCRIBES_PER_WINDOW', def: 512, min: 1 },
 
   // Fetch / network / assets / WS
   { key: 'fetchTimeoutMs', env: 'HAMMURABI_FETCH_TIMEOUT_MS', def: 15_000, min: 100 },
