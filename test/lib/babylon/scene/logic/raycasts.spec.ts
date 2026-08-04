@@ -90,10 +90,96 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     return scene
   }
 
+  // At DEFAULT knobs the two ceilings coincide for cheap shapes: every candidate is
+  // billed at least TRIANGLE_COST_FLOOR (12) triangles, and the triangle default is
+  // exactly 50_000 x 12, so N > 50_000 trips both at once. The mesh ceiling is only
+  // separately observable when an operator tunes them apart — which they can, the
+  // knobs are independent — so these two cases re-import the module with a generous
+  // triangle ceiling to isolate it. `limits` is a singleton read at import, hence
+  // resetModules + require rather than a plain import.
+  describe('when the triangle ceiling is tuned far above the mesh ceiling', () => {
+    const OLD_ENV = process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
+    let isolatedProcessRaycasts: typeof processRaycasts
+
+    beforeEach(() => {
+      process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME = '100000000'
+      jest.resetModules()
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      isolatedProcessRaycasts = require('../../../../../src/lib/babylon/scene/logic/raycasts').processRaycasts
+    })
+
+    afterEach(() => {
+      if (OLD_ENV === undefined) delete process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
+      else process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME = OLD_ENV
+      jest.resetModules()
+    })
+
+    it('should defer a raycast that does not fit the remaining mesh ceiling', () => {
+      const meshes = new Array(30_000).fill(plane)
+      const pending = new Set<number>([1, 2, 3])
+      const processed: number[] = []
+
+      isolatedProcessRaycasts(makeFakeScene(pending, meshes, undefined, (id) => processed.push(id)))
+
+      // 30k spends the budget down to 20k; the second needs 30k, so it waits.
+      expect(processed).toEqual([1])
+    })
+
+    it('should answer a raycast past the whole mesh ceiling with an empty result', () => {
+      const meshes = new Array(60_000).fill(plane)
+      const pending = new Set<number>([1])
+      const results: any[] = []
+
+      isolatedProcessRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+
+      expect(results[0]?.hits).toEqual([])
+      expect(Array.from(pending)).toEqual([])
+    })
+  })
+
+  // Mirror image of the block above: raise the MESH ceiling so only the triangle
+  // ceiling can bind, which is the only way to observe the per-candidate cost FLOOR.
+  // Without it a plane bills its 2 real triangles and 60k planes look like 120k
+  // triangles — a fifth of the budget — when they in fact cost about what 60k boxes
+  // cost, because `Ray.intersectsMesh` pays a fixed per-mesh price (matrix invert,
+  // ray transform, PickingInfo, _generatePointsArray) before any triangle is touched.
+  describe('when the mesh ceiling is tuned far above the triangle ceiling', () => {
+    const OLD_ENV = process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+    let isolatedProcessRaycasts: typeof processRaycasts
+
+    beforeEach(() => {
+      process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME = '10000000'
+      jest.resetModules()
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      isolatedProcessRaycasts = require('../../../../../src/lib/babylon/scene/logic/raycasts').processRaycasts
+    })
+
+    afterEach(() => {
+      if (OLD_ENV === undefined) delete process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+      else process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME = OLD_ENV
+      jest.resetModules()
+    })
+
+    it('should bill a cheap collider at the box floor rather than its two triangles', () => {
+      // 60k planes: 720k at the floor (over the 600k ceiling), but only 120k if each
+      // is billed its real triangle count — in which case this raycast would run and
+      // report a hit instead of being refused.
+      const meshes = new Array(60_000).fill(plane)
+      const pending = new Set<number>([1])
+      const results: any[] = []
+
+      isolatedProcessRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+
+      expect(results[0]?.hits).toEqual([])
+    })
+  })
+
   it('processes only as many raycasts as the 50k budget allows and leaves the rest pending', () => {
-    // 30k meshes per raycast against a 50k budget: raycast #1 spends 30k (20k
-    // left), #2 spends another 30k (budget goes negative), #3+ hit the guard and
-    // stay pending for a later frame.
+    // 30k meshes per raycast against a 50k budget: #1 spends 30k leaving 20k, and
+    // #2 would need another 30k, so it is deferred BEFORE running rather than
+    // allowed to overshoot. (The budget used to be charged after the fact and was
+    // permitted to go negative, so a second raycast ran every frame no matter how
+    // far past the ceiling it took the frame.)
     // PLANES (2 triangles each), so 30k meshes is 60k triangles and the triangle
     // ceiling stays far out of the way — this test is about the MESH ceiling, and
     // with boxes the triangle ceiling would bind first and mask it.
@@ -103,10 +189,26 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
 
     processRaycasts(makeFakeScene(pending, meshes, undefined, (id) => processed.push(id)))
 
-    // Exactly two raycasts fit in the budget this frame...
-    expect(processed).toEqual([1, 2])
-    // ...and the remaining one-shot raycasts are left pending (not silently dropped).
-    expect(Array.from(pending).sort()).toEqual([3, 4, 5])
+    // Only what fits whole runs this frame...
+    expect(processed).toEqual([1])
+    // ...and the rest are left pending (not silently dropped).
+    expect(Array.from(pending).sort()).toEqual([2, 3, 4, 5])
+  })
+
+  // Mirrors the triangle ceiling's over-budget path. A scene of CHEAP colliders
+  // passes the triangle ceiling easily (60k planes is 120k triangles, well under
+  // 600k) while its candidate count alone exceeds the mesh ceiling — and the
+  // bounding-box scan that count pays for is O(candidates), so it has to be
+  // stopped before the scan, not after.
+  it('answers a raycast over the whole mesh ceiling with an empty result', () => {
+    const meshes = new Array(60_000).fill(plane)
+    const pending = new Set<number>([1])
+    const results: any[] = []
+
+    processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+
+    expect(Array.from(pending)).toEqual([])
+    expect(results[0]?.hits).toEqual([])
   })
 
   // The mesh ceiling assumes every mesh costs about the same, which held while every

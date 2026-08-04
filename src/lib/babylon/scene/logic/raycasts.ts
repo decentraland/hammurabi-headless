@@ -55,6 +55,14 @@ const MAX_RAYCAST_INTERSECTIONS_PER_FRAME = limits.maxRaycastIntersectionsPerFra
 const MAX_RAYCAST_TRIANGLES_PER_FRAME = limits.maxRaycastTrianglesPerFrame // HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
 
 /**
+ * Minimum triangle cost billed for any candidate mesh — the triangle count of the
+ * box collider the ceiling above was calibrated against. Deliberately not a knob:
+ * it is not a policy choice but a property of how that default was derived
+ * (50_000 boxes x 12 triangles), so the two must move together or not at all.
+ */
+const TRIANGLE_COST_FLOOR = 12
+
+/**
  * The processRaycasts function iterates over a copy of the pendingRaycastOperations
  * and for each it does
  * 1. It performs the final ray transformations based on the final positions of the entities
@@ -73,6 +81,34 @@ export function processRaycasts(scene: SceneContext) {
     let meshes = meshesByMask.get(mask)
     if (!meshes) {
       meshes = Array.from(pickMeshesForMask(scene.rootNode, mask))
+      // Refresh world matrices ONCE per mask per frame, before anything reads
+      // `minimumWorld`/`maximumWorld` off these meshes.
+      //
+      // Load-bearing for correctness, not tidiness. `computeWorldMatrix` only
+      // marks the bounds dirty; `getBoundingInfo()` re-derives them from the
+      // CACHED world matrix. So a mesh whose matrix the render pass did not
+      // recompute this frame reports the box it had when it was last evaluated.
+      // That is not hypothetical: `_evaluateActiveMeshes` skips anything
+      // `!isEnabled()` or `isBlocked`, `scene-culling.ts` disables the whole
+      // scene root when it leaves the frustum, AssetManager marks glTF meshes
+      // blocked in exactly that case — and `pickMeshesForMask` keeps offering
+      // them as raycast candidates regardless. Meanwhile `computeRayDirection`
+      // reads a FRESH matrix for the ray's own entity, so the ray moves and the
+      // colliders do not: a collider moved into the ray's path answers a false
+      // miss. The path this prefilter replaced never hit this, because
+      // `Ray.intersectsMesh` calls `getWorldMatrix()` per mesh and tests in
+      // LOCAL space.
+      //
+      // `computeWorldMatrix(false)`, not `getWorldMatrix()`: the latter gates on
+      // the render id and so does nothing when called within the frame that
+      // already bumped it. Not `(true)` either — forcing the whole parent chain
+      // costs ~122ns against ~16ns and buys nothing.
+      //
+      // Centralized here rather than in the per-raycast prefilter loop because
+      // this runs once per mask per frame while that loop runs once per raycast:
+      // measured at 5000 meshes and 50 raycasts, 9.45ms here versus 16.71ms
+      // there.
+      for (const mesh of meshes) mesh.computeWorldMatrix(false)
       meshesByMask.set(mask, meshes)
     }
     return meshes
@@ -100,7 +136,30 @@ export function processRaycasts(scene: SceneContext) {
         const intersectableMeshes = meshesForMask(mask)
 
         // The MESH ceiling pays for the bounding-box scan below: one cheap
-        // ray↔box test per candidate, whether or not it survives.
+        // ray↔box test per candidate, whether or not it survives. Enforced
+        // per-raycast BEFORE that scan, exactly as the triangle ceiling is
+        // enforced before the triangle work — the scan is O(candidates) and a
+        // scene of CHEAP colliders (a plane is 2 triangles) sails past the
+        // triangle ceiling while blowing this one. Note the scan itself is not
+        // new: `intersectsMeshes` always tested every mesh's bounds one by one,
+        // so this cost predates the prefilter; what is new is that it is now
+        // measured before it is paid instead of after.
+        if (intersectableMeshes.length > MAX_RAYCAST_INTERSECTIONS_PER_FRAME) {
+          limitLogger.hit(
+            'maxRaycastIntersectionsPerFrame',
+            `scene ${scene.entityId}: one raycast spans ${intersectableMeshes.length} colliders`
+          )
+          RaycastResult.createOrReplace(
+            entity.entityId,
+            raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
+          )
+          scene.pendingRaycastOperations.delete(entityId)
+          continue
+        }
+
+        // Fits in a frame, but not in what is left of this one — defer it whole.
+        if (intersectableMeshes.length > intersectionBudget) break
+
         intersectionBudget -= intersectableMeshes.length
 
         // Bounding-box prefilter, charged separately from the triangle work it
@@ -117,15 +176,27 @@ export function processRaycasts(scene: SceneContext) {
         // calling it. Handing it a world-space ray silently admits every mesh
         // whose local bounds contain the scene origin — i.e. every primitive
         // collider — so the filter passes everything and quietly does nothing.
-        // The world AABB encloses the oriented box Babylon tests, so this is
-        // conservative: it can over-admit a grazing mesh, never wrongly reject.
+        // The world AABB encloses the oriented box Babylon tests, so a CURRENT
+        // one is conservative: it can over-admit a grazing mesh, never wrongly
+        // reject. A STALE one rejects freely in both directions, which is why
+        // meshesForMask refreshes every matrix before this runs.
         const candidates: BABYLON.AbstractMesh[] = []
         let candidateTriangles = 0
         for (const mesh of intersectableMeshes) {
           const boundingBox = mesh.getBoundingInfo().boundingBox
           if (ray.intersectsBoxMinMax(boundingBox.minimumWorld, boundingBox.maximumWorld)) {
             candidates.push(mesh)
-            candidateTriangles += mesh.getTotalIndices() / 3
+            // Floored at the box cost the budget was tuned against. Triangles are
+            // not the whole price of a candidate: `Ray.intersectsMesh` inverts a
+            // world matrix, transforms the ray, allocates a PickingInfo and calls
+            // `_generatePointsArray` before it looks at a single triangle.
+            // Measured, that fixed cost dominates for cheap shapes — 100k PLANES
+            // (2 triangles each) take 241ms, i.e. 2.41us/mesh, against ~2us/mesh
+            // for boxes. Charging a plane its 2 triangles undercharges it ~32x, so
+            // a plane scene could buy ~32x the frame time of the box scene the
+            // 600_000 default was derived from (50_000 x 12). The floor makes the
+            // two agree by construction.
+            candidateTriangles += Math.max(mesh.getTotalIndices() / 3, TRIANGLE_COST_FLOOR)
           }
         }
 
