@@ -1158,14 +1158,21 @@ export function createAvatarCommunicationSystem(
      *    long as it stays connected. There is no staleness timeout — standing still is
      *    the normal reason a client sends nothing.
      *
+     * `entity` is the allocated avatar entity. Peer entity ids are generationally
+     * versioned, so a RECONNECT gets a different id for the same address — which is the
+     * only thing that distinguishes "still here" from "left and came back" for a caller
+     * that only ever sees whole snapshots (the address alone does not: a disconnect and
+     * a reconnect between two frames leave it present in both).
+     *
      * Returns a snapshot: the caller must not retain the vectors, which are
      * reused in place as packets arrive.
      */
-    listKnownPeers(): Array<{ address: string; worldPosition: Vector3 | null; profile: any | null }> {
-      const result: Array<{ address: string; worldPosition: Vector3 | null; profile: any | null }> = []
-      for (const address of ownedEntities.keys()) {
+    listKnownPeers(): Array<{ address: string; entity: Entity; worldPosition: Vector3 | null; profile: any | null }> {
+      const result: Array<{ address: string; entity: Entity; worldPosition: Vector3 | null; profile: any | null }> = []
+      for (const [address, entity] of ownedEntities) {
         result.push({
           address,
+          entity,
           worldPosition: lastWorldPosition.get(address) ?? null,
           profile: profileCache.get(address)?.profile ?? null
         })

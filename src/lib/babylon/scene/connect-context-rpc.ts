@@ -352,14 +352,21 @@ export function connectContextToRpcServer(port: RpcServerPort<SceneContext>) {
   }))
 
   registerService(port, EngineApiServiceDefinition, async () => ({
-    async subscribe() {
-      throw new Error('not implemented')
+    async subscribe(req, context) {
+      // Through the context, not straight into the queue: the scene's first
+      // peer-event subscription is also when the current room is snapshotted.
+      context.subscribeObservableEvent(req.eventId)
+      return {}
     },
-    async unsubscribe() {
-      throw new Error('not implemented')
+    async unsubscribe(req, context) {
+      context.observableEvents.unsubscribe(req.eventId)
+      return {}
     },
-    async sendBatch() {
-      return { events: [] }
+    async sendBatch(_req, context) {
+      // The legacy SDK6 `actions` on ManyEntityAction are intentionally ignored:
+      // this server only speaks the CRDT protocol, and SDK7 scenes use sendBatch
+      // purely as the poll that drains observable events.
+      return { events: context.observableEvents.drain() }
     },
     async crdtGetMessageFromRenderer() {
       throw new Error('not implemented')
