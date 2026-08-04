@@ -1,3 +1,13 @@
+// ASSERTION STYLE — do not hand a Babylon mesh or material to a matcher.
+// `toBe`/`toEqual`/`toBeUndefined` pretty-print their operands on failure, and
+// pretty-format walks a Babylon node's whole object graph: measured at 2,572,921
+// characters for ONE mesh in a 2-mesh scene and 36,249,465 in a 22-mesh one, so the
+// cost scales with the SCENE rather than the value under test. In the sibling
+// collider spec that was enough to kill the jest worker with a heap OOM and emit no
+// report at all — a mutation was misrecorded as SURVIVING because jest never wrote
+// its JSON. Compare references with `===` and assert the boolean, or assert a
+// scalar (name, length, count). A failure you cannot read is not a test.
+
 import { AbstractMesh, VertexBuffer } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { PBMeshCollider } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
@@ -115,7 +125,7 @@ testWithEngine(
         // Without a parent the mesh is not under the scene rootNode, so it is outside
         // the subtree culling, picking and raycasts traverse.
         it('should attach the mesh to the entity', () => {
-          expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+          expect(meshOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
         })
 
         it('should default the top radius to 0.5', () => {
@@ -143,7 +153,7 @@ testWithEngine(
         // this is entirely setMeshRendererMaterial's doing and a truthiness check
         // could not tell the two sources apart.
         it('should be given the shared base material by setMeshRendererMaterial', () => {
-          expect(meshOf(entity)!.material).toBe(baseMaterial($.scene))
+          expect(meshOf(entity)!.material === baseMaterial($.scene)).toBe(true)
         })
       })
 
@@ -271,7 +281,7 @@ testWithEngine(
       // Unparented, the mesh is outside the scene rootNode subtree that culling,
       // picking and raycasts walk — present in the scene and reachable by nothing.
       it('should attach the mesh to the entity', () => {
-        expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+        expect(meshOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
     })
 
@@ -300,7 +310,7 @@ testWithEngine(
       })
 
       it('should attach the mesh to the entity', () => {
-        expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+        expect(meshOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
 
       describe('and the same entity also carries a MeshCollider with a sphere', () => {
@@ -356,7 +366,7 @@ testWithEngine(
       })
 
       it('should attach the mesh to the entity', () => {
-        expect(meshOf(entity)!.parent).toBe($.ctx.entities.get(entity))
+        expect(meshOf(entity)!.parent === $.ctx.entities.get(entity)).toBe(true)
       })
 
       describe('and the scene supplies its own UV map', () => {
@@ -398,7 +408,10 @@ testWithEngine(
       // Material PUT — and blocks the next MeshRenderer PUT's own clear from
       // finding a live mesh to dispose.
       it('should clear the applied component so no stale reference to the disposed mesh remains', () => {
-        expect($.ctx.entities.get(entity)!.appliedComponents.meshRenderer).toBeUndefined()
+        // `=== undefined`, not `'meshRenderer' in …`: the applier ASSIGNS undefined
+        // rather than deleting the key, so the `in` check is true and asserts the
+        // opposite of what this test is named for.
+        expect($.ctx.entities.get(entity)!.appliedComponents.meshRenderer === undefined).toBe(true)
       })
     })
   }
