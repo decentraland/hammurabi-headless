@@ -21,7 +21,17 @@ const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
 // host render loop for hundreds of ms to seconds per frame. When the budget is
 // exhausted the remaining raycasts are left pending and processed on later frames
 // (continuous ones re-run anyway; one-shot ones simply resolve a frame or two later).
-const MAX_RAYCAST_INTERSECTIONS_PER_FRAME = limits.maxRaycastIntersectionsPerFrame // HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+// Read from `limits` per call rather than hoisted into a module constant. Both
+// ceilings are operator knobs, and a test that needs them tuned apart would
+// otherwise have to `jest.resetModules()` + re-`require` this module to rebind
+// them — which silently loads a SECOND copy of @babylonjs/core AND of
+// `logic/colliders`, whose module-scope `Symbol('isCollider')` then no longer
+// matches the one every already-tagged mesh carries. Verified: `getColliderLayers`
+// returns 0 across that boundary, so the real `pickMeshesForMask` predicate would
+// reject every candidate and a test asserting "no hits" would pass for entirely
+// the wrong reason. Reading the field here lets a test assign `limits.<knob>` and
+// restore it, with no module duplication. The per-call cost is two property reads
+// per frame.
 /**
  * Companion ceiling counted in TRIANGLES, not meshes.
  *
@@ -52,7 +62,6 @@ const MAX_RAYCAST_INTERSECTIONS_PER_FRAME = limits.maxRaycastIntersectionsPerFra
  *     frame, never truncated (a partial mesh set resolves the wrong NEAREST hit
  *     and would look authoritative).
  */
-const MAX_RAYCAST_TRIANGLES_PER_FRAME = limits.maxRaycastTrianglesPerFrame // HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
 
 /**
  * Minimum triangle cost billed for any candidate mesh — the triangle count of the
@@ -161,8 +170,10 @@ export function processRaycasts(scene: SceneContext) {
     }
     return meshes
   }
-  let intersectionBudget = MAX_RAYCAST_INTERSECTIONS_PER_FRAME
-  let triangleBudget = MAX_RAYCAST_TRIANGLES_PER_FRAME
+  const maxIntersectionsPerFrame = limits.maxRaycastIntersectionsPerFrame // HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+  const maxTrianglesPerFrame = limits.maxRaycastTrianglesPerFrame // HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
+  let intersectionBudget = maxIntersectionsPerFrame
+  let triangleBudget = maxTrianglesPerFrame
 
   // clone the set into an array to mutate the set while iterating
   const iter = Array.from(scene.pendingRaycastOperations)
@@ -199,7 +210,7 @@ export function processRaycasts(scene: SceneContext) {
         // retired a continuous raycast after a single empty result: nothing
         // re-arms it except the scene re-PUTting the component, so it stayed
         // dead even once the collider set dropped back under budget.
-        if (intersectableMeshes.length > MAX_RAYCAST_INTERSECTIONS_PER_FRAME) {
+        if (intersectableMeshes.length > maxIntersectionsPerFrame) {
           // Charged even though no scan runs. A retained continuous raycast
           // arrives here again next frame, and getting here is not free —
           // `meshesForMask` walked the whole subtree and swept every world
@@ -252,7 +263,7 @@ export function processRaycasts(scene: SceneContext) {
             }
           }
 
-          if (candidateTriangles > MAX_RAYCAST_TRIANGLES_PER_FRAME) {
+          if (candidateTriangles > maxTrianglesPerFrame) {
             // Cannot fit on ANY frame, so answer explicitly rather than deferring
             // it forever: an empty result plus a throttled log. Bounded AND
             // observable — unlike testing a PARTIAL mesh set, which would resolve

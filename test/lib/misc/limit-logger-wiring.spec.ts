@@ -163,6 +163,62 @@ describe('limit logging wiring', () => {
     }
   })
 
+  // The sibling of the mesh-ceiling case above. Both raycast keys report from the
+  // same function a few lines apart, so transposing them is the easy mistake — and
+  // covering only one of the two is what let that go unnoticed.
+  it('reports the maxRaycastTrianglesPerFrame key when one raycast spans too many triangles', () => {
+    const hit = jest.fn()
+    jest.resetModules()
+    jest.doMock(LIMIT_LOGGER_PATH, () => ({ limitLogger: { hit } }))
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const BABYLON = require('@babylonjs/core')
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { processRaycasts } = require(RAYCASTS_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { raycastComponent, raycastResultComponent } = require(RAYCAST_COMPONENT_PATH)
+
+    const engine = new BABYLON.NullEngine()
+    const scene = new BABYLON.Scene(engine)
+    try {
+      const sphere = BABYLON.MeshBuilder.CreateSphere('s_collider', { diameter: 1, segments: 16 }, scene)
+      sphere.position.set(0, 0, 50)
+      sphere.computeWorldMatrix(true)
+      // 1296 triangles each: 600 spheres is 777_600, past the 600_000 ceiling, while
+      // 600 candidates is ~1% of the mesh ceiling — so only the triangle guard fires.
+      const meshes = new Array(600).fill(sphere)
+      const raycast = {
+        queryType: 0,
+        continuous: false,
+        timestamp: 0,
+        collisionMask: undefined,
+        direction: undefined,
+        originOffset: undefined
+      }
+      processRaycasts({
+        currentTick: 0,
+        entityId: 'logger-spec',
+        rootNode: { position: BABYLON.Vector3.Zero(), getChildMeshes: () => meshes },
+        pendingRaycastOperations: new Set([1]),
+        components: {
+          [raycastComponent.componentId]: { getOrNull: () => raycast },
+          [raycastResultComponent.componentId]: { createOrReplace: () => undefined }
+        },
+        getEntityOrNull: (id: number) => ({
+          entityId: id,
+          appliedComponents: {
+            raycast: { ray: new BABYLON.Ray(BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 999) }
+          },
+          getWorldMatrix: () => BABYLON.Matrix.Identity()
+        })
+      })
+
+      expect(hit).toHaveBeenCalledWith('maxRaycastTrianglesPerFrame', expect.stringContaining('triangles'))
+    } finally {
+      scene.dispose()
+      engine.dispose()
+    }
+  })
+
   it('stays silent when every cylinder radius is within bounds', () => {
     const hit = jest.fn()
     jest.resetModules()

@@ -2,6 +2,7 @@ import * as BABYLON from '@babylonjs/core'
 import { Ray, Vector3, Matrix } from '@babylonjs/core'
 import { RaycastQueryType } from '@dcl/protocol/out-js/decentraland/sdk/components/raycast.gen'
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
+import { limits } from '../../../../../src/lib/misc/limits'
 import { raycastComponent, raycastResultComponent } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
 
 // processRaycasts discovers the meshes to test against via
@@ -17,6 +18,8 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   let sphere: BABYLON.Mesh
   let plane: BABYLON.Mesh
   let sphereOffAxis: BABYLON.Mesh
+  let nearCollider: BABYLON.Mesh
+  let farCollider: BABYLON.Mesh
 
   beforeAll(() => {
     engine = new BABYLON.NullEngine()
@@ -36,7 +39,14 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     plane.computeWorldMatrix(true)
     // Far off the ray's path: its bounding box is never entered, so it must cost
     // the triangle budget nothing however many times it is repeated.
-    sphereOffAxis = BABYLON.MeshBuilder.CreateSphere('far_collider', { diameter: 1, segments: 16 }, scene)
+    // Two boxes on the ray at different distances, for the nearest-hit tests.
+    nearCollider = BABYLON.MeshBuilder.CreateBox('near_collider', { size: 1 }, scene)
+    nearCollider.position.set(0, 0, 20)
+    nearCollider.computeWorldMatrix(true)
+    farCollider = BABYLON.MeshBuilder.CreateBox('far_collider', { size: 1 }, scene)
+    farCollider.position.set(0, 0, 80)
+    farCollider.computeWorldMatrix(true)
+    sphereOffAxis = BABYLON.MeshBuilder.CreateSphere('far_offaxis_collider', { diameter: 1, segments: 16 }, scene)
     sphereOffAxis.position.set(5000, 0, 50)
     sphereOffAxis.computeWorldMatrix(true)
   })
@@ -96,22 +106,25 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   // separately observable when an operator tunes them apart — which they can, the
   // knobs are independent — so these two cases re-import the module with a generous
   // triangle ceiling to isolate it. `limits` is a singleton read at import, hence
-  // resetModules + require rather than a plain import.
+  // `limits` is a plain object read once at import, so a test can override a field
+  // and put it back — no module reload needed.
   describe('when the triangle ceiling is tuned far above the mesh ceiling', () => {
-    const OLD_ENV = process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
-    let isolatedProcessRaycasts: typeof processRaycasts
+    let restore: number
 
     beforeEach(() => {
-      process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME = '100000000'
-      jest.resetModules()
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      isolatedProcessRaycasts = require('../../../../../src/lib/babylon/scene/logic/raycasts').processRaycasts
+      // Assign the knob directly. This used to `jest.resetModules()` + re-`require`
+      // the module, which also loaded a second @babylonjs/core and a second
+      // `logic/colliders` whose fresh `Symbol('isCollider')` makes
+      // `getColliderLayers` return 0 for every already-tagged mesh — so a test
+      // using the REAL mask predicate would see zero candidates and its "no hits"
+      // assertion would pass for the wrong reason. processRaycasts reads `limits`
+      // per call, so this is enough.
+      restore = limits.maxRaycastTrianglesPerFrame
+      limits.maxRaycastTrianglesPerFrame = 100_000_000
     })
 
     afterEach(() => {
-      if (OLD_ENV === undefined) delete process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
-      else process.env.HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME = OLD_ENV
-      jest.resetModules()
+      limits.maxRaycastTrianglesPerFrame = restore
     })
 
     it('should defer a raycast that does not fit the remaining mesh ceiling', () => {
@@ -119,7 +132,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const pending = new Set<number>([1, 2, 3])
       const processed: number[] = []
 
-      isolatedProcessRaycasts(makeFakeScene(pending, meshes, undefined, (id) => processed.push(id)))
+      processRaycasts(makeFakeScene(pending, meshes, undefined, (id) => processed.push(id)))
 
       // 30k spends the budget down to 20k; the second needs 30k, so it waits.
       expect(processed).toEqual([1])
@@ -132,7 +145,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const processed: number[] = []
       const pending = new Set<number>([1, 2])
 
-      isolatedProcessRaycasts(
+      processRaycasts(
         makeFakeSceneWithPerEntityMeshes(
           pending,
           { 1: { meshes: new Array(60_000).fill(plane) }, 2: { meshes: [plane] } },
@@ -147,7 +160,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     it('should keep a CONTINUOUS raycast pending after refusing it on the mesh ceiling', () => {
       const pending = new Set<number>([1])
 
-      isolatedProcessRaycasts(
+      processRaycasts(
         makeFakeSceneWithPerEntityMeshes(
           pending,
           { 1: { meshes: new Array(60_000).fill(plane), continuous: true } },
@@ -165,7 +178,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const pending = new Set<number>([1])
       const results: any[] = []
 
-      isolatedProcessRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+      processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
 
       expect(results[0]?.hits).toEqual([])
       expect(Array.from(pending)).toEqual([])
@@ -179,20 +192,15 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   // cost, because `Ray.intersectsMesh` pays a fixed per-mesh price (matrix invert,
   // ray transform, PickingInfo, _generatePointsArray) before any triangle is touched.
   describe('when the mesh ceiling is tuned far above the triangle ceiling', () => {
-    const OLD_ENV = process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
-    let isolatedProcessRaycasts: typeof processRaycasts
+    let restore: number
 
     beforeEach(() => {
-      process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME = '10000000'
-      jest.resetModules()
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      isolatedProcessRaycasts = require('../../../../../src/lib/babylon/scene/logic/raycasts').processRaycasts
+      restore = limits.maxRaycastIntersectionsPerFrame
+      limits.maxRaycastIntersectionsPerFrame = 10_000_000
     })
 
     afterEach(() => {
-      if (OLD_ENV === undefined) delete process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
-      else process.env.HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME = OLD_ENV
-      jest.resetModules()
+      limits.maxRaycastIntersectionsPerFrame = restore
     })
 
     it('should bill a cheap collider at the box floor rather than its two triangles', () => {
@@ -203,7 +211,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const pending = new Set<number>([1])
       const results: any[] = []
 
-      isolatedProcessRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+      processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
 
       expect(results[0]?.hits).toEqual([])
     })
@@ -350,19 +358,15 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   let currentMeshes: BABYLON.AbstractMesh[] = []
 
   // NOTE: there are deliberately no default-knob tests for the MESH ceiling here.
-  // Two used to sit at this spot, named for it, and both passed with the entire
-  // mesh ceiling deleted — verified by mutation. Every candidate is billed at least
-  // TRIANGLE_COST_FLOOR (12) and the triangle default is exactly 50_000 x 12, so at
-  // default knobs no candidate set can reach the mesh ceiling without having already
-  // reached the triangle one. There is no shape cheaper than the floor, which makes
-  // the mesh ceiling unobservable by construction here. Its real coverage lives in
-  // the "tuned far above" describe below, which separates the two knobs.
-
-  // Mirrors the triangle ceiling's over-budget path. A scene of CHEAP colliders
-  // passes the triangle ceiling easily (60k planes is 120k triangles, well under
-  // 600k) while its candidate count alone exceeds the mesh ceiling — and the
-  // bounding-box scan that count pays for is O(candidates), so it has to be
-  // stopped before the scan, not after.
+  // One used to sit beside this and was deleted: it claimed 30k planes are 60k
+  // triangles, but every candidate is billed at least TRIANGLE_COST_FLOOR (12), so
+  // it was 360k and tripped the TRIANGLE guards while being named for the mesh one.
+  //
+  // The test below is NOT in that category, despite the same arithmetic caveat
+  // (60k planes bill 720k, over both ceilings). Removing the mesh guard makes an
+  // over-ceiling raycast defer forever instead of answering, which it detects —
+  // verified by mutation. Which ceiling REFUSED is still ambiguous here, so the
+  // knob-separated coverage below is what pins the mesh ceiling specifically.
   it('answers a raycast over the whole mesh ceiling with an empty result', () => {
     const meshes = new Array(60_000).fill(plane)
     const pending = new Set<number>([1])
@@ -417,6 +421,50 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   // Babylon rejects a mesh whose bounding box the ray misses before touching a
   // triangle, so charging every candidate's triangles would bill a scene for
   // colliders its ray never approaches.
+  // Every other test in this file resolves at most ONE hit, so the whole result
+  // envelope is unexercised: RQT_QUERY_ALL never runs, and pickClosest cannot be
+  // told apart from "take the first" or "take the last". Two colliders at different
+  // distances, fed FAR-FIRST so ordering is not accidentally satisfied by input
+  // order, is what separates them.
+  describe('when two colliders lie on the ray at different distances', () => {
+    let farFirst: BABYLON.AbstractMesh[]
+
+    beforeEach(() => {
+      farFirst = [farCollider, nearCollider]
+    })
+
+    it('should report only the nearest hit for RQT_HIT_FIRST', () => {
+      const results: any[] = []
+      processRaycasts(makeFakeSceneCapturing(new Set<number>([1]), farFirst, undefined, (r) => results.push(r)))
+
+      expect(results[0].hits.map((hit: any) => hit.meshName)).toEqual(['near_collider'])
+    })
+
+    it('should report every hit for RQT_QUERY_ALL', () => {
+      const results: any[] = []
+      const fake = makeFakeSceneCapturing(new Set<number>([1]), farFirst, undefined, (r) => results.push(r))
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+
+      processRaycasts(fake)
+
+      expect(results[0].hits.map((hit: any) => hit.meshName).sort()).toEqual(['far_collider', 'near_collider'])
+    })
+
+    // NOTE for anyone mutation-testing this file: replacing `pickClosest(results)`
+    // with `results[0]` is an EQUIVALENT mutant, not a gap. Babylon's
+    // `intersectsMeshes` ends with `results.sort(this._comparePickingInfo)`, so the
+    // nearest hit is always index 0 whatever order the candidates were fed in
+    // (verified: input [far, near] returns [near@19.5, far@79.5]). `pickClosest`
+    // is defensive, and no input can distinguish the two.
+    it('should report the nearest hit distance, not the first tested', () => {
+      const results: any[] = []
+      processRaycasts(makeFakeSceneCapturing(new Set<number>([1]), farFirst, undefined, (r) => results.push(r)))
+
+      // near_collider sits at z=20 with a 0.5 half-extent.
+      expect(results[0].hits[0].length).toBeCloseTo(19.5, 1)
+    })
+  })
+
   it('does not charge triangles for colliders the ray never approaches', () => {
     // 2000 spheres parked off the ray's path (2.59M triangles, four times the whole
     // frame budget) plus ONE on the path. Asserting a real HIT is what makes this
