@@ -69,11 +69,50 @@ console.log('Headless scene running:', !!scene)
 - **Avatar Renderer** - Multiplayer entities without UI textures
 
 ### Scene Support  
-- **ECS7 Scenes** - Full Decentraland SDK7 compatibility
-- **Component Systems** - Transform, mesh, avatar, pointer events
+- **ECS7 Scenes** - Runs SDK7 scene bundles against a subset of the SDK
+  component set (see below)
+- **Component Systems** - Transform, mesh renderer/collider, glTF, material,
+  animator, billboard, raycast, hover-only pointer events, remote-avatar entity
+  data and realm/engine info
 - **CRDT Protocol** - Entity state synchronization
-- **Asset Loading** - Models, textures, audio (headless)
+- **Asset Loading** - glTF/GLB models and their textures
 - **Spatial Queries** - Raycasting and collision detection
+
+> **Not a full client.** 20 of the 60 SDK components are implemented, and most of
+> what is missing is the render/UI/audio side a headless server has no use for
+> (`UiTransform` and friends, `TextShape`, `NftShape`,
+> `AudioSource`/`AudioStream`, `VideoPlayer`, `LightSource`, `ParticleSystem`).
+> Some absent ones do affect scene logic, though — notably `TriggerArea`/
+> `TriggerAreaResult`, `AvatarAttach` and `CameraMode`. Scene code that depends on
+> those will run, but will never observe the state it is waiting for.
+>
+> Three gaps are sharper than "not implemented", because the component **is**
+> registered (and counted above) yet nothing acts on it:
+>
+> - **`Tween` (1102) is never applied.** Its store exists in `SceneContext` and a
+>   scene's writes are stored, but the `applyTween` call in `BabylonEntity` sits
+>   inside a commented-out branch, and `logic/easings.ts` has no importers at all
+>   (dead code). A scene using Tween sees nothing move — not merely "never observes
+>   completion". `TweenState`/`TweenSequence` are absent on top of that.
+> - **`AvatarShape` (1080) is an explicit no-op**: the data lives in the CRDT so
+>   game logic can read it, but there is no renderer behind it.
+> - **Pointer events are hover-only.** `PET_HOVER_ENTER`/`PET_HOVER_LEAVE` are
+>   synthesised every frame from a centre-screen pick, but `PET_DOWN`/`PET_UP`
+>   come only from Babylon `ActionManager` keyboard triggers registered in
+>   `src/lib/babylon/input.ts`, which never fire under NullEngine with no canvas
+>   or input device.
+>
+> There is no audio or video **media**: the LiveKit transport never subscribes to
+> remote tracks and `setVoicePosition` is a no-op. The rfc4 voice-packet plumbing
+> does exist, but nothing consumes it — `CommsTransportWrapper.sendVoiceMessage`
+> has no callers, the `voiceMessage` event it emits has no listeners, and the
+> `voiceChatAvailable`/`mutedMicrophone` atoms in `state.ts` are never read.
+>
+> Counting: the denominator is the 59 components `@dcl/protocol` declares via the
+> `ecs_component_id` option plus `Transform` (id 1), which ships as `Transform.md`
+> rather than a `.proto`. The numerator is the 17 component stores registered in
+> `scene-context.ts` plus `PlayerIdentityData`, `AvatarEquippedData` and
+> `AvatarEmoteCommand`, which only the avatar virtual scene writes.
 
 ## Development
 

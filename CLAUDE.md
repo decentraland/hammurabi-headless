@@ -328,15 +328,72 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 - **Adapter System** (`src/lib/decentraland/communications/connect-adapter.ts`)
   - `connectLocalAdapter`: Local preview via comms-gatekeeper
   - `connectGenesisAdapter`: Production Genesis City connections
+  - `connectWorldsAdapter`: Decentraland Worlds scenes
   - `connectProductionAdapter`: Flexible production realm connections
-  - Protocol support: livekit, ws-room, offline, signed-login
-- **Comms Gatekeeper URLs**:
-  - Local: `https://comms-gatekeeper-local.decentraland.org`
-  - Production: `https://comms-gatekeeper.decentraland.zone`
+  - `connectAdapter`: dispatches on the adapter string's protocol prefix
+  - Adapter protocols understood by `connectAdapter`: `livekit` and `offline`
+    only. A `ws-room:` or `signed-login:` adapter string throws
+    ("A communications adapter could not be created for protocol=…"). Realms
+    advertising those in `/about`'s `comms.fixedAdapter` are NOT supported.
+  - **In practice only a `livekit:` fixedAdapter actually works.** `offline:` is
+    accepted by `connectAdapter`, but the adapter it returns has
+    `desiredTransports: Atom([{ url: '', … }])` — and `scene-comms.ts` feeds that
+    empty string straight to `connectTransport`, which throws
+    "A communications transport could not be created for protocol=" (empty
+    protocol). So `offline:` fails one step later than `ws-room:`/`signed-login:`
+    and with a different message, not successfully.
+- **Transports** (`connect-transport.ts` → `transports/`)
+  - **`livekit` is the only transport that can be constructed.** `offline.ts`
+    exists but is reachable only through the local-preview fallback in
+    `scene-comms.ts` (when the gatekeeper handshake fails), never via
+    `connectTransport`. There is no ws-room transport.
+- **Comms Gatekeeper URLs**: the non-local URL is environment-derived
+  (`getCommsGatekeeperUrl`, `environment.ts`) — `decentraland.org` by default,
+  `decentraland.zone` under `--env=zone`. It is not a fixed `.zone` host.
+  - Local preview: `https://comms-gatekeeper-local.decentraland.org/get-server-scene-adapter`
+  - Otherwise: `https://comms-gatekeeper.${domain}/get-server-scene-adapter`
 
 **RPC Services (`src/lib/babylon/scene/connect-context-rpc.ts`)**
 - Scene-kernel communication via RPC protocol
-- Service definitions: Runtime, Permissions, UserIdentity, PortableExperiences, CommsApi
+- The installed @dcl/protocol declares **18** kernel API services; this server
+  registers **9** and leaves **9** unregistered.
+  - Registered (8 here + `Testing`, registered separately in `nodejs-runtime.ts`):
+    `EngineApi`, `Runtime`, `UserIdentity`, `UserActionModule`,
+    `RestrictedActions`, `CommunicationsController`, `CommsApi`, `SignedFetch`,
+    `Testing`.
+  - NOT registered — the complete list: `Permissions`, `PortableExperiences`,
+    `EnvironmentApi`, `EthereumController`, `Players`, `Scene`, `ParcelIdentity`,
+    `DevTools`, `SocialController`.
+  - `common-runtime/modules.ts` is the matching scene-side list (the same 9): a
+    `require()` of any module not in that switch throws `Unknown module <name>`.
+- Registration is NOT a promise that the call resolves, and a resolved call is
+  NOT a promise that anything happened. Both directions have exceptions, and what
+  the scene observes is decided by the protobuf RESPONSE message, not by what the
+  handler returns:
+  - **Registered but rejecting:** three `EngineApi` methods `throw new
+    Error('not implemented')` — `subscribe`, `unsubscribe` and
+    `crdtGetMessageFromRenderer` (all three are `@deprecated` SDK6 legacy).
+    `sendBatch` resolves, with an empty event list.
+  - **`RestrictedActions` never acts**, but only some of it reports success.
+    `movePlayerTo` (`MovePlayerToResponse` has a `success` field) and the six
+    `SuccessResponse` methods — `changeRealm`, `openExternalUrl`, `openNftDialog`,
+    `setCommunicationsAdapter`, `triggerSceneEmote`, `stopEmote` — do deliver
+    `success: true`. `teleportTo` and `triggerEmote` return `{ success: true }` in
+    the handler, but `TeleportToResponse`/`TriggerEmoteResponse` are EMPTY protobuf
+    messages, so the field is dropped on the wire and the scene decodes `{}`.
+    `copyToClipboard` returns `{}` on both sides (`EmptyResponse`).
+    (The handler also defines `requestTeleport`, `showAvatarEmoteWheel` and
+    `showAvatarExpressionsWheel`, which this @dcl/protocol does not declare —
+    `codegen.registerService` binds only declared methods, so they are dead.)
+  - **Silent no-ops beyond `RestrictedActions`:** `Runtime.getWorldTime` always
+    returns 0 and `getExplorerInformation` is a fixed `previewMode: true` desktop
+    stub; `UserActionModule.requestTeleport` returns `{}`;
+    `CommunicationsController.send` returns `{ data: [] }` and publishes nothing
+    (only `sendBinary` reaches the transport); and the WHOLE `CommsApi` surface is
+    inert — `getConnectedPeers`/`getActiveVideoStreams`/`consumeMessages` return
+    empty lists, `getRoomInfo` returns a zeroed room, and
+    `subscribeToTopic`/`unsubscribeFromTopic`/`publishData` accept the call and
+    drop it.
 - CRDT message passing between scene and kernel
 
 **CLI Interface (`src/cli.ts`)**
