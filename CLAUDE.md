@@ -331,10 +331,17 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   - `connectWorldsAdapter`: Decentraland Worlds scenes
   - `connectProductionAdapter`: Flexible production realm connections
   - `connectAdapter`: dispatches on the adapter string's protocol prefix
-  - Adapter protocols understood by `connectAdapter`: **`livekit` and `offline`
-    only**. A `ws-room:` or `signed-login:` adapter string throws
+  - Adapter protocols understood by `connectAdapter`: `livekit` and `offline`
+    only. A `ws-room:` or `signed-login:` adapter string throws
     ("A communications adapter could not be created for protocol=…"). Realms
     advertising those in `/about`'s `comms.fixedAdapter` are NOT supported.
+  - **In practice only a `livekit:` fixedAdapter actually works.** `offline:` is
+    accepted by `connectAdapter`, but the adapter it returns has
+    `desiredTransports: Atom([{ url: '', … }])` — and `scene-comms.ts` feeds that
+    empty string straight to `connectTransport`, which throws
+    "A communications transport could not be created for protocol=" (empty
+    protocol). So `offline:` fails one step later than `ws-room:`/`signed-login:`
+    and with a different message, not successfully.
 - **Transports** (`connect-transport.ts` → `transports/`)
   - **`livekit` is the only transport that can be constructed.** `offline.ts`
     exists but is reachable only through the local-preview fallback in
@@ -348,18 +355,45 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 
 **RPC Services (`src/lib/babylon/scene/connect-context-rpc.ts`)**
 - Scene-kernel communication via RPC protocol
-- Services actually registered: `EngineApi`, `Runtime`, `UserIdentity`,
-  `UserActionModule`, `RestrictedActions`, `CommunicationsController`, `CommsApi`,
-  `SignedFetch` — plus `Testing` (registered separately, in `nodejs-runtime.ts`).
-  **`Permissions` and `PortableExperiences` are NOT registered**, and neither is
-  `EnvironmentApi`, `EthereumController`, `Players`, `Scene` or `ParcelIdentity`.
-  `common-runtime/modules.ts` is the matching scene-side list: a `require()` of
-  any module not in that switch throws `Unknown module <name>`.
-- Several registered methods are deliberate no-ops that report success and do
-  nothing: every `RestrictedActions` method (`movePlayerTo`, `teleportTo`,
-  `triggerEmote`, `changeRealm`, …) returns `{ success: true }` without acting,
-  and `Runtime.getWorldTime` always returns 0. Treat the registration list as
-  "the scene's call resolves", not "the effect happened".
+- The installed @dcl/protocol declares **18** kernel API services; this server
+  registers **9** and leaves **9** unregistered.
+  - Registered (8 here + `Testing`, registered separately in `nodejs-runtime.ts`):
+    `EngineApi`, `Runtime`, `UserIdentity`, `UserActionModule`,
+    `RestrictedActions`, `CommunicationsController`, `CommsApi`, `SignedFetch`,
+    `Testing`.
+  - NOT registered — the complete list: `Permissions`, `PortableExperiences`,
+    `EnvironmentApi`, `EthereumController`, `Players`, `Scene`, `ParcelIdentity`,
+    `DevTools`, `SocialController`.
+  - `common-runtime/modules.ts` is the matching scene-side list (the same 9): a
+    `require()` of any module not in that switch throws `Unknown module <name>`.
+- Registration is NOT a promise that the call resolves, and a resolved call is
+  NOT a promise that anything happened. Both directions have exceptions, and what
+  the scene observes is decided by the protobuf RESPONSE message, not by what the
+  handler returns:
+  - **Registered but rejecting:** three `EngineApi` methods `throw new
+    Error('not implemented')` — `subscribe`, `unsubscribe` and
+    `crdtGetMessageFromRenderer` (all three are `@deprecated` SDK6 legacy).
+    `sendBatch` resolves, with an empty event list.
+  - **`RestrictedActions` never acts**, but only some of it reports success.
+    `movePlayerTo` (`MovePlayerToResponse` has a `success` field) and the six
+    `SuccessResponse` methods — `changeRealm`, `openExternalUrl`, `openNftDialog`,
+    `setCommunicationsAdapter`, `triggerSceneEmote`, `stopEmote` — do deliver
+    `success: true`. `teleportTo` and `triggerEmote` return `{ success: true }` in
+    the handler, but `TeleportToResponse`/`TriggerEmoteResponse` are EMPTY protobuf
+    messages, so the field is dropped on the wire and the scene decodes `{}`.
+    `copyToClipboard` returns `{}` on both sides (`EmptyResponse`).
+    (The handler also defines `requestTeleport`, `showAvatarEmoteWheel` and
+    `showAvatarExpressionsWheel`, which this @dcl/protocol does not declare —
+    `codegen.registerService` binds only declared methods, so they are dead.)
+  - **Silent no-ops beyond `RestrictedActions`:** `Runtime.getWorldTime` always
+    returns 0 and `getExplorerInformation` is a fixed `previewMode: true` desktop
+    stub; `UserActionModule.requestTeleport` returns `{}`;
+    `CommunicationsController.send` returns `{ data: [] }` and publishes nothing
+    (only `sendBinary` reaches the transport); and the WHOLE `CommsApi` surface is
+    inert — `getConnectedPeers`/`getActiveVideoStreams`/`consumeMessages` return
+    empty lists, `getRoomInfo` returns a zeroed room, and
+    `subscribeToTopic`/`unsubscribeFromTopic`/`publishData` accept the call and
+    drop it.
 - CRDT message passing between scene and kernel
 
 **CLI Interface (`src/cli.ts`)**

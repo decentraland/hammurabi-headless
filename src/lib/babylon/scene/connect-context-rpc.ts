@@ -1,6 +1,10 @@
 /**
- * This function will register the EngineApi and EnvironmentApi services
- * to the RPC server, so that the scene can call them.
+ * `connectContextToRpcServer` registers the scene-facing kernel API services on
+ * the RPC server, so that the scene can call them: EngineApi, Runtime,
+ * UserIdentity, UserActionModule, RestrictedActions, CommunicationsController,
+ * CommsApi and SignedFetch. (Testing is registered separately, in
+ * nodejs-runtime.ts.) EnvironmentApi is NOT registered — see the "NOT
+ * registered" list in CLAUDE.md before adding a service here.
  */
 
 import { RpcServerPort } from '@dcl/rpc'
