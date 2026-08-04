@@ -14,14 +14,22 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   let engine: BABYLON.NullEngine
   let scene: BABYLON.Scene
   let box: BABYLON.Mesh
+  let sphere: BABYLON.Mesh
+  let plane: BABYLON.Mesh
 
   beforeAll(() => {
     engine = new BABYLON.NullEngine()
     scene = new BABYLON.Scene(engine)
-    // A single real mesh in front of the origin; the fake rootNode repeats it so
+    // Real meshes in front of the origin; the fake rootNode repeats one of them so
     // ray.intersectsMeshes runs against real geometry (fake objects would throw).
+    // Built at the same tessellation the collider components pin, so the triangle
+    // costs here are the ones a real scene produces: box 12, sphere 1296, plane 2.
     box = BABYLON.MeshBuilder.CreateBox('collider', {}, scene)
     box.position.set(0, 0, 50)
+    sphere = BABYLON.MeshBuilder.CreateSphere('sphere_collider', { diameter: 1, segments: 16 }, scene)
+    sphere.position.set(0, 0, 50)
+    plane = BABYLON.MeshBuilder.CreatePlane('plane_collider', { width: 1, height: 1 }, scene)
+    plane.position.set(0, 0, 50)
   })
 
   afterAll(() => {
@@ -71,6 +79,37 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     expect(processed).toEqual([1, 2])
     // ...and the remaining one-shot raycasts are left pending (not silently dropped).
     expect(Array.from(pending).sort()).toEqual([3, 4, 5])
+  })
+
+  // The mesh ceiling assumes every mesh costs about the same, which held while every
+  // primitive collider was a 12-triangle box. A sphere collider is 1296 triangles, so
+  // a mesh count far INSIDE the 50k mesh budget can still be orders of magnitude more
+  // triangle work than that budget was tuned for. The triangle ceiling is what bounds
+  // it; without it these raycasts all run in one frame.
+  it('stops on the triangle budget while the mesh budget still has room', () => {
+    // 1000 spheres = 1.296M triangles, so ONE raycast exhausts the 600k triangle
+    // budget outright, while 1000 meshes is 2% of the 50k mesh budget.
+    const spheres = new Array(1000).fill(sphere)
+    const pending = new Set<number>([1, 2, 3])
+    const processed: number[] = []
+
+    processRaycasts(makeFakeScene(pending, spheres, undefined, (id) => processed.push(id)))
+
+    expect(processed).toEqual([1])
+    // The rest stay pending rather than being dropped, same as the mesh-budget path.
+    expect(Array.from(pending).sort()).toEqual([2, 3])
+  })
+
+  it('leaves a cheap scene unaffected by the triangle budget', () => {
+    // 100 planes = 200 triangles total; neither ceiling should bite, so every
+    // queued raycast resolves in the same frame.
+    const planes = new Array(100).fill(plane)
+    const pending = new Set<number>([1, 2, 3, 4, 5])
+    const processed: number[] = []
+
+    processRaycasts(makeFakeScene(pending, planes, undefined, (id) => processed.push(id)))
+
+    expect(processed).toEqual([1, 2, 3, 4, 5])
   })
 
   it('walks the mesh list once per collision mask instead of once per raycast', () => {

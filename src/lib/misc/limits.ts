@@ -84,6 +84,7 @@ export interface Limits {
 
   // --- Raycasting ---
   maxRaycastIntersectionsPerFrame: number
+  maxRaycastTrianglesPerFrame: number
 }
 
 const KB = 1024
@@ -217,7 +218,13 @@ const KNOBS: readonly Knob[] = [
   { key: 'shutdownDrainMs', env: 'HAMMURABI_SHUTDOWN_DRAIN_MS', def: 1_500, min: 0 },
 
   // Raycasting
-  { key: 'maxRaycastIntersectionsPerFrame', env: 'HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME', def: 50_000, min: 1 }
+  { key: 'maxRaycastIntersectionsPerFrame', env: 'HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME', def: 50_000, min: 1 },
+  // Triangle-denominated companion to the mesh ceiling above; both are charged and
+  // the first to run out ends the frame. 600_000 is the mesh budget's own measured
+  // cost against the shape it was tuned for (50_000 box colliders x 12 triangles
+  // ~ 100ms/frame), so a box-only scene behaves exactly as before and only the
+  // shapes that are orders of magnitude heavier per mesh are newly bounded.
+  { key: 'maxRaycastTrianglesPerFrame', env: 'HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME', def: 600_000, min: 1 }
 ]
 
 const logger = createLogger('⚙️ Limits')

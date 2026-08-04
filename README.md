@@ -215,6 +215,13 @@ truth is [`src/lib/misc/limits.ts`](src/lib/misc/limits.ts).
 | Variable | Default | Description |
 | --- | --- | --- |
 | `HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME` | `50000` | Max ray↔mesh intersection tests per frame across all of a scene's raycasts. |
+| `HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME` | `600000` | Max ray↔**triangle** tests per frame, charged alongside the mesh ceiling above; whichever runs out first ends the frame. A mesh ceiling alone assumes every collider costs the same, which stops being true once each `MeshCollider` builds its real shape (box 12 triangles, plane 2, cylinder 200, sphere 1296). |
+
+#### Scene primitives
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAMMURABI_MAX_PRIMITIVE_RADIUS_METERS` | `4096` | Ceiling on a scene-supplied `CylinderMesh` radius, in metres of unscaled local space. Non-finite radii fall back to the protocol default of 0.5 and negative radii are taken as their magnitude. Note this bounds the primitive's own geometry, not its world extent — the entity Transform scales it afterwards. |
 
 ## Publishing
 

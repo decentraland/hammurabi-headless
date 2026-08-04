@@ -21,6 +21,34 @@ const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
 // exhausted the remaining raycasts are left pending and processed on later frames
 // (continuous ones re-run anyway; one-shot ones simply resolve a frame or two later).
 const MAX_RAYCAST_INTERSECTIONS_PER_FRAME = limits.maxRaycastIntersectionsPerFrame // HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+/**
+ * Companion ceiling counted in TRIANGLES, not meshes.
+ *
+ * The mesh budget above assumes every mesh costs about the same, which was true
+ * while every primitive MeshCollider was a box: 12 triangles. It is not true now
+ * that each `mesh` oneof builds its real shape — measured, at the tessellation
+ * this server pins: box 12, plane 2, cylinder 200, sphere 1296. Babylon rejects a
+ * mesh whose bounding box the ray misses before touching a triangle, so the cost
+ * only materializes when the ray actually enters the box — but a scene chooses
+ * where its colliders go, so that is an arrangement it can guarantee.
+ *
+ * Measured for one full mesh budget with every bounding box entered: boxes
+ * ~100ms, cylinders ~390ms, spheres (at Babylon's old default 32 segments,
+ * 4624 triangles) ~8.6s. The mesh budget alone therefore bounded a frame to
+ * ~100ms for the shape it was tuned against and ~8.6s for one it was not.
+ *
+ * Charged ALONGSIDE the mesh budget rather than replacing it, and with its own
+ * knob: `HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME` keeps its meaning and its
+ * default, so an operator who already tuned it is not silently retuned by an
+ * upgrade. Whichever ceiling is reached first stops the frame.
+ *
+ * RESIDUAL (deliberate): this bounds raycasts against EACH OTHER, not a single
+ * raycast. The budget is tested before a raycast runs, never during, because a
+ * partially-tested mesh set would resolve the wrong nearest hit — a silently
+ * wrong answer is worse than a slow one. One raycast is therefore still bounded
+ * only by the scene's total collider triangles, i.e. by `maxLiveEntities`.
+ */
+const MAX_RAYCAST_TRIANGLES_PER_FRAME = limits.maxRaycastTrianglesPerFrame // HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
 
 /**
  * The processRaycasts function iterates over a copy of the pendingRaycastOperations
@@ -45,7 +73,21 @@ export function processRaycasts(scene: SceneContext) {
     }
     return meshes
   }
+  // Triangle count per mask, memoized beside the mesh list it is derived from so
+  // the sum is walked once per mask per frame rather than once per raycast.
+  const trianglesByMask = new Map<number, number>()
+  const trianglesForMask = (mask: number, meshes: BABYLON.AbstractMesh[]): number => {
+    let triangles = trianglesByMask.get(mask)
+    if (triangles === undefined) {
+      triangles = 0
+      for (const mesh of meshes) triangles += mesh.getTotalIndices() / 3
+      trianglesByMask.set(mask, triangles)
+    }
+    return triangles
+  }
+
   let intersectionBudget = MAX_RAYCAST_INTERSECTIONS_PER_FRAME
+  let triangleBudget = MAX_RAYCAST_TRIANGLES_PER_FRAME
 
   // clone the set into an array to mutate the set while iterating
   const iter = Array.from(scene.pendingRaycastOperations)
@@ -53,7 +95,7 @@ export function processRaycasts(scene: SceneContext) {
     // Stop once this frame's intersection budget is spent; the still-pending
     // raycasts run on subsequent frames (leaving them in the set is correct — a
     // one-shot raycast is only removed below after it actually ran).
-    if (intersectionBudget <= 0) break
+    if (intersectionBudget <= 0 || triangleBudget <= 0) break
 
     const raycast = Raycast.getOrNull(entityId)
 
@@ -63,8 +105,10 @@ export function processRaycasts(scene: SceneContext) {
         const ray = computeRayDirection(scene, raycast, entity.appliedComponents.raycast.ray, entity)
 
         // get a list of all possible meshes to project this ray to
-        const intersectableMeshes = meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK)
+        const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
+        const intersectableMeshes = meshesForMask(mask)
         intersectionBudget -= intersectableMeshes.length
+        triangleBudget -= trianglesForMask(mask, intersectableMeshes)
 
         // then perform the actual raycast
         const results = ray.intersectsMeshes(intersectableMeshes, false)

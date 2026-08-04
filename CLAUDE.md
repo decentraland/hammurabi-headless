@@ -189,7 +189,17 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   capped for this reason). `resolveFile` (`content-server-entity.ts`) validates the
   deployer-controlled content hash is an alphanumeric CID before it's concatenated
   into a fetch URL — a `../`-bearing hash would otherwise WHATWG-normalize into a
-  path traversal on the realm origin. Scene→LiveKit `sendBinary` caps peers,
+  path traversal on the realm origin. Scene-supplied PRIMITIVE GEOMETRY is bounded
+  in `logic/primitive-meshes.ts`: a `CylinderMesh` radius is a raw protobuf float, so
+  non-finite falls back to the protocol default, negative is taken as its magnitude
+  (clamping it to 0 built a 5µm surface no raycast could ever hit — the same
+  silently-dead collider the guard exists to prevent), and the magnitude is capped by
+  `maxPrimitiveRadiusMeters`. This bounds LOCAL geometry only; world extent is that
+  radius times the entity Transform scale, which is NOT validated anywhere. Raycasting
+  is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
+  because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
+  every primitive collider was a 12-triangle box; a sphere is 1296. Scene→LiveKit
+  `sendBinary` caps peers,
   messages, per-message size AND the per-message destination-identities list.
   Inbound comms: `CommsTransportWrapper.handleMessage` drops oversized packets and
   rate-limits per peer before decoding; the avatar system dedupes + rate-limits
