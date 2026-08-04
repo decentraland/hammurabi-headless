@@ -482,7 +482,9 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   })
 
   it('leaves a cheap scene unaffected by the triangle budget', () => {
-    // 100 planes = 200 triangles total; neither ceiling should bite, so every
+    // 100 planes bill 100 x TRIANGLE_COST_FLOOR = 1200, not their 200 real
+    // triangles — the charged cost is never the raw triangle count, which is the
+    // whole reason the floor exists. Either way both ceilings have room, so every
     // queued raycast resolves in the same frame.
     const planes = new Array(100).fill(plane)
     const pending = new Set<number>([1, 2, 3, 4, 5])

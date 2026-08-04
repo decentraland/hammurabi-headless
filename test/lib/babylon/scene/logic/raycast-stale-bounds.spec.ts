@@ -121,7 +121,14 @@ testWithEngine(
       })
 
       it('should still offer the collider as a raycast candidate, disabled subtree and all', () => {
-        expect(candidates()).toEqual([colliderMesh()])
+        // Compared as booleans/counts, never by handing Babylon meshes to a matcher.
+        // pretty-format walks a mesh's whole object graph on mismatch: measured at
+        // 2.57M characters for ONE mesh in a 2-mesh scene and 36M in a 22-mesh one,
+        // which is enough to kill the jest worker with a heap OOM and report nothing
+        // at all. A failure you cannot read is not a test.
+        const found = candidates()
+        expect(found.length).toBe(1)
+        expect(found[0] === colliderMesh()).toBe(true)
       })
 
       it('should still find the hit, because processRaycasts refreshes the matrices first', () => {
