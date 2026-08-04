@@ -18,6 +18,13 @@ const MARSHAL_UTILS_PATH = '../../../src/lib/common-runtime/marshal-utils'
 const PRIMITIVE_MESHES_PATH = '../../../src/lib/babylon/scene/logic/primitive-meshes'
 const RAYCASTS_PATH = '../../../src/lib/babylon/scene/logic/raycasts'
 const RAYCAST_COMPONENT_PATH = '../../../src/lib/decentraland/sdk-components/raycast-component'
+const COLLIDERS_PATH = '../../../src/lib/babylon/scene/logic/colliders'
+const LIMITS_PATH = '../../../src/lib/misc/limits'
+// Matches any collisionMask. pickMeshesForMask applies the real layer predicate
+// while it walks, and the tag MUST come from the same freshly-required colliders
+// module these tests load: its `Symbol('isCollider')` is module-scoped, so a tag
+// applied through a different copy is invisible and every candidate is dropped.
+const ALL_COLLIDER_LAYERS = 0xffffffff
 
 describe('limit logging wiring', () => {
   let server: http.Server
@@ -128,6 +135,8 @@ describe('limit logging wiring', () => {
       const plane = BABYLON.MeshBuilder.CreatePlane('p_collider', { width: 1, height: 1 }, scene)
       plane.position.set(0, 0, 50)
       plane.computeWorldMatrix(true)
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require(COLLIDERS_PATH).setColliderMask(plane, ALL_COLLIDER_LAYERS)
       // Past the 50_000 mesh ceiling, so the mesh branch answers before any scan.
       const meshes = new Array(60_000).fill(plane)
       const raycast = {
@@ -141,7 +150,8 @@ describe('limit logging wiring', () => {
       processRaycasts({
         currentTick: 0,
         entityId: 'logger-spec',
-        rootNode: { position: BABYLON.Vector3.Zero(), getChildMeshes: () => meshes },
+        rootNode: { position: BABYLON.Vector3.Zero(), getChildren: () => meshes },
+        raycastRotationCursor: 0,
         pendingRaycastOperations: new Set([1]),
         components: {
           [raycastComponent.componentId]: { getOrNull: () => raycast },
@@ -183,6 +193,8 @@ describe('limit logging wiring', () => {
       const sphere = BABYLON.MeshBuilder.CreateSphere('s_collider', { diameter: 1, segments: 16 }, scene)
       sphere.position.set(0, 0, 50)
       sphere.computeWorldMatrix(true)
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require(COLLIDERS_PATH).setColliderMask(sphere, ALL_COLLIDER_LAYERS)
       // 1296 triangles each: 600 spheres is 777_600, past the 600_000 ceiling, while
       // 600 candidates is ~1% of the mesh ceiling — so only the triangle guard fires.
       const meshes = new Array(600).fill(sphere)
@@ -197,7 +209,8 @@ describe('limit logging wiring', () => {
       processRaycasts({
         currentTick: 0,
         entityId: 'logger-spec',
-        rootNode: { position: BABYLON.Vector3.Zero(), getChildMeshes: () => meshes },
+        rootNode: { position: BABYLON.Vector3.Zero(), getChildren: () => meshes },
+        raycastRotationCursor: 0,
         pendingRaycastOperations: new Set([1]),
         components: {
           [raycastComponent.componentId]: { getOrNull: () => raycast },
@@ -214,6 +227,105 @@ describe('limit logging wiring', () => {
 
       expect(hit).toHaveBeenCalledWith('maxRaycastTrianglesPerFrame', expect.stringContaining('triangles'))
     } finally {
+      scene.dispose()
+      engine.dispose()
+    }
+  })
+
+  it('reports the maxRaycastHitsPerQuery key when one RQT_QUERY_ALL returns too many hits', () => {
+    const hit = jest.fn()
+    jest.resetModules()
+    jest.doMock(LIMIT_LOGGER_PATH, () => ({ limitLogger: { hit } }))
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const BABYLON = require('@babylonjs/core')
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { processRaycasts } = require(RAYCASTS_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { raycastComponent, raycastResultComponent } = require(RAYCAST_COMPONENT_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { limits } = require(LIMITS_PATH)
+
+    const engine = new BABYLON.NullEngine()
+    const scene = new BABYLON.Scene(engine)
+    const restore = limits.maxRaycastHitsPerQuery
+    try {
+      limits.maxRaycastHitsPerQuery = 2
+      const box = BABYLON.MeshBuilder.CreateBox('q_collider', { size: 1 }, scene)
+      box.position.set(0, 0, 50)
+      box.computeWorldMatrix(true)
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require(COLLIDERS_PATH).setColliderMask(box, ALL_COLLIDER_LAYERS)
+      // Five crossings against a cap of two: the truncation must be reported, not
+      // silently applied — a scene cannot otherwise tell a capped list from a
+      // complete one.
+      const meshes = new Array(5).fill(box)
+      const raycast = {
+        queryType: 1, // RQT_QUERY_ALL
+        continuous: false,
+        timestamp: 0,
+        collisionMask: undefined,
+        direction: undefined,
+        originOffset: undefined
+      }
+      processRaycasts({
+        currentTick: 0,
+        entityId: 'logger-spec',
+        rootNode: { position: BABYLON.Vector3.Zero(), getChildren: () => meshes },
+        raycastRotationCursor: 0,
+        pendingRaycastOperations: new Set([1]),
+        components: {
+          [raycastComponent.componentId]: { getOrNull: () => raycast },
+          [raycastResultComponent.componentId]: { createOrReplace: () => undefined }
+        },
+        getEntityOrNull: (id: number) => ({
+          entityId: id,
+          appliedComponents: {
+            raycast: { ray: new BABYLON.Ray(BABYLON.Vector3.Zero(), BABYLON.Vector3.Forward(), 999) }
+          },
+          getWorldMatrix: () => BABYLON.Matrix.Identity()
+        })
+      })
+
+      expect(hit).toHaveBeenCalledWith('maxRaycastHitsPerQuery', expect.stringContaining('colliders'))
+    } finally {
+      limits.maxRaycastHitsPerQuery = restore
+      scene.dispose()
+      engine.dispose()
+    }
+  })
+
+  it('reports the maxColliderTreeDepth key when a collider subtree is deeper than the ceiling', () => {
+    const hit = jest.fn()
+    jest.resetModules()
+    jest.doMock(LIMIT_LOGGER_PATH, () => ({ limitLogger: { hit } }))
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const BABYLON = require('@babylonjs/core')
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { pickMeshesForMask, setColliderMask } = require(COLLIDERS_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { limits } = require(LIMITS_PATH)
+
+    const engine = new BABYLON.NullEngine()
+    const scene = new BABYLON.Scene(engine)
+    const restore = limits.maxColliderTreeDepth
+    try {
+      limits.maxColliderTreeDepth = 4
+      const root = new BABYLON.TransformNode('root', scene)
+      let current: any = root
+      for (let i = 0; i < 10; i++) {
+        const link = new BABYLON.TransformNode(`link_${i}`, scene)
+        link.parent = current
+        current = link
+      }
+      const leaf = BABYLON.MeshBuilder.CreateBox('deep_collider', { size: 1 }, scene)
+      leaf.parent = current
+      setColliderMask(leaf, ALL_COLLIDER_LAYERS)
+
+      pickMeshesForMask(root, ALL_COLLIDER_LAYERS)
+
+      expect(hit).toHaveBeenCalledWith('maxColliderTreeDepth', expect.stringContaining('deeper than'))
+    } finally {
+      limits.maxColliderTreeDepth = restore
       scene.dispose()
       engine.dispose()
     }

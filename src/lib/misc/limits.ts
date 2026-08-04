@@ -85,6 +85,8 @@ export interface Limits {
   // --- Raycasting ---
   maxRaycastIntersectionsPerFrame: number
   maxRaycastTrianglesPerFrame: number
+  maxRaycastHitsPerQuery: number
+  maxColliderTreeDepth: number
 }
 
 const KB = 1024
@@ -224,7 +226,22 @@ const KNOBS: readonly Knob[] = [
   // cost against the shape it was tuned for (50_000 box colliders x 12 triangles
   // ~ 100ms/frame), so a box-only scene behaves exactly as before and only the
   // shapes that are orders of magnitude heavier per mesh are newly bounded.
-  { key: 'maxRaycastTrianglesPerFrame', env: 'HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME', def: 600_000, min: 1 }
+  { key: 'maxRaycastTrianglesPerFrame', env: 'HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME', def: 600_000, min: 1 },
+  // RQT_QUERY_ALL returns EVERY mesh the ray crosses, one full RaycastHit each
+  // (normal, origin, direction, position, length, meshName, entityId). The mesh
+  // ceiling bounds how many are TESTED, not how many come back: measured, 300
+  // colliders on one ray produced 304 hits in a single result, and that whole
+  // list is serialized into the scene's CRDT stream every frame a continuous
+  // raycast runs. Truncated NEAREST-first, so what a scene actually reaches for
+  // survives the cut.
+  { key: 'maxRaycastHitsPerQuery', env: 'HAMMURABI_MAX_RAYCAST_HITS_PER_QUERY', def: 256, min: 1 },
+  // Depth ceiling for the collider-subtree walk. Babylon's own `_getDescendants`
+  // is recursive and overflows the JS stack between depth 5000 and 6000, while a
+  // scene may hold 100_000 entities and chains them to any depth it likes via
+  // Transform.parent. The walk here is iterative so the stack cannot overflow at
+  // all; this bounds the WORK instead, and sits far above any plausible scene
+  // hierarchy.
+  { key: 'maxColliderTreeDepth', env: 'HAMMURABI_MAX_COLLIDER_TREE_DEPTH', def: 1_024, min: 1 }
 ]
 
 const logger = createLogger('⚙️ Limits')

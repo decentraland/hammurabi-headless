@@ -4,13 +4,23 @@ import { RaycastQueryType } from '@dcl/protocol/out-js/decentraland/sdk/componen
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
 import { limits } from '../../../../../src/lib/misc/limits'
 import { raycastComponent, raycastResultComponent } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
+import { setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 
 // processRaycasts discovers the meshes to test against via
-// pickMeshesForMask(scene.rootNode, mask), which calls rootNode.getChildMeshes.
-// A fake rootNode whose getChildMeshes returns a controllably-large array lets us
-// exhaust the per-frame intersection budget with a single real mesh repeated,
-// without building tens of thousands of distinct meshes (and without mocking the
-// real pickMeshesForMask, so its per-mask memoization is exercised for real).
+// pickMeshesForMask(scene.rootNode, mask), which walks the subtree from
+// rootNode.getChildren. A fake rootNode whose getChildren returns a
+// controllably-large array lets us exhaust the per-frame intersection budget with
+// a single real mesh repeated, without building tens of thousands of distinct
+// meshes (and without mocking the real pickMeshesForMask, so both its per-mask
+// memoization and its real layer predicate are exercised).
+//
+// The repeated meshes are tagged with every collider layer so they match whatever
+// collisionMask a case uses. That tagging is load-bearing now: the walk applies
+// the real `bitIntersectsAndContainsAny` predicate itself, where the previous
+// `getChildMeshes` stub returned its array without consulting a predicate at all
+// — so an untagged mesh yields zero candidates and every "no hits" assertion here
+// would pass for the wrong reason.
+const ALL_COLLIDER_LAYERS = 0xffffffff
 describe('when a scene queues raycasts whose total intersection cost exceeds the per-frame budget', () => {
   let engine: BABYLON.NullEngine
   let scene: BABYLON.Scene
@@ -49,6 +59,10 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     sphereOffAxis = BABYLON.MeshBuilder.CreateSphere('far_offaxis_collider', { diameter: 1, segments: 16 }, scene)
     sphereOffAxis.position.set(5000, 0, 50)
     sphereOffAxis.computeWorldMatrix(true)
+
+    for (const mesh of [box, sphere, plane, sphereOffAxis, nearCollider, farCollider]) {
+      setColliderMask(mesh, ALL_COLLIDER_LAYERS)
+    }
   })
 
   afterAll(() => {
@@ -65,12 +79,13 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       direction: undefined,
       originOffset: undefined
     }
-    // getChildMeshes(descendants, predicate) — ignore the predicate and return the
-    // full array; the collider-layer filtering is not what this test exercises.
-    const rootNode = { position: Vector3.Zero(), getChildMeshes: () => meshes }
+    // The walk starts here and applies the real layer predicate to each child; the
+    // meshes are tagged with every layer in beforeAll so they match any mask.
+    const rootNode = { position: Vector3.Zero(), getChildren: () => meshes }
     return {
       currentTick: 0,
       rootNode,
+      raycastRotationCursor: 0,
       pendingRaycastOperations: pending,
       components: {
         [raycastComponent.componentId]: { getOrNull: () => raycastValue },
@@ -251,6 +266,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       geometry.setVerticesData(BABYLON.VertexBuffer.PositionKind, positions, false)
       geometry.applyToMesh(unindexedCollider)
       unindexedCollider.computeWorldMatrix(true)
+      setColliderMask(unindexedCollider, ALL_COLLIDER_LAYERS)
     })
 
     afterEach(() => {
@@ -322,15 +338,11 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       entityId: 'per-entity',
       rootNode: {
         position: Vector3.Zero(),
-        // pickMeshesForMask filters by collider layer; the fake ignores the predicate
-        // and answers from the mask it was given.
-        getChildMeshes: (_d: boolean, predicate: any) => {
-          const probe = { __mask: 0 } as any
-          void predicate
-          void probe
-          return currentMeshes
-        }
+        // Answers with whichever mesh list the entity under test was given; the
+        // real layer predicate then runs against the all-layers tag.
+        getChildren: () => currentMeshes
       },
+      raycastRotationCursor: 0,
       pendingRaycastOperations: pending,
       components: {
         [raycastComponent.componentId]: {
@@ -465,6 +477,68 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     })
   })
 
+  // The mesh ceiling bounds how many colliders are TESTED, not how many hits come
+  // back. Measured before this cap existed: 300 colliders on one ray produced 304
+  // full RaycastHit entries in a single result, re-serialized into the scene's CRDT
+  // stream on every frame a continuous raycast runs.
+  describe('when one RQT_QUERY_ALL raycast crosses more colliders than the hit cap allows', () => {
+    let restore: number
+    let results: any[]
+
+    beforeEach(() => {
+      restore = limits.maxRaycastHitsPerQuery
+      limits.maxRaycastHitsPerQuery = 3
+      results = []
+
+      // Six real colliders the ray crosses, deliberately fed FAR-first so a cap
+      // that kept an arbitrary prefix would keep the wrong ones.
+      const crossed = [farCollider, nearCollider, farCollider, nearCollider, farCollider, nearCollider]
+      const fake = makeFakeSceneCapturing(new Set<number>([1]), crossed, undefined, (r) => results.push(r))
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+
+      processRaycasts(fake)
+    })
+
+    afterEach(() => {
+      limits.maxRaycastHitsPerQuery = restore
+    })
+
+    it('should return no more hits than the cap', () => {
+      expect(results[0].hits).toHaveLength(3)
+    })
+
+    // Nearest-first, not an arbitrary prefix: the hit a scene is most likely to act
+    // on is the closest one, and dropping it while keeping three behind it would be
+    // worse than returning nothing.
+    it('should keep the nearest hits rather than whichever were tested first', () => {
+      expect(results[0].hits.map((hit: any) => hit.meshName)).toEqual([
+        'near_collider',
+        'near_collider',
+        'near_collider'
+      ])
+    })
+  })
+
+  describe('when an RQT_QUERY_ALL raycast crosses fewer colliders than the cap', () => {
+    let results: any[]
+
+    beforeEach(() => {
+      results = []
+      const fake = makeFakeSceneCapturing(new Set<number>([1]), [farCollider, nearCollider], undefined, (r) =>
+        results.push(r)
+      )
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+
+      processRaycasts(fake)
+    })
+
+    // The cap must not reorder or drop anything on the ordinary path — the sort only
+    // runs when the cap is actually exceeded.
+    it('should return every hit untouched', () => {
+      expect(results[0].hits.map((hit: any) => hit.meshName).sort()).toEqual(['far_collider', 'near_collider'])
+    })
+  })
+
   it('does not charge triangles for colliders the ray never approaches', () => {
     // 2000 spheres parked off the ray's path (2.59M triangles, four times the whole
     // frame budget) plus ONE on the path. Asserting a real HIT is what makes this
@@ -497,10 +571,10 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
 
   it('walks the mesh list once per collision mask instead of once per raycast', () => {
     // Small mesh count so the budget is never hit; assert the (real, expensive)
-    // rootNode.getChildMeshes walk happens once for the shared mask, not per raycast.
+    // rootNode subtree walk happens once for the shared mask, not per raycast.
     const meshes = [box]
     const pending = new Set<number>([1, 2, 3])
-    const rootNode = { position: Vector3.Zero(), getChildMeshes: jest.fn(() => meshes) }
+    const rootNode = { position: Vector3.Zero(), getChildren: jest.fn(() => meshes) }
     const raycastValue = {
       queryType: RaycastQueryType.RQT_HIT_FIRST,
       continuous: false,
@@ -512,6 +586,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     const fakeScene: any = {
       currentTick: 0,
       rootNode,
+      raycastRotationCursor: 0,
       pendingRaycastOperations: pending,
       components: {
         [raycastComponent.componentId]: { getOrNull: () => raycastValue },
@@ -526,6 +601,97 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
 
     processRaycasts(fakeScene)
 
-    expect(rootNode.getChildMeshes).toHaveBeenCalledTimes(1)
+    expect(rootNode.getChildren).toHaveBeenCalledTimes(1)
+  })
+
+  // The budget resets every frame and a Set iterates in insertion order, so a
+  // head-first sweep hands the whole budget to the same prefix forever. Measured
+  // before the cursor existed: three identical CONTINUOUS raycasts against a
+  // budget fitting one, and raycasts 2 and 3 produced no result at all across 20
+  // frames — permanently silent, not merely delayed.
+  describe('when more continuous raycasts are queued than one frame can afford', () => {
+    let restore: number
+    let processed: number[][]
+
+    beforeEach(() => {
+      restore = limits.maxRaycastIntersectionsPerFrame
+      // Each raycast costs 30_000; only one fits per frame.
+      limits.maxRaycastIntersectionsPerFrame = 50_000
+      processed = []
+
+      const meshes = new Array(30_000).fill(plane)
+      const pending = new Set<number>([1, 2, 3])
+      const scene = makeFakeScene(pending, meshes, undefined, () => undefined)
+      scene.components[raycastComponent.componentId] = {
+        getOrNull: () => ({
+          queryType: RaycastQueryType.RQT_HIT_FIRST,
+          continuous: true, // stays pending, so the same set is re-swept each frame
+          timestamp: 0,
+          collisionMask: undefined,
+          direction: undefined,
+          originOffset: undefined
+        })
+      }
+
+      for (let frame = 0; frame < 3; frame++) {
+        const thisFrame: number[] = []
+        scene.components[raycastResultComponent.componentId] = {
+          createOrReplace: (id: number) => thisFrame.push(id)
+        }
+        processRaycasts(scene)
+        processed.push(thisFrame)
+      }
+    })
+
+    afterEach(() => {
+      limits.maxRaycastIntersectionsPerFrame = restore
+    })
+
+    it('should give each queued raycast a turn instead of replaying the same prefix', () => {
+      expect(processed).toEqual([[1], [2], [3]])
+    })
+
+    it('should leave every raycast still pending, since all three are continuous', () => {
+      expect(processed.flat().sort()).toEqual([1, 2, 3])
+    })
+  })
+
+  // A scene whose raycasts all fit in one frame must keep its old, stable
+  // insertion-ordered behaviour: the cursor lands back where it started.
+  describe('when every queued raycast fits within one frame', () => {
+    let processed: number[][]
+
+    beforeEach(() => {
+      processed = []
+      const meshes = [plane]
+      const pending = new Set<number>([1, 2, 3])
+      const scene = makeFakeScene(pending, meshes, undefined, () => undefined)
+      scene.components[raycastComponent.componentId] = {
+        getOrNull: () => ({
+          queryType: RaycastQueryType.RQT_HIT_FIRST,
+          continuous: true,
+          timestamp: 0,
+          collisionMask: undefined,
+          direction: undefined,
+          originOffset: undefined
+        })
+      }
+
+      for (let frame = 0; frame < 2; frame++) {
+        const thisFrame: number[] = []
+        scene.components[raycastResultComponent.componentId] = {
+          createOrReplace: (id: number) => thisFrame.push(id)
+        }
+        processRaycasts(scene)
+        processed.push(thisFrame)
+      }
+    })
+
+    it('should process them in insertion order every frame, not rotate them', () => {
+      expect(processed).toEqual([
+        [1, 2, 3],
+        [1, 2, 3]
+      ])
+    })
   })
 })

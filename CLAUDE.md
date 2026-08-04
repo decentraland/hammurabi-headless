@@ -71,7 +71,13 @@ set, AND throttled in-shim per key per interval — host throttling bounds emiss
 not the cross-isolate callback volume, so a scene hammering a cap must not enqueue
 one host task per rejected call. Wire a new cap by
 adding a `limitLogger.hit(...)` at its drop/reject/truncate site. Not every knob is a
-discrete hit: frame-pacing/shutdown/raycast are cooperative yields (not logged);
+discrete hit: frame-pacing and shutdown knobs are cooperative yields (not logged).
+The RAYCAST knobs split — `maxRaycastIntersectionsPerFrame`,
+`maxRaycastTrianglesPerFrame`, `maxRaycastHitsPerQuery` and `maxColliderTreeDepth`
+ARE logged, because each one changes what the scene observes (an empty result, a
+truncated hit list, a collider that has silently stopped existing) rather than
+merely deferring work to the next frame; the per-frame budget EXHAUSTION that
+simply defers a raycast is not logged.
 `profileFetchCooldownMs` is normal debounce (deliberately not logged), whereas
 `emoteMetadataFetchCooldownMs` IS logged because tripping it substitutes a
 possibly-wrong `loop` flag into what the scene observes — closer to a truncation
@@ -198,7 +204,27 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   radius times the entity Transform scale, which is NOT validated anywhere. Raycasting
   is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
   because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
-  every primitive collider was a 12-triangle box; a sphere is 1296. Scene→LiveKit
+  every primitive collider was a 12-triangle box; a sphere is 1296. Those two bound
+  the WORK; two more bound what comes back and how the walk gets there.
+  `maxRaycastHitsPerQuery` caps an `RQT_QUERY_ALL` result (truncated nearest-first),
+  because the mesh ceiling bounds how many colliders are TESTED, not how many
+  RaycastHits are serialized into the scene's CRDT stream every frame — measured, 300
+  colliders on one ray returned 304 hits. `pickMeshesForMask` (`colliders.ts`) walks
+  the subtree ITERATIVELY: Babylon's `getChildMeshes` recurses via `_getDescendants`
+  and overflows the stack between depth 5000 and 6000, while `Transform.parent` lets a
+  scene chain entities to any depth and `maxLiveEntities` defaults to 100_000.
+  `maxColliderTreeDepth` then bounds the work; at its default (1024) the CAP is what a
+  deep scene meets first, so the iterative walk only matters once an operator raises
+  it — they are two defences, not one. The per-frame budget is spent through a
+  ROTATION CURSOR (`SceneContext.raycastRotationCursor`) rather than from the head of
+  `pendingRaycastOperations`: a Set iterates in insertion order and the budget resets
+  identically each frame, so head-first spending starved the tail PERMANENTLY —
+  measured, 3 continuous raycasts against a budget fitting one, and raycasts 2 and 3
+  produced no result across 20 frames. `PBRaycast.maxDistance` IS now read
+  (`computeRayDirection` assigns `ray.length` every pass, since the Ray is reused
+  across re-PUTs); it was previously ignored in favour of a hard-coded 999, so a scene
+  could not narrow its own cost. It bounds HITS, not cost — the AABB prefilter's
+  `intersectsBoxMinMax` ignores ray length. Scene→LiveKit
   `sendBinary` caps peers,
   messages, per-message size AND the per-message destination-identities list.
   Inbound comms: `CommsTransportWrapper.handleMessage` drops oversized packets and

@@ -160,6 +160,14 @@ export class SceneContext implements EngineApiInterface {
   // it won't be removed from the set
   pendingRaycastOperations = new Set<Entity>()
 
+  // Where processRaycasts resumes next frame. The per-frame budget used to be
+  // spent from the head of this set every time, and a Set iterates in insertion
+  // order — so once a scene had more raycasts than one frame can afford, the same
+  // prefix won forever and the tail NEVER ran. Measured: 3 identical continuous
+  // raycasts against a budget fitting one, and raycasts 2 and 3 produced no result
+  // across 20 frames. Advancing this each frame turns that into round-robin.
+  raycastRotationCursor = 0
+
   // log function for tests
   log: (...args: any[]) => void = (...args) => console.log(this.rootNode.name, ...args)
 

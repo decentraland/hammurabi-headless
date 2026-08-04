@@ -13,6 +13,12 @@ import { limits } from "../../../misc/limits";
 import { limitLogger } from "../../../misc/limit-logger";
 
 const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
+/**
+ * Ray length used when a scene leaves `PBRaycast.maxDistance` unset. Matches the
+ * value `raycast-component.ts` has always constructed the Ray with, so a scene
+ * that never set the field sees no change from maxDistance being honoured.
+ */
+export const DEFAULT_RAY_LENGTH = 999
 // Per-frame ceiling on total ray↔mesh intersection tests across ALL of a scene's
 // raycasts. processRaycasts runs in lateUpdate(), which has NO frame quota, and the
 // cost is O(pending raycasts × collider meshes) — both bounded only by the 100k
@@ -186,7 +192,26 @@ export function processRaycasts(scene: SceneContext) {
 
   // clone the set into an array to mutate the set while iterating
   const iter = Array.from(scene.pendingRaycastOperations)
-  for (const entityId of iter) {
+
+  // Start where the previous frame stopped, not at the head. A Set iterates in
+  // insertion order and the budget resets identically every frame, so a plain
+  // head-first sweep hands the whole budget to the same prefix forever: with C
+  // colliders on a mask only the first floor(budget / C) raycasts ever run, and
+  // every one after them is permanently silent rather than merely delayed.
+  // Measured before this cursor existed — 3 identical continuous raycasts, a
+  // budget fitting one — raycasts 2 and 3 produced no result at all across 20
+  // frames. Modulo of the CURRENT length, because the set shrinks as one-shots
+  // resolve and a stale index would otherwise skip an arbitrary prefix.
+  // Guarded rather than used raw: a non-integer cursor makes every index NaN and
+  // `iter[NaN]` undefined, which would silently drop EVERY raycast rather than
+  // failing loudly. Falling back to 0 costs only fairness, and only if the field
+  // ever goes missing.
+  const cursor = scene.raycastRotationCursor
+  const startAt = iter.length && Number.isInteger(cursor) && cursor >= 0 ? cursor % iter.length : 0
+  let scanned = 0
+
+  for (; scanned < iter.length; scanned++) {
+    const entityId = iter[(startAt + scanned) % iter.length]
     // Stop once this frame's intersection budget is spent; the still-pending
     // raycasts run on subsequent frames (leaving them in the set is correct — a
     // one-shot raycast is only removed below after it actually ran).
@@ -310,6 +335,13 @@ export function processRaycasts(scene: SceneContext) {
       scene.pendingRaycastOperations.delete(entityId)
     }
   }
+
+  // Resume at whichever raycast this frame stopped on — the one the budget could
+  // not afford, or the deferred one. It gets first pick of the next frame's full
+  // budget, which is what makes the rotation fair rather than merely rotating.
+  // A completed sweep leaves the cursor back where it started, so a scene that
+  // fits inside one frame keeps its stable, insertion-ordered behaviour.
+  scene.raycastRotationCursor = iter.length ? (startAt + scanned) % iter.length : 0
 }
 
 export function raycastResultFromRay(scene: SceneContext, ray: Ray, results: BABYLON.PickingInfo[], queryType: RaycastQueryType, timestamp: number) {
@@ -325,7 +357,31 @@ export function raycastResultFromRay(scene: SceneContext, ray: Ray, results: BAB
   if (queryType === RaycastQueryType.RQT_HIT_FIRST && results.length) {
     raycastResult.hits = [pickingToRaycastHit(scene, pickClosest(results)!, ray)]
   } else if (queryType === RaycastQueryType.RQT_QUERY_ALL && results.length) {
-    raycastResult.hits = results.map(_ => pickingToRaycastHit(scene, _, ray))
+    // Sorted and truncated rather than mapped wholesale. The mesh ceiling bounds
+    // how many meshes are TESTED, not how many hits come back, and every hit is
+    // a full RaycastHit that is re-serialized into the scene's CRDT stream on
+    // every frame a continuous raycast runs.
+    //
+    // NEAREST-first: an arbitrary prefix would drop the hit a scene most likely
+    // cares about while keeping ones behind it. The sort runs only when the cap is
+    // actually exceeded, so the ordinary path pays nothing for it.
+    //
+    // NOTE for anyone mutation-testing this: replacing the sort with a plain
+    // `results.slice(0, maxHits)` is an EQUIVALENT mutant, not a gap. Babylon's
+    // `intersectsMeshes` ends with `results.sort(this._comparePickingInfo)`, so the
+    // list already arrives nearest-first and no input can distinguish the two. The
+    // sort is defensive, exactly like `pickClosest` below — it keeps the guarantee
+    // in this file rather than borrowing it from a library internal.
+    const maxHits = limits.maxRaycastHitsPerQuery // HAMMURABI_MAX_RAYCAST_HITS_PER_QUERY
+    let kept = results
+    if (results.length > maxHits) {
+      limitLogger.hit(
+        'maxRaycastHitsPerQuery',
+        `scene ${scene.entityId}: one RQT_QUERY_ALL crossed ${results.length} colliders`
+      )
+      kept = results.slice().sort((a, b) => a.distance - b.distance).slice(0, maxHits)
+    }
+    raycastResult.hits = kept.map(_ => pickingToRaycastHit(scene, _, ray))
   }
 
   return raycastResult
@@ -352,6 +408,27 @@ function pickClosest<T extends { distance: number }>(elems: T[]): T | undefined 
  */
 function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, entity: BabylonEntity) {
   const originOffset = raycast.originOffset ?? Vector3.Zero()
+
+  // The scene's requested range. Applied on EVERY pass, not at construction:
+  // raycast-component.ts reuses one Ray per entity across re-PUTs
+  // (`prevValue?.ray ?? new Ray(...)`), so a length set once would never track a
+  // scene that re-arms with a different maxDistance.
+  //
+  // Unset (0, the protobuf default for a scalar float) keeps the historical 999.
+  // The field was previously not read at all: a scene asking for a 1-metre ray
+  // got a 999-metre one, measured as 304 hits spanning ~34m against a
+  // maxDistance of 1. It is a raw scene-controlled float, so it is guarded like
+  // every other one — non-finite or non-positive falls back to the default
+  // rather than producing a NaN length that makes every triangle test compare
+  // false, which would read to a scene as "nothing is there".
+  //
+  // This is a CORRECTNESS fix, not a cost control. `intersectsTriangle` honours
+  // `ray.length` (ray.js:191) so hits are bounded, but the AABB prefilter's
+  // `intersectsBoxMinMax` does not, so a short ray still charges the mesh and
+  // triangle ceilings for every collider whose box it points at. Making a short
+  // ray genuinely cheaper needs a distance-aware prefilter; deliberately not
+  // done here.
+  ray.length = Number.isFinite(raycast.maxDistance) && raycast.maxDistance > 0 ? raycast.maxDistance : DEFAULT_RAY_LENGTH
 
   const globalOrigin = Vector3.TransformCoordinatesToRef(
     new Vector3(originOffset.x, originOffset.y, originOffset.z),
