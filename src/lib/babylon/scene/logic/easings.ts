@@ -100,4 +100,56 @@ export const easingsFunctions: EasingDictionary = {
     return 1 - bounceOut(1 - x);
   },
   [EasingFunction.EF_EASEOUTBOUNCE]: bounceOut,
+
+  // The ten in-out variants. These were absent, so every EF_EASE<X> (as opposed
+  // to EF_EASEIN<X> / EF_EASEOUT<X>) fell through to whatever the caller used as
+  // a fallback — silently linear, which is a plausible-looking wrong curve
+  // rather than an error. Transcribed from easings.net, which tween.proto names
+  // as the normative source for these functions.
+  [EasingFunction.EF_EASEQUAD]: function (x) {
+    return x < 0.5 ? 2 * x * x : 1 - pow(-2 * x + 2, 2) / 2;
+  },
+  [EasingFunction.EF_EASESINE]: function (x) {
+    return -(cos(PI * x) - 1) / 2;
+  },
+  [EasingFunction.EF_EASEEXPO]: function (x) {
+    return x === 0
+      ? 0
+      : x === 1
+        ? 1
+        : x < 0.5
+          ? pow(2, 20 * x - 10) / 2
+          : (2 - pow(2, -20 * x + 10)) / 2;
+  },
+  [EasingFunction.EF_EASECUBIC]: function (x) {
+    return x < 0.5 ? 4 * x * x * x : 1 - pow(-2 * x + 2, 3) / 2;
+  },
+  [EasingFunction.EF_EASEQUART]: function (x) {
+    return x < 0.5 ? 8 * x * x * x * x : 1 - pow(-2 * x + 2, 4) / 2;
+  },
+  [EasingFunction.EF_EASEQUINT]: function (x) {
+    return x < 0.5 ? 16 * x * x * x * x * x : 1 - pow(-2 * x + 2, 5) / 2;
+  },
+  [EasingFunction.EF_EASECIRC]: function (x) {
+    return x < 0.5
+      ? (1 - sqrt(1 - pow(2 * x, 2))) / 2
+      : (sqrt(1 - pow(-2 * x + 2, 2)) + 1) / 2;
+  },
+  [EasingFunction.EF_EASEBACK]: function (x) {
+    return x < 0.5
+      ? (pow(2 * x, 2) * ((c2 + 1) * 2 * x - c2)) / 2
+      : (pow(2 * x - 2, 2) * ((c2 + 1) * (x * 2 - 2) + c2) + 2) / 2;
+  },
+  [EasingFunction.EF_EASEELASTIC]: function (x) {
+    return x === 0
+      ? 0
+      : x === 1
+        ? 1
+        : x < 0.5
+          ? -(pow(2, 20 * x - 10) * sin((20 * x - 11.125) * c5)) / 2
+          : (pow(2, -20 * x + 10) * sin((20 * x - 11.125) * c5)) / 2 + 1;
+  },
+  [EasingFunction.EF_EASEBOUNCE]: function (x) {
+    return x < 0.5 ? (1 - bounceOut(1 - 2 * x)) / 2 : (1 + bounceOut(2 * x - 1)) / 2;
+  },
 };

@@ -311,6 +311,38 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 - Scene assets can only be fetched from the scene's own content manifest
   (`baseUrl + content-hash`); arbitrary-URL/host asset fetches are not possible,
   and only the glTF/GLB loader is registered.
+- **Tweens (`logic/tweens.ts`).** `PBTween` is advanced by the HOST, not the
+  scene: `processTweens` runs at the END of `SceneContext.update()` — after this
+  tick's CRDT is ingested (so a PUT this frame takes effect immediately) and
+  BEFORE Babylon computes world matrices, so colliders and raycasts in the same
+  frame see the tweened position. Moving it to `lateUpdate` would make every
+  spatial query a frame stale. The result is published by mutating the stored
+  **Transform component** through `getMutableOrNull` (which the scene then
+  receives as CRDT) *and* calling `applyNewTransform` on the Babylon node — a
+  host-side write does NOT run a component's `applyChanges`, so skipping the
+  second half tells the scene the entity moved while its collider stays put. A
+  PUT of `PBTween` RESTARTS the tween even when the value is identical (the
+  reference client's `IsDirty`; scenes rely on it to replay), detected here by
+  object identity because the deserializer allocates a fresh value per PUT.
+  `TweenState` is written on setup and on every state CHANGE only — never per
+  frame while ACTIVE — and is DELETED when `PBTween` goes away (the reference's
+  `TweenCleanUpSystem`), or `tweenSystem.tweenCompleted()` keeps answering true
+  for an entity with no tween. Continuous modes DO complete once
+  `duration > 0` elapses (reference `UpdatePBTween`/`TweenSurpassedDuration`);
+  only `duration == 0` runs forever. **Load-bearing (do not weaken):** entities
+  in `RESERVED_ENTITY_RANGE` are skipped — the scene write guard permits
+  component PUTs there, and `transformComponent.applyChanges` early-returns for
+  the root precisely because `applyNewTransform` on entity 0 lets a scene
+  self-parent the scene root (`rootNode.parent = rootNode`) and blow the stack
+  inside Babylon's world-matrix pass, outside `update()`'s try/catch, every
+  frame. Every scene-controlled number is sanitized ONCE at setup (duration,
+  currentTime, all endpoints, directions, speeds): a non-finite value reaching
+  the per-frame path never leaves `TS_ACTIVE` (`NaN >= NaN` is false) and
+  publishes a NaN Transform forever. The delta comes from
+  `SceneContext.consumeTweenDeltaMs()` (accumulated WALL CLOCK), not the engine
+  frame delta, because `update()` early-returns on quota exhaustion and the tick
+  scheduler skips every later scene — a per-frame delta is silently LOST on
+  those frames.
 - Entity ID allocation: 1 for local player, 32-255 for remote players
 
 **Communications System**

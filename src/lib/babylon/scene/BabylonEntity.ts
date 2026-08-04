@@ -121,16 +121,16 @@ export class BabylonEntity extends BABYLON.TransformNode {
       return
     }
 
-    if (false) {
-      // applyDelayedInterpolation(this, this.appliedComponents.delayedInterpolation, commands, performance.now())
-    } else /* if(BPTween) {
-      applyTween(this, this.appliedComponents.tween!, commands, performance.now())
-    } else */ {
-      const latestCommand = commands[commands.length - 1]
-      this.position.set(latestCommand.value.position.x, latestCommand.value.position.y, latestCommand.value.position.z)
-      this.scaling.set(latestCommand.value.scale.x, latestCommand.value.scale.y, latestCommand.value.scale.z)
-      this.rotationQuaternion.set(latestCommand.value.rotation.x, latestCommand.value.rotation.y, latestCommand.value.rotation.z, latestCommand.value.rotation.w)
-    }
+    // Tweens are NOT resolved here. `logic/tweens.ts` advances them in
+    // SceneContext.update() and writes the result through the Transform
+    // component, so by the time this runs the latest command already IS the
+    // tweened value — and the scene has been told about it. (This used to hold a
+    // commented-out `applyTween` branch behind `if (false)`, which is why PBTween
+    // was accepted into the CRDT and then had no effect whatsoever.)
+    const latestCommand = commands[commands.length - 1]
+    this.position.set(latestCommand.value.position.x, latestCommand.value.position.y, latestCommand.value.position.z)
+    this.scaling.set(latestCommand.value.scale.x, latestCommand.value.scale.y, latestCommand.value.scale.z)
+    this.rotationQuaternion.set(latestCommand.value.rotation.x, latestCommand.value.rotation.y, latestCommand.value.rotation.z, latestCommand.value.rotation.w)
   }
 
   computeWorldMatrix(force: boolean | undefined, camera?: BABYLON.Nullable<BABYLON.Camera>) {

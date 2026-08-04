@@ -44,6 +44,8 @@ import { avatarShapeComponent } from '../../decentraland/sdk-components/avatar-s
 import { avatarBaseComponent } from '../../decentraland/sdk-components/avatar-base'
 // import { delayedInterpolationComponent } from '../../decentraland/sdk-components/delayed-interpolation'
 import { tweenComponent } from '../../decentraland/sdk-components/tween'
+import { tweenStateComponent } from '../../decentraland/sdk-components/tween-state'
+import { processTweens } from './logic/tweens'
 import { materialComponent } from '../../decentraland/sdk-components/material-component'
 import { realmInfoComponent } from '../../decentraland/sdk-components/realm-info'
 import { CommsTransportWrapper } from '../../decentraland/communications/CommsTransportWrapper'
@@ -201,6 +203,7 @@ export class SceneContext implements EngineApiInterface {
     [avatarShapeComponent.componentId]: createLwwStore(avatarShapeComponent),
     [avatarBaseComponent.componentId]: createLwwStore(avatarBaseComponent),
     [tweenComponent.componentId]: createLwwStore(tweenComponent),
+    [tweenStateComponent.componentId]: createLwwStore(tweenStateComponent),
     // [delayedInterpolationComponent.componentId]: createLwwStore(delayedInterpolationComponent),
     [materialComponent.componentId]: createLwwStore(materialComponent),
     [realmInfoComponent.componentId]: createLwwStore(realmInfoComponent)
@@ -525,6 +528,11 @@ export class SceneContext implements EngineApiInterface {
       this._avatarSystem.update()
     }
 
+    // Advance tweens AFTER this tick's CRDT is ingested (so a PBTween put this
+    // frame takes effect immediately) and BEFORE Babylon computes world
+    // matrices, so colliders and raycasts this frame see the tweened positions.
+    processTweens(this, this.consumeTweenDeltaMs())
+
     // mark the frame as processed. this signals the lateUpdate to respond to the scene with updates
     this.finishedProcessingIncomingMessagesOfTick = true
     return true
@@ -751,6 +759,33 @@ export class SceneContext implements EngineApiInterface {
   // this method exists to be a wrapper of the function. so it can be mocked for tests without wizzardy
   updateStaticEntities() {
     updateStaticEntities(this)
+  }
+
+  // Wall-clock marker for the tween system, advanced only when tweens are
+  // actually advanced.
+  private lastTweenClockMs = performance.now()
+
+  /**
+   * Elapsed wall-clock milliseconds since tweens were last advanced; consuming
+   * resets the marker.
+   *
+   * NOT the engine's frame delta. `processTweens` is the last statement of
+   * `update()`, which early-returns when the per-frame CRDT quota is exhausted —
+   * and the tick scheduler stops iterating scenes entirely on the FIRST scene
+   * that exhausts it, so later scenes are skipped as well. A per-frame delta is
+   * consumed only on the frames that reach the end of `update()`, so a scene that
+   * keeps its ingest queue busy loses the skipped frames' time outright and its
+   * tweens run slower than wall clock — i.e. slower than on every real client.
+   * Reading the clock here DEFERS that time instead of losing it.
+   *
+   * A method (not an inline read) so tests can pin it, the way they used to pin
+   * the engine's `getDeltaTime`.
+   */
+  consumeTweenDeltaMs(): number {
+    const now = performance.now()
+    const delta = now - this.lastTweenClockMs
+    this.lastTweenClockMs = now
+    return delta > 0 ? delta : 0
   }
 
   // impl RuntimeApi {
