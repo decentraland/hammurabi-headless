@@ -205,7 +205,13 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const pending = new Set<number>([1])
       const results: any[] = []
 
-      processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+      // QUERY_ALL, because that is the query the AGGREGATE rule still governs. HIT_FIRST
+      // now spends incrementally in box-entry order and stops as soon as the nearest hit
+      // is proven, so it is deliberately not refused for the total cost of a set it never
+      // has to finish. The COST MODEL under test here is charged identically either way.
+      const fake = makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r))
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+      processRaycasts(fake)
 
       expect(results[0]?.hits).toEqual([])
       expect(Array.from(pending)).toEqual([])
@@ -238,7 +244,13 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const pending = new Set<number>([1])
       const results: any[] = []
 
-      processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+      // QUERY_ALL, because that is the query the AGGREGATE rule still governs. HIT_FIRST
+      // now spends incrementally in box-entry order and stops as soon as the nearest hit
+      // is proven, so it is deliberately not refused for the total cost of a set it never
+      // has to finish. The COST MODEL under test here is charged identically either way.
+      const fake = makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r))
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+      processRaycasts(fake)
 
       expect(results[0]?.hits).toEqual([])
     })
@@ -302,7 +314,13 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       const pending = new Set<number>([1])
       const results: any[] = []
 
-      processRaycasts(makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r)))
+      // QUERY_ALL, because that is the query the AGGREGATE rule still governs. HIT_FIRST
+      // now spends incrementally in box-entry order and stops as soon as the nearest hit
+      // is proven, so it is deliberately not refused for the total cost of a set it never
+      // has to finish. The COST MODEL under test here is charged identically either way.
+      const fake = makeFakeSceneCapturing(pending, meshes, undefined, (r) => results.push(r))
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+      processRaycasts(fake)
 
       expect(results[0]?.hits).toEqual([])
     })
@@ -459,22 +477,130 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     })
   })
 
-  // A raycast whose own candidate set outruns a whole frame's budget can never fit
-  // on any frame. Leaving it pending would starve it forever while the scene keeps
-  // re-queueing it, and truncating its mesh set would resolve the wrong nearest hit
-  // while looking authoritative — so it is answered explicitly and dropped.
-  it('answers an over-budget raycast with an empty result instead of stalling or starving it', () => {
-    // 600 spheres on the ray = 777_600 triangles, past the 600k frame budget.
+  // HIT_FIRST spends its triangle budget INCREMENTALLY, in box-entry order, and stops the
+  // moment the nearest hit is proven. So a set whose TOTAL cost outruns a frame is not
+  // refused when the answer was settled long before that total mattered — which is what
+  // the aggregate check used to do, reporting nothing where the client reports the near
+  // hit.
+  it('answers the nearest hit even when the whole candidate set could not be afforded', () => {
+    // 600 spheres on the ray = 777_600 triangles, past the 600k frame budget — but the
+    // first one tested proves the answer, so only 1296 of it is ever spent.
     const spheres = new Array(600).fill(sphere)
     const pending = new Set<number>([1])
     const results: any[] = []
 
     processRaycasts(makeFakeSceneCapturing(pending, spheres, undefined, (r) => results.push(r)))
 
-    // It ran to a decision this frame rather than being deferred...
-    expect(Array.from(pending)).toEqual([])
-    // ...and reported no hits rather than a hit computed from a partial set.
-    expect(results[0]?.hits).toEqual([])
+    expect(results[0]?.hits).toHaveLength(1)
+  })
+
+  // The other half: when proving the nearest hit genuinely cannot fit in a frame, the
+  // raycast must still reach a DECISION. Deferring would starve it forever while the
+  // scene keeps it queued, and reporting the candidates tested so far would look
+  // authoritative while a nearer surface went untested.
+  describe('when one collider alone costs more than a whole frame', () => {
+    let pending: Set<number>
+    let results: any[]
+    let restore: number
+
+    beforeEach(() => {
+      restore = limits.maxRaycastTrianglesPerFrame
+      // Below a single sphere's 1296, so the very first candidate is unaffordable and no
+      // later frame can do better either.
+      limits.maxRaycastTrianglesPerFrame = 100
+      pending = new Set<number>([1])
+      results = []
+      processRaycasts(makeFakeSceneCapturing(pending, [sphere], undefined, (r) => results.push(r)))
+    })
+
+    afterEach(() => {
+      limits.maxRaycastTrianglesPerFrame = restore
+    })
+
+    it('should answer it explicitly rather than deferring it forever', () => {
+      expect(Array.from(pending)).toEqual([])
+    })
+
+    it('should report no hits rather than a hit from a set it could not finish', () => {
+      expect(results[0]?.hits).toEqual([])
+    })
+  })
+
+  // What it spends must come OFF the frame's budget, or HIT_FIRST raycasts stop sharing a
+  // frame with each other and only the mesh ceiling bounds how many run.
+  //
+  // Uses the same entered-but-missed arrangement, because a raycast that proves its hit
+  // immediately spends almost nothing and cannot demonstrate the budget at all.
+  describe('when one HIT_FIRST raycast has already spent most of the frame budget', () => {
+    let pending: Set<number>
+    let restore: number
+    let grazed: BABYLON.Mesh
+
+    beforeEach(() => {
+      restore = limits.maxRaycastTrianglesPerFrame
+      // Room for two candidates (2 x 1296 = 2592) and not four.
+      limits.maxRaycastTrianglesPerFrame = 4000
+
+      grazed = BABYLON.MeshBuilder.CreateSphere('shared_budget_collider', { diameter: 1, segments: 16 }, scene)
+      grazed.position.set(0.49, 0, 10)
+      grazed.computeWorldMatrix(true)
+      setColliderMask(grazed, ALL_COLLIDER_LAYERS)
+
+      pending = new Set<number>([1, 2])
+      const fake = makeFakeScene(pending, [grazed, grazed], undefined, () => undefined)
+      fake.components[raycastComponent.componentId].getOrNull().maxDistance = 9.6
+      processRaycasts(fake)
+    })
+
+    afterEach(() => {
+      limits.maxRaycastTrianglesPerFrame = restore
+      grazed.dispose()
+    })
+
+    it('should defer the second rather than letting both run unbudgeted', () => {
+      expect(Array.from(pending)).toEqual([2])
+    })
+  })
+
+  // Exhaustion is measured CUMULATIVELY against the frame ceiling, not per candidate.
+  // What decides "no later frame can do better" is whether proving the hit needs more
+  // than a whole frame in total — comparing one mesh instead makes an unaffordable set
+  // DEFER forever, which is the starvation the aggregate rule used to prevent.
+  //
+  // Needs candidates that are ENTERED but MISSED, or the early-out ends the walk on the
+  // first hit and nothing accumulates. A sphere offset 0.49 from the ray has its box
+  // entered at 9.5 and its surface at 9.90, so a range of 9.6 admits it and then rejects
+  // the hit.
+  describe('when many candidates are tested without any of them proving a hit', () => {
+    let pending: Set<number>
+    let results: any[]
+    let grazed: BABYLON.Mesh
+
+    beforeEach(() => {
+      grazed = BABYLON.MeshBuilder.CreateSphere('grazed_collider', { diameter: 1, segments: 16 }, scene)
+      grazed.position.set(0.49, 0, 10)
+      grazed.computeWorldMatrix(true)
+      setColliderMask(grazed, ALL_COLLIDER_LAYERS)
+
+      pending = new Set<number>([1])
+      results = []
+      // 600 x 1296 = 777_600, past the 600k ceiling; one alone is 1296, far under it.
+      const fake = makeFakeSceneCapturing(pending, new Array(600).fill(grazed), undefined, (r) => results.push(r))
+      fake.components[raycastComponent.componentId].getOrNull().maxDistance = 9.6
+      processRaycasts(fake)
+    })
+
+    afterEach(() => {
+      grazed.dispose()
+    })
+
+    it('should reach a decision rather than deferring forever', () => {
+      expect(Array.from(pending)).toEqual([])
+    })
+
+    it('should report no hits', () => {
+      expect(results[0]?.hits).toEqual([])
+    })
   })
 
   // The prefilter is what keeps the budget proportional to work actually done:

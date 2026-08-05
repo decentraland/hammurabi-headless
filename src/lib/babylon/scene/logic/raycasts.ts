@@ -473,49 +473,100 @@ export function processRaycasts(scene: SceneContext) {
               ray,
               intersectableMeshes
             )
-            let candidateTriangles = 0
-            for (let i = 0; i < candidates.length; i++) {
-              candidateTriangles += candidateTriangleCost(candidates[i], candidateRadii[i])
-            }
-
-            if (candidateTriangles > maxTrianglesPerFrame) {
-              // Cannot fit on ANY frame, so answer explicitly rather than deferring
-              // it forever: an empty result plus a throttled log. Bounded AND
-              // observable — unlike testing a PARTIAL mesh set, which would resolve
-              // the wrong NEAREST hit and look authoritative. The mesh ceiling
-              // above already charged the scan that got us here, so a retained
-              // continuous raycast cannot repeat it for free.
-              limitLogger.hit(
-                'maxRaycastTrianglesPerFrame',
-                `scene ${scene.entityId}: one raycast spans ${candidateTriangles} triangles`
-              )
-              RaycastResult.createOrReplace(
-                entity.entityId,
-                raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
-              )
-            } else if (candidateTriangles > triangleBudget) {
-              break
-            } else {
-              triangleBudget -= candidateTriangles
-
-              // then perform the actual raycast, against the prefiltered set
-              const { results, refundedTriangles } = intersectCandidates(
+            // HIT_FIRST spends INCREMENTALLY; QUERY_ALL is charged as a lump.
+            //
+            // HIT_FIRST visits candidates in box-entry order and stops the moment
+            // `nearestHit <= nextEntry`, which makes the answer exact — so it only has to
+            // afford the candidates it actually visits. Summing the whole set first and
+            // refusing when the total exceeded the ceiling meant a near, cheap collider
+            // that settles the answer in one test was answered EMPTY because far,
+            // expensive candidates happened to be in range too. The client reports the
+            // near hit in that scene; this reported nothing.
+            //
+            // That is not the "partial mesh set" the aggregate check exists to prevent:
+            // the concern there is resolving the WRONG nearest hit, and the entry-order
+            // early-out makes an answer exact the moment it is reached. QUERY_ALL has no
+            // such early-out — it genuinely needs every candidate — so it keeps the
+            // aggregate rule unchanged.
+            if (raycast.queryType === RaycastQueryType.RQT_HIT_FIRST) {
+              const spend: TriangleSpend = {
+                remaining: triangleBudget,
+                frameCeiling: maxTrianglesPerFrame,
+                exhausted: false,
+                blockedByFrameCeiling: false
+              }
+              const { results, trianglesSpent } = intersectCandidates(
                 ray,
                 candidates,
                 candidateEntries,
                 candidateRadii,
-                raycast.queryType
+                raycast.queryType,
+                spend
               )
-              // Give back what the RQT_HIT_FIRST early-out did not spend. Charging
-              // first and refunding after preserves the invariant that no triangle
-              // work runs unbudgeted, while not billing later raycasts in this frame
-              // for candidates that were provably never tested.
-              triangleBudget += refundedTriangles
+              triangleBudget -= trianglesSpent
 
-              const raycastResult = raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
+              if (!spend.exhausted) {
+                RaycastResult.createOrReplace(
+                  entity.entityId,
+                  raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
+                )
+              } else if (spend.blockedByFrameCeiling) {
+                // A single candidate costs more than a whole frame, so no later frame can
+                // do better: answer explicitly rather than deferring forever. `results` is
+                // discarded — the walk stopped before proving the nearest hit, so a nearer
+                // surface may be untested and reporting these would look authoritative.
+                limitLogger.hit(
+                  'maxRaycastTrianglesPerFrame',
+                  `scene ${scene.entityId}: a single collider on this ray exceeds the frame ceiling`
+                )
+                RaycastResult.createOrReplace(
+                  entity.entityId,
+                  raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
+                )
+              } else {
+                // Out of THIS frame's budget only. Defer whole; the rotation cursor gives
+                // it first pick next frame.
+                break
+              }
+            } else {
+              let candidateTriangles = 0
+              for (let i = 0; i < candidates.length; i++) {
+                candidateTriangles += candidateTriangleCost(candidates[i], candidateRadii[i])
+              }
 
-              // send the result back to the scene
-              RaycastResult.createOrReplace(entity.entityId, raycastResult)
+              if (candidateTriangles > maxTrianglesPerFrame) {
+                // Cannot fit on ANY frame, so answer explicitly rather than deferring it
+                // forever: an empty result plus a throttled log. Bounded AND observable —
+                // unlike testing a PARTIAL mesh set, which for QUERY_ALL would silently
+                // drop hits the scene asked for. The mesh ceiling above already charged
+                // the scan that got us here, so a retained continuous raycast cannot
+                // repeat it for free.
+                limitLogger.hit(
+                  'maxRaycastTrianglesPerFrame',
+                  `scene ${scene.entityId}: one raycast spans ${candidateTriangles} triangles`
+                )
+                RaycastResult.createOrReplace(
+                  entity.entityId,
+                  raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
+                )
+              } else if (candidateTriangles > triangleBudget) {
+                break
+              } else {
+                triangleBudget -= candidateTriangles
+
+                const { results } = intersectCandidates(
+                  ray,
+                  candidates,
+                  candidateEntries,
+                  candidateRadii,
+                  raycast.queryType
+                )
+
+                RaycastResult.createOrReplace(
+                  entity.entityId,
+                  raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
+                )
+              }
             }
           }
         }
@@ -824,13 +875,28 @@ function intersectCandidate(
   return ray.intersectsMesh(mesh, false)
 }
 
+/**
+ * Triangle allowance for the incremental HIT_FIRST walk, mutated in place.
+ *
+ * Absent for RQT_QUERY_ALL, which has no early-out and is charged as a lump by the
+ * caller before any triangle work runs.
+ */
+export type TriangleSpend = {
+  remaining: number
+  frameCeiling: number
+  exhausted: boolean
+  /** A single candidate cost more than a whole frame, so no later frame can do better. */
+  blockedByFrameCeiling: boolean
+}
+
 function intersectCandidates(
   ray: Ray,
   candidates: BABYLON.AbstractMesh[],
   entries: number[],
   radii: number[],
-  queryType: RaycastQueryType
-): { results: BABYLON.PickingInfo[]; refundedTriangles: number } {
+  queryType: RaycastQueryType,
+  budget?: TriangleSpend
+): { results: BABYLON.PickingInfo[]; trianglesSpent: number } {
   if (queryType !== RaycastQueryType.RQT_HIT_FIRST) {
     const all: BABYLON.PickingInfo[] = []
     for (let index = 0; index < candidates.length; index++) {
@@ -846,7 +912,7 @@ function intersectCandidates(
     // It also feeds the nearest-first truncation in `raycastResultFromRay`, which
     // would otherwise keep the FARTHEST hits from an unsorted list.
     all.sort((a, b) => a.distance - b.distance)
-    return { results: all, refundedTriangles: 0 }
+    return { results: all, trianglesSpent: 0 }
   }
 
   // Indices sorted by entry distance; the meshes themselves are left alone so the
@@ -855,11 +921,29 @@ function intersectCandidates(
 
   const results: BABYLON.PickingInfo[] = []
   let nearestHit = Number.POSITIVE_INFINITY
-  let tested = 0
+  let trianglesSpent = 0
 
   for (const index of order) {
+    // Proven: no box beginning at or beyond the best hit so far can contain a nearer
+    // surface, so nothing left to test can change the answer.
     if (entries[index] >= nearestHit) break
-    tested++
+
+    // Charged per candidate, as it is visited, rather than for the whole set up front.
+    // See the caller for why: an aggregate check refused raycasts whose answer was
+    // already settled by a near, cheap collider.
+    const cost = candidateTriangleCost(candidates[index], radii[index])
+    if (budget && trianglesSpent + cost > budget.remaining) {
+      budget.exhausted = true
+      // CUMULATIVE against the frame ceiling, not per-candidate. What decides "no later
+      // frame can do better" is whether proving this hit needs more than a whole frame's
+      // budget in total — not whether one mesh does. Comparing a single candidate instead
+      // makes a set that can never be afforded DEFER forever, which is precisely the
+      // starvation the aggregate check used to prevent by answering empty.
+      budget.blockedByFrameCeiling = trianglesSpent + cost > budget.frameCeiling
+      break
+    }
+    trianglesSpent += cost
+
     const info = intersectCandidate(ray, candidates[index], radii[index])
     if (info?.hit) {
       results.push(info)
@@ -867,16 +951,7 @@ function intersectCandidates(
     }
   }
 
-  // Charged conservatively up front by the caller, because the ceiling decision
-  // has to be made BEFORE any triangle work runs. Refunding what the early-out
-  // skipped keeps that invariant while letting the rest of the frame use the
-  // headroom, rather than billing a raycast for work it provably did not do.
-  let refundedTriangles = 0
-  for (let i = tested; i < order.length; i++) {
-    refundedTriangles += candidateTriangleCost(candidates[order[i]], radii[order[i]])
-  }
-
-  return { results, refundedTriangles }
+  return { results, trianglesSpent }
 }
 
 /**

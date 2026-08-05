@@ -210,7 +210,11 @@ describe('limit logging wiring', () => {
       // 600 candidates is ~1% of the mesh ceiling — so only the triangle guard fires.
       const meshes = new Array(600).fill(sphere)
       const raycast = {
-        queryType: 0,
+        // RQT_QUERY_ALL, which is the query the AGGREGATE triangle rule still governs and
+        // therefore the enforcement site this case exists to wire-check. HIT_FIRST now
+        // spends incrementally and would prove the nearest hit on the first of these 600
+        // identical spheres, so it never reaches a ceiling at all.
+        queryType: 1,
         maxDistance: 999,
         continuous: false,
         timestamp: 0,

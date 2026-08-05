@@ -13,7 +13,7 @@ import {
   pickPointerEventsMesh
 } from '../../../../../src/lib/babylon/scene/logic/pointer-events'
 import { updateAvatarColliders } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
-import { addFloorMesh, floorMeshes, setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
+import { floorMeshes, setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 import { pointerEventsResultComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events-result'
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../../../src/lib/decentraland/state'
@@ -854,32 +854,38 @@ testWithEngine(
       })
     })
 
-    // An occluder need not belong to an entity at all: `ambientLights.ts` masks a
-    // ground mesh that hangs off no BabylonEntity, so `getParentEntity` walks to the
-    // root and returns null. That return had never executed — the occlusion case above
-    // uses a CRDT-authored wall, which does have a parent entity.
-    describe('when the nearest occluder belongs to no entity', () => {
-      let ground: BABYLON.Mesh
+    // Scene geometry belonging to no INTERACTIVE entity still occludes. This case used to
+    // be written against a mesh outside every scene root, reached through `floorMeshes`;
+    // that group is no longer scanned — it contributed nothing and cost a full unbudgeted
+    // scan on the per-frame hover path (see prefilterArgs). The reachable equivalent is a
+    // collider parented straight to the scene root, whose nearest BabylonEntity ancestor
+    // is the root itself and carries no PointerEvents.
+    describe('when the nearest collider belongs to no interactive entity', () => {
+      let bare: BABYLON.Mesh
+      let behind: Entity
 
       beforeEach(async () => {
-        await putInteractiveBox(6)
-        ground = BABYLON.MeshBuilder.CreateBox('ground', { width: 8, height: 8, depth: 1 }, $.scene)
-        ground.position.set(0, 0, 3)
-        ground.computeWorldMatrix(true)
-        setColliderMask(ground, ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER)
-        // Registered exactly as `ambientLights.ts` registers the real ambient ground: it
-        // is not named `*_collider`, so `setColliderMask` does not enrol it, and it hangs
-        // off no entity. `floorMeshes` is what keeps it in the pointer's candidate set now
-        // that the pick walks scene roots instead of every mesh in the Babylon scene.
-        addFloorMesh(ground)
+        behind = await putInteractiveBox(6)
+        bare = BABYLON.MeshBuilder.CreateBox('bare_collider', { width: 8, height: 8, depth: 1 }, $.scene)
+        bare.parent = $.ctx.rootNode
+        bare.position.set(0, 0, 3)
+        bare.computeWorldMatrix(true)
+        setColliderMask(bare, ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER)
       })
 
       afterEach(() => {
-        ground.dispose()
+        bare.dispose()
       })
 
       it('should hover nothing rather than treating it as interactable', () => {
-        expect(pickActivePointerEventsEntity($.scene)).toBeNull()
+        expect(pickActivePointerEventsEntity($.scene) === null).toBe(true)
+      })
+
+      // Without this the assertion above could pass because the pick failed for some
+      // unrelated reason rather than because the bare collider blocked it.
+      it('should be what blocks the interactive entity behind it', () => {
+        bare.setEnabled(false)
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).toBe(behind)
       })
     })
 

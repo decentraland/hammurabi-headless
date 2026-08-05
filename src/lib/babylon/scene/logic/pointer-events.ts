@@ -1,8 +1,7 @@
 import { Matrix, Node, PickingInfo, PointerEventTypes, Ray, Scene, Vector3 } from '@babylonjs/core'
 import { BabylonEntity } from '../BabylonEntity'
 import { AbstractMesh as BabylonMesh } from '@babylonjs/core'
-import { ColliderWalkBudget, floorMeshes, getColliderLayers, pickMeshesForMask } from './colliders'
-import { bitIntersectsAndContainsAny } from '../../../misc/bit-operations'
+import { ColliderWalkBudget, getColliderLayers, pickMeshesForMask } from './colliders'
 import { limits } from '../../../misc/limits'
 import { limitLogger } from '../../../misc/limit-logger'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
@@ -223,11 +222,18 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
       return null
     }
   }
-  for (const mesh of floorMeshes) {
-    if (mesh.isEnabled(false) && bitIntersectsAndContainsAny(getColliderLayers(mesh), POINTER_OCCLUDING_LAYERS)) {
-      if (isPointerOccluder(mesh)) meshes.add(mesh)
-    }
-  }
+  // `floorMeshes` is deliberately NOT scanned. It was, to catch occluders living outside
+  // every scene's node tree — but it contributes nothing and cost a full unbudgeted scan
+  // of the set on the per-frame hover path, which a scene grows simply by adding
+  // colliders (`setColliderMask` enrols every mesh named `*_collider`).
+  //
+  // Nothing is lost. Every producer of collider meshes — mesh-collider-component,
+  // gltf-component, AssetManager, avatar-colliders — parents them under a scene entity,
+  // so the walks above already reach them. The one member that is NOT under a scene root
+  // is `ambientLights.ts`'s ground, and it is CL_PHYSICS-only, so `isPointerOccluder`
+  // rejects it anyway — correctly, because the client's world floor sits on the Floor
+  // layer, which is not in PLAYER_ORIGIN_RAYCAST_MASK. Looking at the ground does not
+  // block hover there either.
 
   // `getBoundingInfo()` re-derives the world box from the CACHED matrix rather than
   // recomputing one, and `_evaluateActiveMeshes` never bumps the render id of a mesh it
@@ -258,8 +264,8 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
   // the Babylon frame and processRaycasts on the scene's CRDT frame, so a shared counter
   // would make each starve the other depending on interleaving. What this bounds is one
   // pick's own work, which is the thing that was unbounded.
-  // Still checked after the floorMeshes group, which is not walked through the budget
-  // above (it is a flat set, not a tree) and so can push the total past the ceiling.
+  // Belt and braces: the walk budget's `maxResults` already caps this, so reaching it
+  // here means the two disagree.
   if (meshes.size > limits.maxRaycastIntersectionsPerFrame) {
     limitLogger.hit('maxRaycastIntersectionsPerFrame', `pointer pick spans ${meshes.size} colliders`)
     return null
