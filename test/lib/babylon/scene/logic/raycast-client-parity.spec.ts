@@ -152,26 +152,47 @@ testWithEngine(
       })
     })
 
-    // The unset-direction branch defaults to a LOCAL forward vector, so it has the
-    // same exposure as localDirection above and needs its own range check — the
-    // reported direction is normalized on the way out either way, so nothing else
-    // here can see the difference.
-    describe('when a scaled entity leaves the direction unset', () => {
+    // RaycastUtils.TryCreateRay ends its switch with `default: ray = default;
+    // return false` — an unset direction oneof is malformed data, not a request for
+    // a forward ray. The client logs "Raycast data is malformed" and writes nothing.
+    //
+    // We stay quiet rather than logging: a scene can hold a malformed CONTINUOUS
+    // raycast and reach this every frame forever, and an unthrottled
+    // scene-triggerable log is an amplification vector. The absent RaycastResult is
+    // the signal.
+    describe('when a scene sets no direction at all', () => {
       beforeEach(async () => {
-        await putCollider(new Vector3(0, 0, 15), PHYSICS_ONLY)
-        await fire(
-          {
-            maxDistance: 10,
-            queryType: RaycastQueryType.RQT_HIT_FIRST,
-            collisionMask: PHYSICS_ONLY,
-            direction: undefined
-          },
-          transform(Vector3.Zero(), Quaternion.Identity(), new Vector3(2, 2, 2))
-        )
+        await putCollider(new Vector3(0, 0, 10), PHYSICS_ONLY)
+        await fire({
+          maxDistance: 100,
+          queryType: RaycastQueryType.RQT_HIT_FIRST,
+          collisionMask: PHYSICS_ONLY,
+          direction: undefined
+        })
       })
 
-      it('should not let the entity scale stretch the default forward ray', () => {
-        expect(resultOf(raycastEntity).hits).toHaveLength(0)
+      it('should write no result rather than inventing a local forward ray', () => {
+        expect(resultOf(raycastEntity) === null).toBe(true)
+      })
+    })
+
+    // `if (rayDirection == Vector3.zero) { ray = default; return false; }`.
+    // Load-bearing rather than tidy: `Vector3.normalize()` LEAVES a zero vector
+    // unchanged (Babylon guards the divide), so without this the ray would keep
+    // direction (0,0,0) and be answered as though it meant something.
+    describe('when a scene asks for a zero-length direction', () => {
+      beforeEach(async () => {
+        await putCollider(new Vector3(0, 0, 10), PHYSICS_ONLY)
+        await fire({
+          maxDistance: 100,
+          queryType: RaycastQueryType.RQT_HIT_FIRST,
+          collisionMask: PHYSICS_ONLY,
+          direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 0) }
+        })
+      })
+
+      it('should treat it as malformed and write no result', () => {
+        expect(resultOf(raycastEntity) === null).toBe(true)
       })
     })
 

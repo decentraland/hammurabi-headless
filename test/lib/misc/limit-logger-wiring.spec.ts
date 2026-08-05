@@ -141,10 +141,11 @@ describe('limit logging wiring', () => {
       const meshes = new Array(60_000).fill(plane)
       const raycast = {
         queryType: 0,
+        maxDistance: 999,
         continuous: false,
         timestamp: 0,
         collisionMask: undefined,
-        direction: undefined,
+        direction: { $case: 'globalDirection', globalDirection: new BABYLON.Vector3(0, 0, 1) },
         originOffset: undefined
       }
       processRaycasts({
@@ -202,10 +203,11 @@ describe('limit logging wiring', () => {
       const meshes = new Array(600).fill(sphere)
       const raycast = {
         queryType: 0,
+        maxDistance: 999,
         continuous: false,
         timestamp: 0,
         collisionMask: undefined,
-        direction: undefined,
+        direction: { $case: 'globalDirection', globalDirection: new BABYLON.Vector3(0, 0, 1) },
         originOffset: undefined
       }
       processRaycasts({
@@ -265,10 +267,11 @@ describe('limit logging wiring', () => {
       const meshes = new Array(5).fill(box)
       const raycast = {
         queryType: 1, // RQT_QUERY_ALL
+        maxDistance: 999,
         continuous: false,
         timestamp: 0,
         collisionMask: undefined,
-        direction: undefined,
+        direction: { $case: 'globalDirection', globalDirection: new BABYLON.Vector3(0, 0, 1) },
         originOffset: undefined
       }
       processRaycasts({

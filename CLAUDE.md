@@ -217,13 +217,27 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   defaults to `CL_PHYSICS` alone (the proto documents `CL_POINTER | CL_PHYSICS`), and
   `RQT_NONE` writes NO result at all (the proto says "set the raycast result with
   empty hits"). The MeshCollider mask default does NOT diverge — both say
-  `CL_PHYSICS | CL_POINTER`. Known REMAINING divergences, deliberate: unset
-  `maxDistance` falls back to 999 where the client would raycast zero distance; a
-  malformed/zero direction still fires where the client warns and skips; `QUERY_ALL`
-  caps at `maxRaycastHitsPerQuery` nearest-first where the client takes an arbitrary
-  10; the collider plane is a zero-thickness quad where the client uses a 1cm-deep
-  box; and sphere/box colliders are tessellated where the client uses analytic PhysX
-  primitives. Raycasting
+  `CL_PHYSICS | CL_POINTER`. An unset `maxDistance` is a ZERO-length ray, not a
+  999m one: `max_distance` is a plain proto3 scalar so unset arrives as 0, and the
+  client passes it straight to `Physics.RaycastNonAlloc` with no default anywhere —
+  a scene that never sets it already finds nothing on every player's machine, so the
+  old 999 fallback could only mask scenes that were broken for real users. Non-finite
+  is still rejected to 0 rather than passed through: a NaN length makes BOTH
+  `tmin > tmax` in the slab prefilter and `distance > this.length` in
+  `intersectsTriangle` false, so it would admit every collider at any range. A
+  malformed direction (no oneof, or one resolving to a zero vector) produces NO ray
+  and NO result, matching `TryCreateRay`'s `return false` — the old local-forward
+  default was a hammurabi invention. Unlike the client we do NOT log it: a scene can
+  hold a malformed CONTINUOUS raycast and reach it every frame forever. The collider
+  plane is a 1cm-deep box (`PrimitivesSize.PLANE_SIZE`), not the zero-thickness quad
+  it used to be. Known REMAINING divergences, deliberate: `QUERY_ALL` caps at
+  `maxRaycastHitsPerQuery` nearest-first where the client takes an arbitrary,
+  unsorted 10 (which also degrades the client's own HIT_FIRST past 10 candidates);
+  sphere/box colliders are tessellated where the client uses analytic PhysX
+  primitives; a negative cylinder radius is taken as its magnitude where the client
+  builds a self-intersecting hourglass; raycast ordering is a rotation cursor where
+  the client sorts by partition distance (no equivalent here — no camera); and
+  `CL_PLAYER` hits are never reported because no avatar colliders exist. Raycasting
   is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
   because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
   every primitive collider was a 12-triangle box; a sphere is 1296. Those two bound

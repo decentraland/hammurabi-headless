@@ -350,25 +350,41 @@ testWithEngine(
         expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
       })
 
-      it('should build a 1x1 quad with no depth instead of a cube', () => {
-        expect(colliderOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0])
+      // 1cm deep, matching the reference client's
+      // `PrimitivesSize.PLANE_SIZE = (1, 1, 0.01f)`. Unity cannot express a flat
+      // collider — a BoxCollider has no zero-thickness form — so the client
+      // approximates a PlaneMesh with a thin box, and this server used to build a
+      // true zero-thickness quad. That put the collision surface up to 5mm from
+      // where every player's client puts it.
+      it('should build a 1x1 quad with the 1cm of depth the client gives it', () => {
+        expect(colliderOf(entity)!.getBoundingInfo().boundingBox.extendSize.asArray()).toEqual([0.5, 0.5, 0.005])
+      })
+
+      // NOT [0.5, 0.5, 0]: pins that the depth is the client's constant rather than
+      // either extreme. A zero-depth quad and a full unit cube are both wrong, and
+      // extendSize alone would not distinguish 0.01 from any other small number.
+      it('should be far thinner than it is wide, but not flat', () => {
+        const extent = colliderOf(entity)!.getBoundingInfo().boundingBox.extendSize
+        expect([extent.z > 0, extent.z < extent.x / 10]).toEqual([true, true])
       })
 
       it('should be hit by a ray arriving at its front face', () => {
         expect(hitFromFront).toBe(true)
       })
 
-      // Babylon's ray/triangle test does not backface-cull at all, and the collision
-      // engine's back-face skip needs `!subMesh.getMaterial()`, which never holds
-      // (getMaterial falls back to scene.defaultMaterial). So a single-sided quad
-      // already answers from both sides and Mesh.DOUBLESIDE would only double the
-      // geometry.
-      it('should be hit by a ray arriving from behind even though the quad is single sided', () => {
+      // Held over from the zero-thickness quad, and still worth asserting: a box is
+      // hit from behind for the trivial reason that the ray enters its far face,
+      // but this is the property scenes depend on and it should fail loudly if the
+      // geometry ever goes back to a single-sided surface.
+      it('should be hit by a ray arriving from behind', () => {
         expect(hitFromBehind).toBe(true)
       })
 
-      it('should keep the cheaper single-sided geometry of 4 vertices', () => {
-        expect(colliderOf(entity)!.getTotalVertices()).toBe(4)
+      // 24, not the quad's 4: a box carries its faces separately so each gets its
+      // own normals. Costs nothing extra to raycast — 12 triangles is still under
+      // TRIANGLE_COST_FLOOR, so it bills exactly what the 2-triangle quad billed.
+      it('should carry box geometry rather than the old single-sided quad', () => {
+        expect(colliderOf(entity)!.getTotalVertices()).toBe(24)
       })
 
       it('should attach the collider to the entity so raycasts traversing the entity can find it', () => {

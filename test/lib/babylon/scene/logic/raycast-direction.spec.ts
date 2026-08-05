@@ -92,10 +92,16 @@ testWithEngine(
         await fireFrom(QUARTER_TURN_ABOUT_Y, undefined)
       })
 
-      // The documented default is a LOCAL forward vector, so the entity's rotation
-      // has to be applied to it. Left unapplied it would report (0,0,1).
-      it('should fire along the local forward axis carried through the entity rotation', () => {
-        expect(reportedDirection().map((n) => Math.round(n * 1000) / 1000)).toEqual([1, 0, 0])
+      // No ray at all, matching the client's `default: ray = default; return false`
+      // in RaycastUtils.TryCreateRay. This used to fire a local-space forward
+      // vector — a hammurabi invention. raycast.proto documents no default for the
+      // oneof, and the client treats an unset direction as malformed data, so a
+      // scene relying on the implicit forward ray was already getting nothing on
+      // every player's machine.
+      it('should write no result at all rather than inventing a forward ray', () => {
+        expect(
+          $.ctx.components[raycastResultComponent.componentId].getOrNull(raycastEntity) === null
+        ).toBe(true)
       })
     })
 

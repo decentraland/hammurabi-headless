@@ -6,7 +6,7 @@ import { setColliderMask } from "../../babylon/scene/logic/colliders";
 import {
   createBoxMesh,
   createCylinderMesh,
-  createPlaneMesh,
+  createPlaneColliderMesh,
   createSphereMesh
 } from "../../babylon/scene/logic/primitive-meshes";
 import { memoize } from "../../misc/memoize";
@@ -40,23 +40,22 @@ const baseColliderSphere = memoize((scene: Scene) => {
 })
 
 const baseColliderPlane = memoize((scene: Scene) => {
-  // A real quad, matching the protocol's "2D rectangle described by the Entity's
-  // Transform" and the geometry mesh-renderer-component builds for a PlaneMesh.
+  // A 1x1 quad with the reference client's 1cm of depth
+  // (`PrimitivesSize.PLANE_SIZE = (1, 1, 0.01f)`), NOT the true zero-thickness
+  // quad this used to build. Unity cannot express a flat collider — a BoxCollider
+  // has no zero-thickness form — so the client approximates a PlaneMesh with a
+  // thin box, and an authoritative server that puts the collision surface up to
+  // 5mm from where every player's client puts it is wrong in the way that matters.
   //
-  // SINGLE-sided on purpose, and it is still hit from behind on BOTH paths:
-  //  - raycasts: Babylon's ray/triangle test does not backface-cull at all.
-  //  - avatar collisions: `Collisions/collider.js` skips a triangle facing away
-  //    only when `hasMaterial` is false, and `hasMaterial` is
-  //    `!!subMesh.getMaterial()` (`abstractMesh._collideForSubMesh`).
-  //    `subMesh.getMaterial()` falls back to `scene.defaultMaterial` when the mesh
-  //    carries none, so it is ALWAYS truthy and that skip is unreachable —
-  //    measured, a mesh with `material === null` is not culled either. (An earlier
-  //    version of this comment credited setColliderMask's collider material for
-  //    that; it is real but irrelevant, and relying on it would tie a geometry
-  //    decision to a material assignment that has nothing to do with it.)
-  // Nothing renders a collider, so Mesh.DOUBLESIDE would only double the vertex
-  // count (8 vertices / 4 triangles instead of 4 / 2) for no behavioural gain.
-  const ret = createPlaneMesh(scene, 'base-plane_collider', { doubleSided: false, updatable: false })
+  // The zero-thickness quad was verified to work (Babylon's ray test is not
+  // backface-culled, and `moveWithCollisions` blocks from both faces without
+  // tunnelling even at dz=40) — it was a defensible reading of the protocol's "2D
+  // rectangle", just not the client's. The RENDERER keeps its real quad: that one
+  // is drawn rather than collided with, and the client draws a quad too.
+  //
+  // Costs nothing extra to raycast despite going from 2 triangles to 12: both are
+  // under TRIANGLE_COST_FLOOR, so both bill 12.
+  const ret = createPlaneColliderMesh(scene, 'base-plane_collider')
   ret.setEnabled(false)
   return ret
 })

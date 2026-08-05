@@ -59,7 +59,7 @@ describe('raycast prefilter and early-out', () => {
       continuous: false,
       timestamp: 0,
       collisionMask: MASK,
-      direction: undefined,
+      direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
       originOffset: undefined,
       maxDistance
     }
@@ -85,7 +85,7 @@ describe('raycast prefilter and early-out', () => {
 
   /** What the code did before the early-out: test everything, take the closest. */
   function baselineNearest(meshes: AbstractMesh[], maxDistance: number): string | undefined {
-    const ray = new Ray(Vector3.Zero(), new Vector3(0, 0, 1), maxDistance || 999)
+    const ray = new Ray(Vector3.Zero(), new Vector3(0, 0, 1), maxDistance)
     const hits = ray.intersectsMeshes(meshes, false)
     let best: BABYLON.PickingInfo | undefined
     for (const hit of hits) if (!best || hit.distance < best.distance) best = hit
@@ -119,7 +119,7 @@ describe('raycast prefilter and early-out', () => {
           setColliderMask(mesh, MASK)
           meshes.push(mesh)
         }
-        arrangements.push({ meshes, maxDistance: a % 3 === 0 ? 0 : 5 + random() * 40 })
+        arrangements.push({ meshes, maxDistance: a % 3 === 0 ? 999 : 5 + random() * 40 })
       }
     })
 
@@ -145,7 +145,7 @@ describe('raycast prefilter and early-out', () => {
       for (const { meshes, maxDistance } of arrangements) {
         let optimised: any
         processRaycasts(fakeScene(meshes, RaycastQueryType.RQT_HIT_FIRST, maxDistance, (r) => (optimised = r)))
-        const ray = new Ray(Vector3.Zero(), new Vector3(0, 0, 1), maxDistance || 999)
+        const ray = new Ray(Vector3.Zero(), new Vector3(0, 0, 1), maxDistance)
         const hits = ray.intersectsMeshes(meshes, false)
         let best: BABYLON.PickingInfo | undefined
         for (const hit of hits) if (!best || hit.distance < best.distance) best = hit
@@ -193,7 +193,7 @@ describe('raycast prefilter and early-out', () => {
       setColliderMask(headOn, MASK)
 
       let result: any
-      processRaycasts(fakeScene([grazing, headOn], RaycastQueryType.RQT_HIT_FIRST, 0, (r) => (result = r)))
+      processRaycasts(fakeScene([grazing, headOn], RaycastQueryType.RQT_HIT_FIRST, 999, (r) => (result = r)))
       reported = result?.hits?.[0]?.meshName
     })
 
@@ -227,7 +227,7 @@ describe('raycast prefilter and early-out', () => {
         meshes.push(mesh)
       }
       let result: any
-      processRaycasts(fakeScene(meshes, RaycastQueryType.RQT_QUERY_ALL, 0, (r) => (result = r)))
+      processRaycasts(fakeScene(meshes, RaycastQueryType.RQT_QUERY_ALL, 999, (r) => (result = r)))
       hits = result.hits
     })
 

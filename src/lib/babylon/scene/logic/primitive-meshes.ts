@@ -172,6 +172,40 @@ export function createSphereMesh(scene: BABYLON.Scene, name: string): BABYLON.Me
  * Unity's BoxCollider cannot be flat; Babylon picks and collides against a genuine
  * plane, so no thickness fudge is needed.)
  */
+/**
+ * Depth of the plane COLLIDER, matching the reference client's
+ * `PrimitivesSize.PLANE_SIZE = (1, 1, 0.01f)`.
+ *
+ * The client cannot express a flat collider at all — a Unity `BoxCollider` has no
+ * zero-thickness form — so it approximates a PlaneMesh with a 1cm-deep box. This
+ * server previously built a true zero-thickness quad, which is arguably a better
+ * model of "a 2D rectangle" but put the collision surface up to 5mm away from
+ * where the client puts it, in both directions.
+ *
+ * Matched rather than improved on: this is an authoritative server, so the value
+ * of agreeing with what every player's client computes outweighs being 5mm more
+ * faithful to the protocol's prose. The RENDERER plane stays a true quad — it is
+ * drawn, not collided with, and the client draws a quad too.
+ */
+const PLANE_COLLIDER_DEPTH = 0.01
+
+/**
+ * Builds the collider box for a PlaneMesh: a 1x1 quad with the client's 1cm of
+ * depth. See PLANE_COLLIDER_DEPTH for why this is a box and not a quad.
+ */
+export function createPlaneColliderMesh(scene: BABYLON.Scene, name: string): BABYLON.Mesh {
+  return BABYLON.MeshBuilder.CreateBox(
+    name,
+    {
+      width: PRIMITIVE_UNIT_SIZE,
+      height: PRIMITIVE_UNIT_SIZE,
+      depth: PLANE_COLLIDER_DEPTH,
+      updatable: false
+    },
+    scene
+  )
+}
+
 export function createPlaneMesh(
   scene: BABYLON.Scene,
   name: string,

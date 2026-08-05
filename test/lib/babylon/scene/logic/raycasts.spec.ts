@@ -73,10 +73,11 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   function makeFakeScene(pending: Set<number>, meshes: BABYLON.AbstractMesh[], mask: number | undefined, onResult: (id: number) => void) {
     const raycastValue = {
       queryType: RaycastQueryType.RQT_HIT_FIRST,
+      maxDistance: 999,
       continuous: false, // one-shot: only removed from the set after it actually runs
       timestamp: 0,
       collisionMask: mask,
-      direction: undefined,
+      direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
       originOffset: undefined
     }
     // The walk starts here and applies the real layer predicate to each child; the
@@ -352,10 +353,11 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
             currentMeshes = byEntity[id]?.meshes ?? []
             return {
               queryType: RaycastQueryType.RQT_HIT_FIRST,
+              maxDistance: 999,
               continuous: byEntity[id]?.continuous ?? false,
               timestamp: 0,
               collisionMask: maskFor(id),
-              direction: undefined,
+              direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
               originOffset: undefined
             }
           }
@@ -614,10 +616,11 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     const rootNode = { position: Vector3.Zero(), getChildren: jest.fn(() => meshes) }
     const raycastValue = {
       queryType: RaycastQueryType.RQT_HIT_FIRST,
+      maxDistance: 999,
       continuous: false,
       timestamp: 0,
       collisionMask: 5, // all three share one mask
-      direction: undefined,
+      direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
       originOffset: undefined
     }
     const fakeScene: any = {
@@ -664,10 +667,11 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       scene.components[raycastComponent.componentId] = {
         getOrNull: () => ({
           queryType: RaycastQueryType.RQT_HIT_FIRST,
+          maxDistance: 999,
           continuous: true, // stays pending, so the same set is re-swept each frame
           timestamp: 0,
           collisionMask: undefined,
-          direction: undefined,
+          direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
           originOffset: undefined
         })
       }
@@ -708,10 +712,11 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
       scene.components[raycastComponent.componentId] = {
         getOrNull: () => ({
           queryType: RaycastQueryType.RQT_HIT_FIRST,
+          maxDistance: 999,
           continuous: true,
           timestamp: 0,
           collisionMask: undefined,
-          direction: undefined,
+          direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
           originOffset: undefined
         })
       }

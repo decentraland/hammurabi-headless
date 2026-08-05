@@ -1,16 +1,16 @@
-import * as BABYLON from "@babylonjs/core";
-import { Ray, Vector3 } from "@babylonjs/core";
-import { RaycastHit } from "@dcl/protocol/out-js/decentraland/sdk/components/common/raycast_hit.gen";
-import { PBRaycast, RaycastQueryType } from "@dcl/protocol/out-js/decentraland/sdk/components/raycast.gen";
-import { PBRaycastResult } from "@dcl/protocol/out-js/decentraland/sdk/components/raycast_result.gen";
-import { raycastComponent, raycastResultComponent } from "../../../decentraland/sdk-components/raycast-component";
-import { SceneContext } from "../scene-context";
-import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoordinates } from "../coordinates";
-import { BabylonEntity } from "../BabylonEntity";
-import { pickMeshesForMask } from "./colliders";
-import { ColliderLayer } from "@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen";
-import { limits } from "../../../misc/limits";
-import { limitLogger } from "../../../misc/limit-logger";
+import * as BABYLON from '@babylonjs/core'
+import { Ray, Vector3 } from '@babylonjs/core'
+import { RaycastHit } from '@dcl/protocol/out-js/decentraland/sdk/components/common/raycast_hit.gen'
+import { PBRaycast, RaycastQueryType } from '@dcl/protocol/out-js/decentraland/sdk/components/raycast.gen'
+import { PBRaycastResult } from '@dcl/protocol/out-js/decentraland/sdk/components/raycast_result.gen'
+import { raycastComponent, raycastResultComponent } from '../../../decentraland/sdk-components/raycast-component'
+import { SceneContext } from '../scene-context'
+import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoordinates } from '../coordinates'
+import { BabylonEntity } from '../BabylonEntity'
+import { pickMeshesForMask } from './colliders'
+import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
+import { limits } from '../../../misc/limits'
+import { limitLogger } from '../../../misc/limit-logger'
 
 /**
  * Default collision mask for a RAYCAST whose `collisionMask` is unset.
@@ -252,125 +252,142 @@ export function processRaycasts(scene: SceneContext) {
       if (entity && entity.appliedComponents.raycast) {
         const ray = computeRayDirection(scene, raycast, entity.appliedComponents.raycast.ray, entity)
 
-        // get a list of all possible meshes to project this ray to
-        const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
-        const intersectableMeshes = meshesForMask(mask)
-
-        // The MESH ceiling pays for the bounding-box scan below: one cheap
-        // ray↔box test per candidate, whether or not it survives. Enforced
-        // per-raycast BEFORE that scan, exactly as the triangle ceiling is
-        // enforced before the triangle work — the scan is O(candidates) and a
-        // scene of CHEAP colliders sails past the triangle ceiling while blowing
-        // this one. The scan itself is not new: `intersectsMeshes` always tested
-        // every mesh's bounds one by one, so the cost predates the prefilter;
-        // what is new is that it is measured before it is paid.
-        //
-        // Written as one exclusive chain so EVERY path falls through to the
-        // cleanup at the bottom of the loop, which removes one-shots and keeps
-        // `continuous` ones. The over-budget branches used to `continue` past
-        // that cleanup after deleting the entry themselves, which silently
-        // retired a continuous raycast after a single empty result: nothing
-        // re-arms it except the scene re-PUTting the component, so it stayed
-        // dead even once the collider set dropped back under budget.
-        if (intersectableMeshes.length > maxIntersectionsPerFrame) {
-          // Charged even though no scan runs. A retained continuous raycast
-          // arrives here again next frame, and getting here is not free —
-          // `meshesForMask` walked the whole subtree and swept every world
-          // matrix for this mask. Uncharged, an over-ceiling continuous raycast
-          // repeats that walk every frame forever, once per DISTINCT mask
-          // (~4ms per mask per frame at 50k colliders): exactly the cost this
-          // ceiling exists to bound.
-          intersectionBudget -= intersectableMeshes.length
-          limitLogger.hit(
-            'maxRaycastIntersectionsPerFrame',
-            `scene ${scene.entityId}: one raycast spans ${intersectableMeshes.length} colliders`
-          )
+        if (!ray) {
+          // Malformed: no direction oneof, or one that resolves to a zero vector.
+          // The client writes no result and warns; we write no result and stay
+          // quiet (see computeRayDirection). Falls through to the cleanup below,
+          // so a one-shot leaves the pending set rather than being retried
+          // forever.
+        } else if (ray.length <= 0) {
+          // A zero range cannot hit anything, so answer it without walking the
+          // mask or charging either ceiling. The client reaches the same outcome
+          // by passing 0 to Physics.RaycastNonAlloc, which returns no hits — but
+          // it still WRITES the result, so this does too.
           RaycastResult.createOrReplace(
             entity.entityId,
             raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
           )
-        } else if (intersectableMeshes.length > intersectionBudget) {
-          // Fits in a frame, just not in what is left of this one — defer it
-          // whole rather than truncating its candidate set.
-          break
         } else {
-          intersectionBudget -= intersectableMeshes.length
+          // get a list of all possible meshes to project this ray to
+          const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
+          const intersectableMeshes = meshesForMask(mask)
 
-          // Bounding-box prefilter, charged separately from the triangle work it
-          // gates. Babylon does an equivalent early-out inside intersectsMeshes,
-          // so this changes no result — it makes the cost VISIBLE before it is
-          // paid. Measured: 3000 spheres take 246ms when the ray enters every box
-          // and 14ms when it enters none, so charging every candidate's triangles
-          // bills a scene ~17x its real cost and throttles raycasts that were
-          // nearly free.
+          // The MESH ceiling pays for the bounding-box scan below: one cheap
+          // ray↔box test per candidate, whether or not it survives. Enforced
+          // per-raycast BEFORE that scan, exactly as the triangle ceiling is
+          // enforced before the triangle work — the scan is O(candidates) and a
+          // scene of CHEAP colliders sails past the triangle ceiling while blowing
+          // this one. The scan itself is not new: `intersectsMeshes` always tested
+          // every mesh's bounds one by one, so the cost predates the prefilter;
+          // what is new is that it is measured before it is paid.
           //
-          // Tested in WORLD space against `minimumWorld`/`maximumWorld`. Do NOT
-          // reach for `mesh.intersects(ray, …, onlyBoundingInfo)` here: that path
-          // compares a ray against the mesh's LOCAL bounding volume, and
-          // `Ray.intersectsMesh` is what transforms the ray into local space
-          // before calling it. Handing it a world-space ray silently admits every
-          // mesh whose local bounds contain the scene origin — i.e. every
-          // primitive collider — so the filter passes everything and quietly does
-          // nothing. The world AABB encloses the oriented box Babylon tests, so a
-          // CURRENT one is conservative: it can over-admit a grazing mesh, never
-          // wrongly reject. A STALE one rejects freely in both directions, which
-          // is why meshesForMask refreshes every matrix before this runs.
-          //
-          // `rayBoxEntry` rather than `ray.intersectsBoxMinMax`: it honours
-          // `ray.length` (which the Babylon call does not) and returns the ENTRY
-          // DISTANCE, which is what lets RQT_HIT_FIRST stop early below. Rejecting
-          // a box the ray enters beyond its length cannot lose a hit — every point
-          // of that box on the ray is already out of range.
-          const candidates: BABYLON.AbstractMesh[] = []
-          const candidateEntries: number[] = []
-          let candidateTriangles = 0
-          for (const mesh of intersectableMeshes) {
-            const boundingBox = mesh.getBoundingInfo().boundingBox
-            const entry = rayBoxEntry(ray, boundingBox.minimumWorld, boundingBox.maximumWorld)
-            if (entry >= 0) {
-              candidates.push(mesh)
-              candidateEntries.push(entry)
-              candidateTriangles += candidateTriangleCost(mesh)
-            }
-          }
-
-          if (candidateTriangles > maxTrianglesPerFrame) {
-            // Cannot fit on ANY frame, so answer explicitly rather than deferring
-            // it forever: an empty result plus a throttled log. Bounded AND
-            // observable — unlike testing a PARTIAL mesh set, which would resolve
-            // the wrong NEAREST hit and look authoritative. The mesh ceiling
-            // above already charged the scan that got us here, so a retained
-            // continuous raycast cannot repeat it for free.
+          // Written as one exclusive chain so EVERY path falls through to the
+          // cleanup at the bottom of the loop, which removes one-shots and keeps
+          // `continuous` ones. The over-budget branches used to `continue` past
+          // that cleanup after deleting the entry themselves, which silently
+          // retired a continuous raycast after a single empty result: nothing
+          // re-arms it except the scene re-PUTting the component, so it stayed
+          // dead even once the collider set dropped back under budget.
+          if (intersectableMeshes.length > maxIntersectionsPerFrame) {
+            // Charged even though no scan runs. A retained continuous raycast
+            // arrives here again next frame, and getting here is not free —
+            // `meshesForMask` walked the whole subtree and swept every world
+            // matrix for this mask. Uncharged, an over-ceiling continuous raycast
+            // repeats that walk every frame forever, once per DISTINCT mask
+            // (~4ms per mask per frame at 50k colliders): exactly the cost this
+            // ceiling exists to bound.
+            intersectionBudget -= intersectableMeshes.length
             limitLogger.hit(
-              'maxRaycastTrianglesPerFrame',
-              `scene ${scene.entityId}: one raycast spans ${candidateTriangles} triangles`
+              'maxRaycastIntersectionsPerFrame',
+              `scene ${scene.entityId}: one raycast spans ${intersectableMeshes.length} colliders`
             )
             RaycastResult.createOrReplace(
               entity.entityId,
               raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
             )
-          } else if (candidateTriangles > triangleBudget) {
+          } else if (intersectableMeshes.length > intersectionBudget) {
+            // Fits in a frame, just not in what is left of this one — defer it
+            // whole rather than truncating its candidate set.
             break
           } else {
-            triangleBudget -= candidateTriangles
+            intersectionBudget -= intersectableMeshes.length
 
-            // then perform the actual raycast, against the prefiltered set
-            const { results, refundedTriangles } = intersectCandidates(
-              ray,
-              candidates,
-              candidateEntries,
-              raycast.queryType
-            )
-            // Give back what the RQT_HIT_FIRST early-out did not spend. Charging
-            // first and refunding after preserves the invariant that no triangle
-            // work runs unbudgeted, while not billing later raycasts in this frame
-            // for candidates that were provably never tested.
-            triangleBudget += refundedTriangles
+            // Bounding-box prefilter, charged separately from the triangle work it
+            // gates. Babylon does an equivalent early-out inside intersectsMeshes,
+            // so this changes no result — it makes the cost VISIBLE before it is
+            // paid. Measured: 3000 spheres take 246ms when the ray enters every box
+            // and 14ms when it enters none, so charging every candidate's triangles
+            // bills a scene ~17x its real cost and throttles raycasts that were
+            // nearly free.
+            //
+            // Tested in WORLD space against `minimumWorld`/`maximumWorld`. Do NOT
+            // reach for `mesh.intersects(ray, …, onlyBoundingInfo)` here: that path
+            // compares a ray against the mesh's LOCAL bounding volume, and
+            // `Ray.intersectsMesh` is what transforms the ray into local space
+            // before calling it. Handing it a world-space ray silently admits every
+            // mesh whose local bounds contain the scene origin — i.e. every
+            // primitive collider — so the filter passes everything and quietly does
+            // nothing. The world AABB encloses the oriented box Babylon tests, so a
+            // CURRENT one is conservative: it can over-admit a grazing mesh, never
+            // wrongly reject. A STALE one rejects freely in both directions, which
+            // is why meshesForMask refreshes every matrix before this runs.
+            //
+            // `rayBoxEntry` rather than `ray.intersectsBoxMinMax`: it honours
+            // `ray.length` (which the Babylon call does not) and returns the ENTRY
+            // DISTANCE, which is what lets RQT_HIT_FIRST stop early below. Rejecting
+            // a box the ray enters beyond its length cannot lose a hit — every point
+            // of that box on the ray is already out of range.
+            const candidates: BABYLON.AbstractMesh[] = []
+            const candidateEntries: number[] = []
+            let candidateTriangles = 0
+            for (const mesh of intersectableMeshes) {
+              const boundingBox = mesh.getBoundingInfo().boundingBox
+              const entry = rayBoxEntry(ray, boundingBox.minimumWorld, boundingBox.maximumWorld)
+              if (entry >= 0) {
+                candidates.push(mesh)
+                candidateEntries.push(entry)
+                candidateTriangles += candidateTriangleCost(mesh)
+              }
+            }
 
-            const raycastResult = raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
+            if (candidateTriangles > maxTrianglesPerFrame) {
+              // Cannot fit on ANY frame, so answer explicitly rather than deferring
+              // it forever: an empty result plus a throttled log. Bounded AND
+              // observable — unlike testing a PARTIAL mesh set, which would resolve
+              // the wrong NEAREST hit and look authoritative. The mesh ceiling
+              // above already charged the scan that got us here, so a retained
+              // continuous raycast cannot repeat it for free.
+              limitLogger.hit(
+                'maxRaycastTrianglesPerFrame',
+                `scene ${scene.entityId}: one raycast spans ${candidateTriangles} triangles`
+              )
+              RaycastResult.createOrReplace(
+                entity.entityId,
+                raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
+              )
+            } else if (candidateTriangles > triangleBudget) {
+              break
+            } else {
+              triangleBudget -= candidateTriangles
 
-            // send the result back to the scene
-            RaycastResult.createOrReplace(entity.entityId, raycastResult)
+              // then perform the actual raycast, against the prefiltered set
+              const { results, refundedTriangles } = intersectCandidates(
+                ray,
+                candidates,
+                candidateEntries,
+                raycast.queryType
+              )
+              // Give back what the RQT_HIT_FIRST early-out did not spend. Charging
+              // first and refunding after preserves the invariant that no triangle
+              // work runs unbudgeted, while not billing later raycasts in this frame
+              // for candidates that were provably never tested.
+              triangleBudget += refundedTriangles
+
+              const raycastResult = raycastResultFromRay(scene, ray, results, raycast.queryType, raycast.timestamp || 0)
+
+              // send the result back to the scene
+              RaycastResult.createOrReplace(entity.entityId, raycastResult)
+            }
           }
         }
       }
@@ -391,7 +408,13 @@ export function processRaycasts(scene: SceneContext) {
   scene.raycastRotationCursor = iter.length ? (startAt + scanned) % iter.length : 0
 }
 
-export function raycastResultFromRay(scene: SceneContext, ray: Ray, results: BABYLON.PickingInfo[], queryType: RaycastQueryType, timestamp: number) {
+export function raycastResultFromRay(
+  scene: SceneContext,
+  ray: Ray,
+  results: BABYLON.PickingInfo[],
+  queryType: RaycastQueryType,
+  timestamp: number
+) {
   // start preparing the result
   const raycastResult: PBRaycastResult = {
     direction: Vector3.Normalize(ray.direction),
@@ -426,9 +449,12 @@ export function raycastResultFromRay(scene: SceneContext, ray: Ray, results: BAB
         'maxRaycastHitsPerQuery',
         `scene ${scene.entityId}: one RQT_QUERY_ALL crossed ${results.length} colliders`
       )
-      kept = results.slice().sort((a, b) => a.distance - b.distance).slice(0, maxHits)
+      kept = results
+        .slice()
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, maxHits)
     }
-    raycastResult.hits = kept.map(_ => pickingToRaycastHit(scene, _, ray))
+    raycastResult.hits = kept.map((_) => pickingToRaycastHit(scene, _, ray))
   }
 
   return raycastResult
@@ -481,7 +507,11 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
   const inverseX = 1 / (ray.direction.x || Number.EPSILON)
   let near = (min.x - ray.origin.x) * inverseX
   let far = (max.x - ray.origin.x) * inverseX
-  if (near > far) { const swap = near; near = far; far = swap }
+  if (near > far) {
+    const swap = near
+    near = far
+    far = swap
+  }
   if (near > tmin) tmin = near
   if (far < tmax) tmax = far
   if (tmin > tmax) return -1
@@ -489,7 +519,11 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
   const inverseY = 1 / (ray.direction.y || Number.EPSILON)
   near = (min.y - ray.origin.y) * inverseY
   far = (max.y - ray.origin.y) * inverseY
-  if (near > far) { const swap = near; near = far; far = swap }
+  if (near > far) {
+    const swap = near
+    near = far
+    far = swap
+  }
   if (near > tmin) tmin = near
   if (far < tmax) tmax = far
   if (tmin > tmax) return -1
@@ -497,7 +531,11 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
   const inverseZ = 1 / (ray.direction.z || Number.EPSILON)
   near = (min.z - ray.origin.z) * inverseZ
   far = (max.z - ray.origin.z) * inverseZ
-  if (near > far) { const swap = near; near = far; far = swap }
+  if (near > far) {
+    const swap = near
+    near = far
+    far = swap
+  }
   if (near > tmin) tmin = near
   if (far < tmax) tmax = far
   if (tmin > tmax) return -1
@@ -563,29 +601,29 @@ function intersectCandidates(
  * Compute ray direction calculates the "global coordinates" ray to perform
  * the raycast operation.
  */
-function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, entity: BabylonEntity) {
+function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, entity: BabylonEntity): Ray | null {
   const originOffset = raycast.originOffset ?? Vector3.Zero()
 
-  // The scene's requested range. Applied on EVERY pass, not at construction:
-  // raycast-component.ts reuses one Ray per entity across re-PUTs
+  // The scene's requested range, taken at face value like the reference client
+  // (`Physics.RaycastNonAlloc(ray, hits, sdkComponent.MaxDistance, mask)` — no
+  // default anywhere in unity-explorer). Applied on EVERY pass, not at
+  // construction: raycast-component.ts reuses one Ray per entity across re-PUTs
   // (`prevValue?.ray ?? new Ray(...)`), so a length set once would never track a
   // scene that re-arms with a different maxDistance.
   //
-  // Unset (0, the protobuf default for a scalar float) keeps the historical 999.
-  // The field was previously not read at all: a scene asking for a 1-metre ray
-  // got a 999-metre one, measured as 304 hits spanning ~34m against a
-  // maxDistance of 1. It is a raw scene-controlled float, so it is guarded like
-  // every other one — non-finite or non-positive falls back to the default
-  // rather than producing a NaN length that makes every triangle test compare
-  // false, which would read to a scene as "nothing is there".
+  // `max_distance` is a PLAIN proto3 scalar, so unset arrives as 0 and means a
+  // zero-length ray — no hits. This server used to substitute 999, which was
+  // strictly more generous than the client and therefore wrong in the direction
+  // that matters: a scene that never sets the field finds nothing on every
+  // player's machine, so no shipped scene can be relying on an implicit range.
+  // Anything that appeared to work here was already broken for real users.
   //
-  // This is a CORRECTNESS fix, not a cost control. `intersectsTriangle` honours
-  // `ray.length` (ray.js:191) so hits are bounded, but the AABB prefilter's
-  // `intersectsBoxMinMax` does not, so a short ray still charges the mesh and
-  // triangle ceilings for every collider whose box it points at. Making a short
-  // ray genuinely cheaper needs a distance-aware prefilter; deliberately not
-  // done here.
-  ray.length = Number.isFinite(raycast.maxDistance) && raycast.maxDistance > 0 ? raycast.maxDistance : DEFAULT_RAY_LENGTH
+  // Non-finite is still rejected rather than passed through: a NaN length makes
+  // `tmin > tmax` false in the slab test AND `distance > this.length` false in
+  // `intersectsTriangle`, so it would admit EVERY collider at ANY distance —
+  // the opposite of a range limit. Infinity is rejected with it for the same
+  // reason it would remove the bound entirely.
+  ray.length = Number.isFinite(raycast.maxDistance) && raycast.maxDistance > 0 ? raycast.maxDistance : 0
 
   // World-space add, NOT `TransformCoordinates` through the entity matrix. The
   // reference client is `rayOrigin = entityPosition + sdkRaycast.OriginOffset`
@@ -600,9 +638,11 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
 
   // and then calculate the global direction, relative to the
   if (!raycast.direction) {
-    // the default value if direction is missing is a local-space forward vector
-    Vector3.Forward().rotateByQuaternionToRef(entity.absoluteRotationQuaternion, ray.direction)
-    ray.direction.normalize()
+    // NO ray at all, matching the client's `default: ray = default; return false`
+    // in RaycastUtils.TryCreateRay. This used to default to a local-space forward
+    // vector — a hammurabi invention: raycast.proto documents no default for the
+    // oneof, and the client treats an unset direction as malformed data.
+    return null
   } else if (raycast.direction?.$case === 'localDirection') {
     // then localDirection, is used to detect collisions in a path
     // i.e. Vector3.Forward(), it takes into consideration the rotation of
@@ -617,15 +657,16 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
       raycast.direction.localDirection.x ?? 0,
       raycast.direction.localDirection.y ?? 0,
       raycast.direction.localDirection.z ?? 1
-    )
-      .rotateByQuaternionToRef(entity.absoluteRotationQuaternion, ray.direction)
+    ).rotateByQuaternionToRef(entity.absoluteRotationQuaternion, ray.direction)
     ray.direction.normalize()
   } else if (raycast.direction?.$case === 'globalDirection') {
-    ray.direction.set(
-      raycast.direction?.globalDirection.x,
-      raycast.direction?.globalDirection.y,
-      raycast.direction?.globalDirection.z
-    ).normalize()
+    ray.direction
+      .set(
+        raycast.direction?.globalDirection.x,
+        raycast.direction?.globalDirection.y,
+        raycast.direction?.globalDirection.z
+      )
+      .normalize()
   } else if (raycast.direction?.$case == 'globalTarget') {
     const sceneTarget = new Vector3(
       raycast.direction.globalTarget.x,
@@ -636,11 +677,9 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
 
     // scene one is to make it easy to point towards a pin-pointed element
     // in global space, like a fixed tower
-    ray.direction.set(
-      globalTarget.x - globalOrigin.x,
-      globalTarget.y - globalOrigin.y,
-      globalTarget.z - globalOrigin.z,
-    ).normalize()
+    ray.direction
+      .set(globalTarget.x - globalOrigin.x, globalTarget.y - globalOrigin.y, globalTarget.z - globalOrigin.z)
+      .normalize()
   } else if (raycast.direction?.$case == 'targetEntity') {
     const targetEntity = scene.getEntityOrNull(raycast.direction.targetEntity)
     // `absolutePosition` is ALREADY world space. Running it back through
@@ -659,12 +698,27 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
 
     // scene one is to make it easy to point towards a pin-pointed element
     // in global space, like a fixed tower
-    ray.direction.set(
-      globalTarget.x - globalOrigin.x,
-      globalTarget.y - globalOrigin.y,
-      globalTarget.z - globalOrigin.z,
-    ).normalize()
+    ray.direction
+      .set(globalTarget.x - globalOrigin.x, globalTarget.y - globalOrigin.y, globalTarget.z - globalOrigin.z)
+      .normalize()
   }
+
+  // A zero-length direction is malformed and produces no ray, matching the client
+  // (`if (rayDirection == Vector3.zero) { ray = default; return false; }`).
+  // Reachable from a scene sending an all-zero localDirection/globalDirection, or
+  // a globalTarget/targetEntity that resolves to the ray's own origin.
+  //
+  // Load-bearing rather than tidy: `Vector3.normalize()` LEAVES a zero vector
+  // unchanged (Babylon guards the divide), so the ray would keep direction
+  // (0,0,0). The slab test then computes `1 / Number.EPSILON` per axis and the
+  // triangle test degenerates — a raycast that cannot mean anything, answered as
+  // though it did.
+  //
+  // Deliberately NOT logged, unlike the client's per-frame `ReportHub.LogWarning`:
+  // a scene can hold a malformed CONTINUOUS raycast and hit this every frame
+  // forever, and an unthrottled scene-triggerable log is an amplification vector
+  // (see CLAUDE.md). The absent RaycastResult is the signal.
+  if (ray.direction.lengthSquared() === 0) return null
 
   return ray
 }
@@ -672,7 +726,11 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
 /**
  * Converts a result of a raycast (PickingInfo) into a RaycastHit of the Decentraland Protocol
  */
-export function pickingToRaycastHit(scene: SceneContext, pickingInfo: BABYLON.PickingInfo, ray: BABYLON.Ray): RaycastHit {
+export function pickingToRaycastHit(
+  scene: SceneContext,
+  pickingInfo: BABYLON.PickingInfo,
+  ray: BABYLON.Ray
+): RaycastHit {
   return {
     normalHit: pickingInfo.getNormal(true) || undefined,
     direction: ray.direction,
@@ -687,9 +745,8 @@ export function pickingToRaycastHit(scene: SceneContext, pickingInfo: BABYLON.Pi
 // iterates the parents of the mesh until the a BabylonEntity is reached, it returns its .entityId
 function getParentEntityId(node: BABYLON.Nullable<BABYLON.AbstractMesh>): number | undefined {
   let parent: BabylonEntity | BABYLON.Nullable<BABYLON.AbstractMesh> | null = node
-  while (parent = parent?.parent as any) {
+  while ((parent = parent?.parent as any)) {
     if (parent instanceof BabylonEntity) return parent.entityId
   }
   return undefined
 }
-
