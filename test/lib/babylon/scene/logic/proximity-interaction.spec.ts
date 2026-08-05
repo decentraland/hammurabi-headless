@@ -335,6 +335,112 @@ testWithEngine(
       })
     })
 
+    // Every `>` against NaN is false, so a NaN-positioned entity passes the range test,
+    // passes the cone test, and then wins on `distance >= bestDistance` being false too
+    // — becoming the proximity target from anywhere, regardless of where the player is.
+    // Transforms are raw readFloat32 with no finiteness validation upstream.
+    describe('when an entity carries a NaN position', () => {
+      let ghost: Entity
+      let real: Entity
+
+      beforeEach(async () => {
+        // ORDER IS THE TEST. The real entity is declared FIRST so it wins outright,
+        // and the ghost is examined against it — where `NaN >= bestDistance` is false,
+        // so an unguarded ghost DISPLACES a legitimate winner it is nowhere near.
+        // (Declared the other way round the ghost loses anyway, because the real
+        // entity's `1 >= NaN` is also false — which is exactly how the first version
+        // of this case passed against the mutant.)
+        real = await putProximityEntity(new Vector3(0, 0, 1), [proximityEntry()])
+        ghost = await putProximityEntity(new Vector3(Number.NaN, Number.NaN, Number.NaN), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should not let it become the proximity target', () => {
+        expect(resultsFor(ghost)).toEqual([])
+      })
+
+      it('should leave the real entity holding the slot', () => {
+        expect(resultsFor(real).map((r) => r.state)).toEqual([PointerEventType.PET_PROXIMITY_ENTER])
+      })
+    })
+
+    // Among equal priority the CLOSEST wins. The existing "pick exactly one" case is
+    // satisfied by any winner, so it does not pin the tie-break: removing the distance
+    // comparison left it green.
+    describe('when two equal-priority entities are both in range', () => {
+      let near: Entity
+      let far: Entity
+
+      beforeEach(async () => {
+        // NEAR declared first. Without the tie-break nothing blocks a later candidate
+        // from overwriting the best, so the LAST one examined wins — and with the near
+        // one declared last (the intuitive way to write this) the mutant reaches the
+        // right answer for the wrong reason and survives.
+        near = await putProximityEntity(new Vector3(0, 0, 1), [proximityEntry()])
+        far = await putProximityEntity(new Vector3(0, 0, 2.5), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should fire for the nearer one', () => {
+        expect(resultsFor(near).map((r) => r.state)).toEqual([PointerEventType.PET_PROXIMITY_ENTER])
+      })
+
+      it('should not fire for the farther one', () => {
+        expect(resultsFor(far)).toEqual([])
+      })
+    })
+
+    // Only entities DECLARING a proximity entry are indexed. Indexing every
+    // PointerEvents entity is not merely wasteful: exactly one entity is the proximity
+    // target at a time, so a nearer cursor-only entity would take the slot and emit
+    // nothing, silently starving the real trigger behind it.
+    describe('when a nearer entity declares only cursor entries', () => {
+      let trigger: Entity
+
+      beforeEach(async () => {
+        await putProximityEntity(new Vector3(0, 0, 0.5), [
+          proximityEntry({ interactionType: InteractionType.CURSOR, eventType: PointerEventType.PET_DOWN })
+        ])
+        trigger = await putProximityEntity(new Vector3(0, 0, 1), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should not let it take the single proximity slot from the real trigger', () => {
+        expect(resultsFor(trigger).map((r) => r.state)).toEqual([PointerEventType.PET_PROXIMITY_ENTER])
+      })
+    })
+
+    // The index is maintained by the component applier, so a REWRITE that drops the
+    // proximity entries has to remove it. Entity deletion is covered by the teardown
+    // path (SceneContext.removeEntity); this is the other half, and nothing exercised
+    // it — leaving the delete out left every case green.
+    describe('when an entity rewrites its PointerEvents without any proximity entry', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 1), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(pointerEventsComponent, entity, ++timestamp, {
+              pointerEvents: [
+                proximityEntry({ interactionType: InteractionType.CURSOR, eventType: PointerEventType.PET_DOWN })
+              ]
+            } as any)
+            .finish()
+        })
+      })
+
+      it('should drop it from the proximity index', () => {
+        expect($.ctx.proximityEntities.has(entity)).toBe(false)
+      })
+    })
+
     // The client takes the minimum max_player_distance over EVERY entry, with no
     // interaction-type filter, and an unset one reads 0 — so an entity that is both
     // clickable and proximity-aware is never a proximity candidate there at all.

@@ -131,6 +131,51 @@ describe('pickMeshesForMask', () => {
       ).not.toContain(untagged.uniqueId)
     })
 
+    // `addFloorMesh` is reached from `setColliderMask`, which runs on EVERY accepted
+    // PUT for a mesh named `*_collider`. Membership is a Set, so re-adding is harmless
+    // — but the dispose hook is not: registering it unconditionally grows the mesh's
+    // observer array by one closure per PUT, for the mesh's lifetime. That is what the
+    // early return prevents, and removing it leaves every membership assertion green
+    // because the Set hides it.
+    it('should register the dispose hook once however many times a collider is re-masked', () => {
+      const mesh = BABYLON.MeshBuilder.CreateBox('remasked_collider', { size: 1 }, scene)
+      mesh.parent = root
+
+      for (let put = 0; put < 5; put++) setColliderMask(mesh, ColliderLayer.CL_POINTER)
+
+      expect(mesh.onDisposeObservable.observers).toHaveLength(1)
+    })
+
+    // `isEnabled(false)` reads the mesh's OWN flag and ignores ancestors, and the
+    // distinction is the whole reason it is written that way: scene-bounds disables an
+    // individual collider that has left its parcels and it must stop being a candidate,
+    // while FRUSTUM CULLING disables the scene ROOT and its colliders must keep being
+    // candidates — a scene the camera is not looking at still answers raycasts.
+    //
+    // The default `isEnabled()` walks to the parent-most flag and conflates the two, so
+    // it silently kills raycasting for every culled scene. Nothing pinned it: swapping
+    // the call left every collider and bounds case green.
+    describe('and the scene root itself is disabled, as frustum culling does', () => {
+      beforeEach(() => {
+        root.setEnabled(false)
+      })
+
+      afterEach(() => {
+        root.setEnabled(true)
+      })
+
+      it('should still offer its colliders, because only the root was disabled', () => {
+        expect(Array.from(pickMeshesForMask(root as any, ColliderLayer.CL_POINTER)).map((m) => m.name)).toEqual([
+          'matching_collider'
+        ])
+      })
+
+      it('should still exclude a collider disabled in its own right', () => {
+        matching.setEnabled(false)
+        expect(Array.from(pickMeshesForMask(root as any, ColliderLayer.CL_POINTER))).toEqual([])
+      })
+    })
+
     // An empty mask means "collide with nothing"; walking the subtree to discover
     // that is pure waste on every raycast that uses one.
     //

@@ -185,6 +185,110 @@ testWithEngine(
       })
     })
 
+    // `collisionMask ?? DEFAULT` and not `||`. The two differ on exactly one value:
+    // an EXPLICIT CL_NONE (0), which `||` treats as unset and silently upgrades to
+    // CL_PHYSICS — so a scene asking to collide with nothing would get physics hits.
+    // `collision_mask` is `optional uint32`, so a deliberate 0 does survive the wire.
+    describe('when a scene explicitly asks for CL_NONE', () => {
+      beforeEach(async () => {
+        raycastEntity = nextEntityId++ as Entity
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, raycastEntity, ++timestamp, transform(0, 0, 0))
+            .put(raycastComponent, raycastEntity, ++timestamp, {
+              timestamp: 1,
+              maxDistance: 20,
+              queryType: RaycastQueryType.RQT_HIT_FIRST,
+              continuous: false,
+              collisionMask: ColliderLayer.CL_NONE,
+              direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) }
+            } as any)
+            .finish()
+        })
+        processRaycasts($.ctx)
+      })
+
+      it('should find nothing rather than falling back to the default mask', () => {
+        expect(hits()).toHaveLength(0)
+      })
+    })
+
+    // `RaycastResult.tickNumber` is what the protocol says equals `EngineInfo.tickNumber`,
+    // and nothing asserted it: replacing it with a constant 0 left every raycast case
+    // green, because the fixtures never advance the tick past its initial 0.
+    describe('when the scene has advanced past its first frame', () => {
+      beforeEach(async () => {
+        $.ctx.currentTick = 7
+        await fireAtTheDistantBox(20)
+      })
+
+      afterEach(() => {
+        $.ctx.currentTick = 0
+      })
+
+      it('should stamp the result with the scenes current tick', () => {
+        const result = $.ctx.components[raycastResultComponent.componentId].getOrNull(raycastEntity) as any
+        expect(result.tickNumber).toBe(7)
+      })
+    })
+
+    // ...and the charge has a FLOOR of one, because the SCENE picks the mask. On a mask
+    // no collider uses, `meshesForMask(...).length` is 0 and the charge was 0 — so the
+    // amplifier the case above closes stayed wide open through the one input a scene
+    // fully controls: measured, 3000 continuous zero-range raycasts on an unused mask
+    // were all answered in a single frame, each writing a RaycastResult and so an
+    // outgoing PutComponentOperation, with `pendingRaycastOperations` bounded only by
+    // the 100k entity cap.
+    //
+    // A floor of 1 makes a zero-range raycast cost what a raycast against one collider
+    // costs, so the mesh ceiling bounds how many can be answered per frame on every
+    // path rather than on all but this one.
+    describe('when several zero-range raycasts use a mask no collider carries', () => {
+      let processed: number[]
+      let restore: number
+
+      beforeEach(async () => {
+        restore = limits.maxRaycastIntersectionsPerFrame
+        // Room for exactly one charge of one.
+        limits.maxRaycastIntersectionsPerFrame = 1
+        $.ctx.raycastRotationCursor = 0
+        processed = []
+
+        const builder = new CrdtBuilder()
+        const entities = [nextEntityId++, nextEntityId++, nextEntityId++] as Entity[]
+        for (const entity of entities) {
+          builder.put(transformComponent, entity, ++timestamp, transform(0, 0, 0)).put(
+            raycastComponent,
+            entity,
+            ++timestamp,
+            {
+              timestamp: 1,
+              // Unset maxDistance -> zero-length ray, and a mask nothing in this scene
+              // is tagged with -> zero candidate meshes.
+              queryType: RaycastQueryType.RQT_HIT_FIRST,
+              continuous: false,
+              collisionMask: ColliderLayer.CL_CUSTOM8,
+              direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) }
+            } as any
+          )
+        }
+        await $.ctx.crdtSendToRenderer({ data: builder.finish() })
+
+        const Results = $.ctx.components[raycastResultComponent.componentId]
+        for (const entity of entities) {
+          if (Results.getOrNull(entity)) processed.push(entity)
+        }
+      })
+
+      afterEach(() => {
+        limits.maxRaycastIntersectionsPerFrame = restore
+      })
+
+      it('should answer only what the frame budget affords, not all of them', () => {
+        expect(processed).toHaveLength(1)
+      })
+    })
+
     describe('when a scene re-arms the same raycast with a shorter range', () => {
       beforeEach(async () => {
         await fireAtTheDistantBox(20)

@@ -9,9 +9,7 @@ import {
 } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
 import {
-  AVATAR_CAPSULE_RADIUS,
   isRemotePlayerEntity,
-  LOCAL_PLAYER_CAPSULE_HEIGHT,
   REMOTE_PLAYER_CAPSULE_HEIGHT,
   updateAvatarColliders
 } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
@@ -162,19 +160,28 @@ testWithEngine(
 
       // The client's two prefabs disagree, and so must we: `CharacterObject.prefab` is
       // 1.6 tall and `RemoteAvatarCollider.prefab` is 1.9.
-      it('should build the local player at the clients local-player height', () => {
+      // LITERALS, not the module's own constants. Asserting `toBeCloseTo(
+      // LOCAL_PLAYER_CAPSULE_HEIGHT)` reads well and cannot fail: changing the constant
+      // moves both sides of the comparison together. Verified by mutation — setting
+      // REMOTE_PLAYER_CAPSULE_HEIGHT to the local value left all 24 cases green.
+      //
+      // The numbers come from the client's two prefabs, which deliberately disagree:
+      // CharacterObject.prefab is m_Height 1.6 / m_Radius 0.3, RemoteAvatarCollider
+      // .prefab is m_Height 1.9 / m_Radius 0.3.
+      it('should build the local player 1.6m tall, as CharacterObject.prefab is', () => {
         const extent = capsuleOf(StaticEntities.PlayerEntity)!.getBoundingInfo().boundingBox.extendSize
-        expect(extent.y * 2).toBeCloseTo(LOCAL_PLAYER_CAPSULE_HEIGHT, 5)
+        expect(extent.y * 2).toBeCloseTo(1.6, 5)
       })
 
-      it('should build a remote player at the clients remote-player height', () => {
+      it('should build a remote player 1.9m tall, as RemoteAvatarCollider.prefab is', () => {
         const extent = capsuleOf(FIRST_REMOTE_PLAYER)!.getBoundingInfo().boundingBox.extendSize
-        expect(extent.y * 2).toBeCloseTo(REMOTE_PLAYER_CAPSULE_HEIGHT, 5)
+        expect(extent.y * 2).toBeCloseTo(1.9, 5)
       })
 
-      it('should build it at the clients capsule radius', () => {
-        const extent = capsuleOf(StaticEntities.PlayerEntity)!.getBoundingInfo().boundingBox.extendSize
-        expect(extent.x).toBeCloseTo(AVATAR_CAPSULE_RADIUS, 5)
+      it('should build both at the clients 0.3m radius', () => {
+        const local = capsuleOf(StaticEntities.PlayerEntity)!.getBoundingInfo().boundingBox.extendSize
+        const remote = capsuleOf(FIRST_REMOTE_PLAYER)!.getBoundingInfo().boundingBox.extendSize
+        expect([local.x, remote.x]).toEqual([0.3, 0.3])
       })
 
       // setColliderMask registers anything named `*_collider` as a ground-detection
