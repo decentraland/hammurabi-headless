@@ -83,7 +83,7 @@ export function getStorageSigningStrategy(
   }
 
   const metadata = {
-    origin: 'hammurabi-server//',
+    origin: 'hammurabi-server://',
     signer: 'dcl:authoritative-server',
     isGuest: false,
     // Report the delegation's world/scene/parcel (not the worker's own context) so

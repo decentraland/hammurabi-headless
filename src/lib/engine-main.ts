@@ -25,6 +25,7 @@ import { userIdentity, sceneIdentity, loadedScenesByEntityId, currentRealm, play
 import { createGuestIdentity, createIdentityFromPrivateKey } from './decentraland/identity/login'
 import { parseStorageDelegation } from './decentraland/identity/storage-delegation'
 import { resolveRealmBaseUrl, isDclEns, isLocalhostRealm } from './decentraland/realm/resolution'
+import { startDebugViewer, DebugViewerHandle } from './debug-viewer'
 
 // per-frame budget for processing messages from scenes. headless there is no
 // GPU work to prioritize, so scenes get a generous slice of the frame
@@ -72,6 +73,10 @@ type EngineSession = {
   babylonScene?: BABYLON.Scene
   transport?: { disconnect(): Promise<void> }
   sceneContext?: SceneContext
+  // Opt-in debug viewer (HAMMURABI_DEBUG_VIEWER). Owned by the session like the
+  // engine: without closing it here, a hot reload would leak a listener and the
+  // next run would fail to bind the same port.
+  debugViewer?: DebugViewerHandle
 }
 let activeSession: EngineSession | undefined
 
@@ -81,6 +86,17 @@ let activeSession: EngineSession | undefined
 let shutdownHookRegistered = false
 
 function disposeSession(session: EngineSession) {
+  // Close the debug viewer FIRST: its snapshot observer walks the scene graph,
+  // and it must stop before the entities and engine below are disposed.
+  if (session.debugViewer) {
+    try {
+      session.debugViewer.close()
+    } catch (e) {
+      console.error('Error closing debug viewer:', e)
+    }
+    session.debugViewer = undefined
+  }
+
   // Tear down comms: the DISCONNECTION handler ignores client-initiated closes,
   // so this won't trigger the restart-on-comms-loss exit.
   if (session.transport) {
@@ -400,6 +416,16 @@ async function initializeEngine(options: EngineOptions, session: EngineSession):
 
   // this is for debugging purposes
   Object.assign(globalThis, { scene })
+
+  // Opt-in, read-only window into THIS process's scene graph (off unless
+  // HAMMURABI_DEBUG_VIEWER is set). Started last, after the session-current
+  // check, so a startup superseded by a hot reload never binds the port; the
+  // handle is owned by the session and closed in disposeSession.
+  assertSessionCurrent(session)
+  session.debugViewer = startDebugViewer({
+    babylonScene: scene,
+    scenes: () => loadedScenesByEntityId.values()
+  })
 
   return scene
 }

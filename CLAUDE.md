@@ -27,6 +27,7 @@ npx @dcl/hammurabi-server --position=0,0  # Default to peer.decentraland.org
 # Environment variables
 HAMMURABI_FPS=60 node dist/cli.js ...        # renderer tick rate (default 30, max 60)
 HAMMURABI_XHR_DEBUG=1 node dist/cli.js ...   # per-request asset fetch logging
+HAMMURABI_DEBUG_VIEWER=8080 node dist/cli.js ...  # live scene-graph viewer on http://127.0.0.1:8080
 
 # Configurable resource/DoS limits (all optional; each defaults to the value that
 # used to be hard-coded, so behavior is unchanged unless set). Examples:
@@ -357,6 +358,28 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 - Avatar system without UI textures when OffscreenCanvas unavailable
 - Simplified materials and lighting for headless mode
 - All packages pinned to version 6.4.1 for compatibility
+
+**Debug viewer (`src/lib/debug-viewer/`, opt-in via `HAMMURABI_DEBUG_VIEWER`).**
+A read-only browser view of the HOST's own scene graph — entity world transforms,
+colliders, glTF placements, the server's player capsule and one capsule per peer.
+It exists because the obvious alternative does NOT answer the question: a normal
+client joined to the same comms room renders its own reconstruction of what the
+scene chose to sync, so it cannot show server-only entities or a server/client
+divergence. `snapshot.ts` is a pure builder (tested); `index.ts` owns the http+ws
+server; `page.ts` embeds the client as a constant because `tsc` only emits .js —
+a separate .html would need a build step to reach `dist/` and would 404 for npm
+installs. Load-bearing properties, do not weaken: OFF unless the env var is set
+and loopback-only by default (this process runs untrusted scene code and the
+snapshot exposes scene content); every callback throw-proofed so it can never
+stop the render loop; skipped entirely with no client attached; snapshot entity
+count capped and overflow REPORTED (scene CRDT is untrusted, `maxLiveEntities`
+defaults to 50k, and an uncapped snapshot would be a per-frame main-thread
+serialization amplifier); per-client `bufferedAmount` backpressure so a stalled
+tab can't grow the host's heap; glTF URLs resolved through the scene's own
+content mapping (`resolveFileAbsolute`), never a scene-supplied URL. The handle
+is owned by `EngineSession` and closed FIRST in `disposeSession` — the snapshot
+observer walks entities, so it must stop before they are disposed, and the port
+must be free ~100ms later when a hot reload rebinds it.
 
 **Build System**
 - TypeScript compilation to `dist/` folder
