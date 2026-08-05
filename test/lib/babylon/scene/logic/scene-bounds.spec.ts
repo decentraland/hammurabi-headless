@@ -1,4 +1,4 @@
-import { Quaternion, Vector3 } from '@babylonjs/core'
+import { Quaternion, TransformNode, Vector3 } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { meshColliderComponent } from '../../../../../src/lib/decentraland/sdk-components/mesh-collider-component'
@@ -6,7 +6,8 @@ import { transformComponent } from '../../../../../src/lib/decentraland/sdk-comp
 import { enforceColliderBounds } from '../../../../../src/lib/babylon/scene/logic/scene-bounds'
 import { updateAvatarColliders } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
 import { pickMeshesForMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
-import { StaticEntities } from '../../../../../src/lib/babylon/scene/logic/static-entities'
+import { PLAYER_CAPSULE_HALF_HEIGHT, StaticEntities } from '../../../../../src/lib/babylon/scene/logic/static-entities'
+import { playerEntityAtom } from '../../../../../src/lib/decentraland/state'
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
@@ -261,9 +262,13 @@ testWithEngine(
       }
 
       beforeEach(() => {
-        // Materialize the player entity first: updateAvatarColliders only gives
-        // capsules to entities that already exist.
-        $.ctx.getOrCreateStaticEntity(StaticEntities.PlayerEntity)
+        // The local capsule is built only once the player has a position, and is placed
+        // from this atom rather than from entity 1's transform — see
+        // positionLocalPlayerCapsule.
+        playerEntityAtom.swap({
+          absolutePosition: new Vector3(0, PLAYER_CAPSULE_HALF_HEIGHT, 0),
+          absoluteRotationQuaternion: Quaternion.Identity()
+        } as unknown as TransformNode)
         updateAvatarColliders($.ctx)
         // Entity 1 sits at the scene origin, which for a scene based at 1,1 is world
         // (16,0,16) — the parcel's own corner, so the capsule straddles the edge and
@@ -283,7 +288,7 @@ testWithEngine(
 )
 
 // The block above drives `enforceColliderBounds` directly, because
-// babylon-test-helper mocks `ctx.updateStaticEntities` — which is where the
+// babylon-test-helper mocks `ctx.updateInteractionSystems` — which is where the
 // production wiring lives. Verified by mutation: removing the call from
 // scene-context.ts left every case above green while nothing enforced bounds at
 // all in production.
@@ -321,13 +326,13 @@ testWithEngine(
           .finish()
       })
 
-      const spy = $.ctx.updateStaticEntities as unknown as jest.SpyInstance
+      const spy = $.ctx.updateInteractionSystems as unknown as jest.SpyInstance
       spy.mockRestore()
-      $.ctx.updateStaticEntities()
+      $.ctx.updateInteractionSystems()
     })
 
     afterEach(() => {
-      jest.spyOn($.ctx, 'updateStaticEntities').mockImplementation(() => void 0)
+      jest.spyOn($.ctx, 'updateInteractionSystems').mockImplementation(() => void 0)
     })
 
     it('should disable an out-of-bounds collider without anything calling the system by hand', () => {

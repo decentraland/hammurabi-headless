@@ -18,7 +18,7 @@ import { CrdtBuilder, testWithEngine } from '../babylon-test-helper'
 // For the same reason the `_collider` suffix is checked through its CONSEQUENCE —
 // membership in floorMeshes, which setColliderMask only grants to a name ending in
 // `_collider` — rather than by comparing the string that was passed to clone().
-// That membership is asserted as `floorMeshes.includes(mesh)`, NOT
+// That membership is asserted as `floorMeshes.has(mesh)`, NOT
 // `expect(floorMeshes).toContain(mesh)`: on failure the latter pretty-prints the
 // whole array, and every element is a Babylon mesh whose object graph reaches the
 // entire scene — measured, that OOMs the jest worker at 4GB instead of printing a
@@ -250,7 +250,7 @@ testWithEngine(
       })
 
       it('should register the collider as a floor candidate, which only a _collider name earns', () => {
-        expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
+        expect(floorMeshes.has(colliderOf(entity)!)).toBe(true)
       })
 
       it('should build a unit cube spanning half a metre from the entity origin on every axis', () => {
@@ -300,7 +300,7 @@ testWithEngine(
       })
 
       it('should register the collider as a floor candidate, which only a _collider name earns', () => {
-        expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
+        expect(floorMeshes.has(colliderOf(entity)!)).toBe(true)
       })
 
       it('should build a diameter-1 sphere that fits the unit box, matching the reference SPHERE_RADIUS 0.5', () => {
@@ -347,7 +347,7 @@ testWithEngine(
       })
 
       it('should register the collider as a floor candidate, which only a _collider name earns', () => {
-        expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
+        expect(floorMeshes.has(colliderOf(entity)!)).toBe(true)
       })
 
       // 1cm deep, matching the reference client's
@@ -402,7 +402,7 @@ testWithEngine(
         })
 
         it('should register the collider as a floor candidate, which only a _collider name earns', () => {
-          expect(floorMeshes.includes(colliderOf(entity)!)).toBe(true)
+          expect(floorMeshes.has(colliderOf(entity)!)).toBe(true)
         })
 
         // A missing radius means 0.5 per the protocol, not 0: `?? 0` collapses the
@@ -849,7 +849,7 @@ testWithEngine(
       // walks forever. Read as a boolean for the same reason as the membership
       // assertions above.
       it('should drop the disposed collider from the floor candidates', () => {
-        expect(floorMeshes.includes(originalCollider)).toBe(false)
+        expect(floorMeshes.has(originalCollider)).toBe(false)
       })
 
       it('should clear the applied component so no stale reference to the disposed mesh remains', () => {

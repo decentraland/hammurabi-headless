@@ -339,24 +339,24 @@ testWithEngine(
     })
 
     // Everything above drives `updateProximityInteractions` directly, because
-    // babylon-test-helper mocks `ctx.updateStaticEntities` — which is where the
+    // babylon-test-helper mocks `ctx.updateInteractionSystems` — which is where the
     // production wiring lives. Verified by mutation: removing the call from
     // scene-context.ts left every case above green while proximity never ran at all
     // in production.
-    describe('when the scene runs its real per-frame static-entity update', () => {
+    describe('when the scene runs its real per-frame interaction update', () => {
       let entity: Entity
 
       beforeEach(async () => {
         entity = await putProximityEntity(new Vector3(0, 0, 2), [proximityEntry()])
         placePlayer(new Vector3(0, 0, 0))
 
-        const spy = $.ctx.updateStaticEntities as unknown as jest.SpyInstance
+        const spy = $.ctx.updateInteractionSystems as unknown as jest.SpyInstance
         spy.mockRestore()
-        $.ctx.updateStaticEntities()
+        $.ctx.updateInteractionSystems()
       })
 
       afterEach(() => {
-        jest.spyOn($.ctx, 'updateStaticEntities').mockImplementation(() => void 0)
+        jest.spyOn($.ctx, 'updateInteractionSystems').mockImplementation(() => void 0)
       })
 
       it('should fire proximity without anything calling the system by hand', () => {

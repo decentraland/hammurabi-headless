@@ -9,7 +9,7 @@ import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoo
 import { BabylonEntity } from '../BabylonEntity'
 import { pickMeshesForMask } from './colliders'
 import { isAvatarCapsule, isRemotePlayerEntity } from './avatar-colliders'
-import { intersectAnalyticSphere, isAnalyticCandidate } from './analytic-colliders'
+import { intersectAnalyticSphere, NOT_ANALYTIC, resolveAnalyticSphere } from './analytic-colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { limits } from '../../../misc/limits'
 import { limitLogger } from '../../../misc/limit-logger'
@@ -31,12 +31,14 @@ import { limitLogger } from '../../../misc/limit-logger'
  * `ClPhysics | ClPointer`, which is what mesh-collider-component.ts uses.
  */
 const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_PHYSICS
-/**
- * Ray length used when a scene leaves `PBRaycast.maxDistance` unset. Matches the
- * value `raycast-component.ts` has always constructed the Ray with, so a scene
- * that never set the field sees no change from maxDistance being honoured.
- */
-export const DEFAULT_RAY_LENGTH = 999
+// NOTE: there is deliberately no "default ray length" constant here. An unset
+// `PBRaycast.maxDistance` is a ZERO-length ray, matching the client, which passes
+// `sdkComponent.MaxDistance` straight into `Physics.RaycastNonAlloc` with no default
+// anywhere (`ExecuteRaycastSystem.cs:185`; `PBRaycastDefaults` defaults only the
+// collision mask). A `DEFAULT_RAY_LENGTH = 999` used to sit here, unreferenced by any
+// code, with a comment asserting a fallback the code did not implement — which is an
+// invitation to "restore" it and silently break parity for every scene that omits the
+// field.
 // Per-frame ceiling on total ray↔mesh intersection tests across ALL of a scene's
 // raycasts. processRaycasts runs in lateUpdate(), which has NO frame quota, and the
 // cost is O(pending raycasts × collider meshes) — both bounded only by the 100k
@@ -137,20 +139,24 @@ const TRIANGLE_COST_FLOOR = 12
  * (the loader sets the flag whenever it omits indices) and which still pays an
  * O(vertices) `_generatePointsArray` on its first ray test anyway.
  */
-function candidateTriangleCost(mesh: BABYLON.AbstractMesh): number {
-  // An analytic candidate never touches a triangle, so billing it the tessellated
-  // count is not conservatism — it is wrong, and wrong in a way that produces FALSE
-  // EMPTY RESULTS. Measured: 463 analytic spheres bill 600 048 triangles, over the
-  // whole per-frame ceiling, so the raycast is refused with an empty result even
-  // though intersecting all 500 of them analytically takes 0.84ms. A refusal is not a
-  // deferral, so a CONTINUOUS raycast in a scene like that (a ball pit, a bullet
-  // field) reported nothing on every frame forever, while the client's PhysX
-  // SphereCollider reported the hit — the exact class of divergence this PR exists to
-  // remove.
+function candidateTriangleCost(mesh: BABYLON.AbstractMesh, analyticRadius: number): number {
+  // A candidate that WILL be solved in closed form never touches a triangle, so
+  // billing it the tessellated count is not conservatism — it is wrong, and wrong in a
+  // way that produces FALSE EMPTY RESULTS. Measured: 463 analytic spheres bill 600 048
+  // triangles, over the whole per-frame ceiling, so the raycast is refused with an
+  // empty result even though intersecting all 500 of them analytically takes 0.84ms. A
+  // refusal is not a deferral, so a CONTINUOUS raycast in a scene like that (a ball
+  // pit, a bullet field) reported nothing on every frame forever, while the client's
+  // PhysX SphereCollider reported the hit.
+  //
+  // `analyticRadius` is the resolved answer from `resolveAnalyticSphere`, NOT merely
+  // "is this mesh tagged". Keying the exemption on the tag alone undercharged by 108x
+  // for any sphere the intersection would refuse — see the note on
+  // `resolveAnalyticSphere` for the measurement and why the two decisions must be one.
   //
   // Billed at the floor, the same as a box: both are O(1) per ray, and the floor is
   // what the ceiling's own default was derived from (50_000 x 12).
-  if (isAnalyticCandidate(mesh)) return TRIANGLE_COST_FLOOR
+  if (analyticRadius !== NOT_ANALYTIC) return TRIANGLE_COST_FLOOR
 
   const totalIndices = mesh.getTotalIndices()
   const triangles = totalIndices > 0 ? totalIndices / 3 : mesh.getTotalVertices() / 3
@@ -290,7 +296,17 @@ export function processRaycasts(scene: SceneContext) {
           //
           // `meshesForMask` is memoized per mask per frame, so charging the real cost
           // adds a map lookup for every raycast after the first of its mask.
-          intersectionBudget -= meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK).length
+          //
+          // At least 1, because the SCENE picks the mask. On a mask no collider uses —
+          // `CL_CUSTOM8`, say — the mesh count is 0 and the charge was 0, leaving the
+          // amplifier fully intact: measured, 3000 continuous zero-range raycasts on an
+          // unused mask were all answered in a single frame (3.84ms), each writing a
+          // RaycastResult and so an outgoing PutComponentOperation, with
+          // `pendingRaycastOperations` bounded only by the 100k entity cap. A floor of 1
+          // makes a zero-range raycast cost exactly what a raycast against one collider
+          // costs, so `maxRaycastIntersectionsPerFrame` bounds how many can be answered
+          // per frame on every path rather than on all but this one.
+          intersectionBudget -= Math.max(1, meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK).length)
           RaycastResult.createOrReplace(
             entity.entityId,
             raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
@@ -367,14 +383,20 @@ export function processRaycasts(scene: SceneContext) {
             // of that box on the ray is already out of range.
             const candidates: BABYLON.AbstractMesh[] = []
             const candidateEntries: number[] = []
+            // Resolved ONCE per surviving candidate and carried through to the
+            // intersection, so the shape decision that sets the bill is the same one
+            // that runs, and the `decompose` behind it is not paid for twice.
+            const candidateRadii: number[] = []
             let candidateTriangles = 0
             for (const mesh of intersectableMeshes) {
               const boundingBox = mesh.getBoundingInfo().boundingBox
               const entry = rayBoxEntry(ray, boundingBox.minimumWorld, boundingBox.maximumWorld)
               if (entry >= 0) {
+                const analyticRadius = resolveAnalyticSphere(mesh)
                 candidates.push(mesh)
                 candidateEntries.push(entry)
-                candidateTriangles += candidateTriangleCost(mesh)
+                candidateRadii.push(analyticRadius)
+                candidateTriangles += candidateTriangleCost(mesh, analyticRadius)
               }
             }
 
@@ -403,6 +425,7 @@ export function processRaycasts(scene: SceneContext) {
                 ray,
                 candidates,
                 candidateEntries,
+                candidateRadii,
                 raycast.queryType
               )
               // Give back what the RQT_HIT_FIRST early-out did not spend. Charging
@@ -524,6 +547,29 @@ function pickClosest<T extends { distance: number }>(elems: T[]): T | undefined 
  * measurably slower than field access on the hot path.
  */
 function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
+  // A NaN AABB must MISS rather than fall through the slab tests below, and it does
+  // not fall through the way it looks like it would. Every `>`/`<` against NaN is
+  // false, so `near`/`far` are never assigned into `tmin`/`tmax`: those stay 0 and
+  // `ray.length`, both finite, and the `tmin > tmax` rejections therefore never fire
+  // either. The function returns 0 — "the ray origin is already inside this box" — for
+  // a box that does not exist. Measured: a 1m ray at world (16,0,16) admitted 300/300
+  // colliders whose entity transform was NaN and which it cannot geometrically reach.
+  //
+  // The consequence is cost, not a false hit (`resolveAnalyticSphere` rejects NaN and
+  // the triangle path misses), but it defeats the `maxDistance`-aware prefilter this
+  // function exists to be, so one cheap arrangement makes every ray in the scene
+  // maximally expensive. Reachable because `transform-component.ts` reads the
+  // transform as raw readFloat32 with no finiteness validation.
+  //
+  // Checked here rather than left to `enforceColliderBounds` to disable: that runs a
+  // frame later at best, and only for a scene that has parcel metadata.
+  if (
+    !Number.isFinite(min.x) || !Number.isFinite(min.y) || !Number.isFinite(min.z) ||
+    !Number.isFinite(max.x) || !Number.isFinite(max.y) || !Number.isFinite(max.z)
+  ) {
+    return -1
+  }
+
   let tmin = 0
   let tmax = ray.length
 
@@ -597,8 +643,12 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
  * a non-sphere, or a sphere under non-uniform scale, which is an ellipsoid — and
  * those fall through to the triangle path unchanged.
  */
-function intersectCandidate(ray: Ray, mesh: BABYLON.AbstractMesh): BABYLON.Nullable<BABYLON.PickingInfo> {
-  const analytic = intersectAnalyticSphere(ray, mesh)
+function intersectCandidate(
+  ray: Ray,
+  mesh: BABYLON.AbstractMesh,
+  analyticRadius: number
+): BABYLON.Nullable<BABYLON.PickingInfo> {
+  const analytic = intersectAnalyticSphere(ray, mesh, analyticRadius)
   if (analytic) return analytic
   return ray.intersectsMesh(mesh, false)
 }
@@ -607,12 +657,13 @@ function intersectCandidates(
   ray: Ray,
   candidates: BABYLON.AbstractMesh[],
   entries: number[],
+  radii: number[],
   queryType: RaycastQueryType
 ): { results: BABYLON.PickingInfo[]; refundedTriangles: number } {
   if (queryType !== RaycastQueryType.RQT_HIT_FIRST) {
     const all: BABYLON.PickingInfo[] = []
-    for (const mesh of candidates) {
-      const info = intersectCandidate(ray, mesh)
+    for (let index = 0; index < candidates.length; index++) {
+      const info = intersectCandidate(ray, candidates[index], radii[index])
       if (info?.hit) all.push(info)
     }
     // SORTED, nearest first. This loop replaced `ray.intersectsMeshes`, which ends
@@ -638,7 +689,7 @@ function intersectCandidates(
   for (const index of order) {
     if (entries[index] >= nearestHit) break
     tested++
-    const info = intersectCandidate(ray, candidates[index])
+    const info = intersectCandidate(ray, candidates[index], radii[index])
     if (info?.hit) {
       results.push(info)
       if (info.distance < nearestHit) nearestHit = info.distance
@@ -651,7 +702,7 @@ function intersectCandidates(
   // headroom, rather than billing a raycast for work it provably did not do.
   let refundedTriangles = 0
   for (let i = tested; i < order.length; i++) {
-    refundedTriangles += candidateTriangleCost(candidates[order[i]])
+    refundedTriangles += candidateTriangleCost(candidates[order[i]], radii[order[i]])
   }
 
   return { results, refundedTriangles }

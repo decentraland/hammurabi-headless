@@ -1,4 +1,4 @@
-import { AbstractMesh, Quaternion, Vector3 } from '@babylonjs/core'
+import { AbstractMesh, Quaternion, TransformNode, Vector3 } from '@babylonjs/core'
 import { Scene } from '@dcl/schemas'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { RaycastQueryType } from '@dcl/protocol/out-js/decentraland/sdk/components/raycast.gen'
@@ -9,9 +9,13 @@ import {
 } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
 import {
+  AVATAR_CAPSULE_RADIUS,
   isRemotePlayerEntity,
+  LOCAL_PLAYER_CAPSULE_HEIGHT,
+  REMOTE_PLAYER_CAPSULE_HEIGHT,
   updateAvatarColliders
 } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
+import { playerEntityAtom } from '../../../../../src/lib/decentraland/state'
 import { floorMeshes, getColliderLayers, setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 import {
   AVATAR_ENTITY_RANGE,
@@ -96,12 +100,21 @@ testWithEngine(
 
     beforeEach(() => {
       $.startEngine()
-      // Materialize both player entities BEFORE the system looks for them: it only
+      // The LOCAL capsule is positioned from this atom, not from entity 1's transform
+      // (entity 1 never receives one — see positionLocalPlayerCapsule), and is not
+      // built at all until the player has a position. Feet at the scene origin, so the
+      // ray fixture below still crosses it: the atom holds the CharacterController
+      // capsule, whose position is its CENTRE.
+      playerEntityAtom.swap({
+        absolutePosition: new Vector3(0, PLAYER_CAPSULE_HALF_HEIGHT, 0),
+        absoluteRotationQuaternion: Quaternion.Identity()
+      } as unknown as TransformNode)
+
+      // Materialize the remote player BEFORE the system looks for it: it only
       // gives capsules to entities that already exist, and nothing here creates
       // entity 32 otherwise. Without this the first test in the file ran against a
       // scene with no remote player and every later one passed on a capsule built
       // during the previous test's setup.
-      $.ctx.getOrCreateStaticEntity(StaticEntities.PlayerEntity)
       $.ctx.getOrCreateStaticEntity(FIRST_REMOTE_PLAYER)
       updateAvatarColliders($.ctx)
     })
@@ -140,21 +153,35 @@ testWithEngine(
 
       // Player entity transforms are FEET-anchored while CreateCapsule centres its
       // mesh on the origin, so an unlifted capsule stands half-buried, and a ray at
-      // chest height passes over a crouching half-person.
+      // chest height passes over a crouching half-person. Asserted on the REMOTE
+      // player, whose capsule really does hang off its entity's transform; the local
+      // one is placed in world terms instead (see below).
       it('should stand the capsule on the entity rather than centring it there', () => {
-        expect(capsuleOf(StaticEntities.PlayerEntity)!.position.y).toBeCloseTo(PLAYER_CAPSULE_HALF_HEIGHT, 5)
+        expect(capsuleOf(FIRST_REMOTE_PLAYER)!.position.y).toBeCloseTo(REMOTE_PLAYER_CAPSULE_HEIGHT / 2, 5)
       })
 
-      it('should build it at the players own height', () => {
+      // The client's two prefabs disagree, and so must we: `CharacterObject.prefab` is
+      // 1.6 tall and `RemoteAvatarCollider.prefab` is 1.9.
+      it('should build the local player at the clients local-player height', () => {
         const extent = capsuleOf(StaticEntities.PlayerEntity)!.getBoundingInfo().boundingBox.extendSize
-        expect(extent.y * 2).toBeCloseTo(PLAYER_HEIGHT, 5)
+        expect(extent.y * 2).toBeCloseTo(LOCAL_PLAYER_CAPSULE_HEIGHT, 5)
+      })
+
+      it('should build a remote player at the clients remote-player height', () => {
+        const extent = capsuleOf(FIRST_REMOTE_PLAYER)!.getBoundingInfo().boundingBox.extendSize
+        expect(extent.y * 2).toBeCloseTo(REMOTE_PLAYER_CAPSULE_HEIGHT, 5)
+      })
+
+      it('should build it at the clients capsule radius', () => {
+        const extent = capsuleOf(StaticEntities.PlayerEntity)!.getBoundingInfo().boundingBox.extendSize
+        expect(extent.x).toBeCloseTo(AVATAR_CAPSULE_RADIUS, 5)
       })
 
       // setColliderMask registers anything named `*_collider` as a ground-detection
       // candidate. A person is not a floor, which is why the capsule is deliberately
       // NOT given that suffix.
       it('should not register a player as a floor candidate', () => {
-        expect(floorMeshes.includes(capsuleOf(StaticEntities.PlayerEntity)!)).toBe(false)
+        expect(floorMeshes.has(capsuleOf(StaticEntities.PlayerEntity)!)).toBe(false)
       })
 
       // The system runs every frame for every scene. Building a capsule per frame
@@ -179,9 +206,35 @@ testWithEngine(
         expect(resultOf(raycastEntity).hits).toHaveLength(1)
       })
 
-      // Radius 0.4 around the origin, ray starting 10m away.
+      // Radius 0.3 around the origin, ray starting 10m away.
       it('should report the distance to the capsule surface', () => {
-        expect(resultOf(raycastEntity).hits[0].length).toBeCloseTo(9.6, 1)
+        expect(resultOf(raycastEntity).hits[0].length).toBeCloseTo(9.7, 1)
+      })
+    })
+
+    // Entity 1 never receives a Transform of its own — `updateStaticEntities` writes it
+    // host->scene and nothing ingests it back — so a capsule merely PARENTED to that
+    // entity stays at the scene root origin no matter where the player walks. That
+    // shipped: `CL_MAIN_PLAYER` reported a confident hit on a phantom at the parcel
+    // corner while missing the real player, which is worse than the empty result it
+    // replaced. This is the case that pins the position being driven from the atom.
+    describe('when the local player has walked away from the scene origin', () => {
+      beforeEach(async () => {
+        playerEntityAtom.swap({
+          absolutePosition: new Vector3(5, PLAYER_CAPSULE_HALF_HEIGHT, 7),
+          absoluteRotationQuaternion: Quaternion.Identity()
+        } as unknown as TransformNode)
+        updateAvatarColliders($.ctx)
+      })
+
+      it('should move the capsule with the player rather than leaving it at the origin', () => {
+        const capsule = capsuleOf(StaticEntities.PlayerEntity)!
+        expect([capsule.position.x, capsule.position.z]).toEqual([5, 7])
+      })
+
+      it('should not report a hit where the player no longer is', async () => {
+        await fireAtTheOrigin(ColliderLayer.CL_MAIN_PLAYER)
+        expect(resultOf(raycastEntity).hits).toHaveLength(0)
       })
     })
 
@@ -225,26 +278,26 @@ testWithEngine(
     })
 
     // Everything above drives `updateAvatarColliders` directly, because
-    // babylon-test-helper mocks `ctx.updateStaticEntities` — which is where the
+    // babylon-test-helper mocks `ctx.updateInteractionSystems` — which is where the
     // production wiring lives. That left the wiring itself unverified: removing the
     // call from scene-context.ts kept the whole suite green while the feature was
     // dead in production. Verified by mutation, before and after this case.
-    describe('when the scene runs its real per-frame static-entity update', () => {
+    describe('when the scene runs its real per-frame interaction update', () => {
       let restoreMock: () => void
 
       beforeEach(() => {
         capsuleOf(StaticEntities.PlayerEntity)?.dispose()
         capsuleOf(FIRST_REMOTE_PLAYER)?.dispose()
 
-        const spy = $.ctx.updateStaticEntities as unknown as jest.SpyInstance
+        const spy = $.ctx.updateInteractionSystems as unknown as jest.SpyInstance
         spy.mockRestore()
         // Re-arm the helper's mock afterwards: leaving the real method live would
         // let the render loop drive it for the rest of the file.
         restoreMock = () => {
-          jest.spyOn($.ctx, 'updateStaticEntities').mockImplementation(() => void 0)
+          jest.spyOn($.ctx, 'updateInteractionSystems').mockImplementation(() => void 0)
         }
 
-        $.ctx.updateStaticEntities()
+        $.ctx.updateInteractionSystems()
       })
 
       afterEach(() => {

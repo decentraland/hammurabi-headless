@@ -619,6 +619,10 @@ export class SceneContext implements EngineApiInterface {
     const outMessages: Uint8Array[] = []
 
     try {
+      // BEFORE the raycasts: they read collider enabled-state and avatar capsules that
+      // this pass creates, moves and disables. See updateInteractionSystems.
+      this.updateInteractionSystems()
+
       processRaycasts(this)
 
       // TODO: Execute queries into this.outgoingMessages
@@ -793,11 +797,32 @@ export class SceneContext implements EngineApiInterface {
   // this method exists to be a wrapper of the function. so it can be mocked for tests without wizzardy
   updateStaticEntities() {
     updateStaticEntities(this)
+  }
+
+  /**
+   * Per-frame interaction systems, which MUST run before `processRaycasts`.
+   *
+   * They used to hang off `updateStaticEntities()`, which `lateUpdate` calls AFTER the
+   * raycasts — so every raycast in a frame resolved against the previous frame's
+   * collider state. That is not a cosmetic frame of lag in either direction:
+   *
+   *   frame 2  scene moves a collider OUT of its parcels   -> hit, position honoured
+   *   frame 4  scene moves it BACK in, legally             -> no hit, collider dead
+   *
+   * A scene alternating every tick had its out-of-bounds geometry honoured on about
+   * half of all frames, which is verbatim the griefing vector `scene-bounds.ts` exists
+   * to close, while a legitimately moving platform re-entering its own parcel was
+   * unhittable for a frame. The same ordering made a `CL_PLAYER` raycast miss on the
+   * frame a capsule was first created.
+   *
+   * Order within the block matters too: capsules are created and placed first so the
+   * bounds pass sees them, and proximity runs last so it reads post-bounds state.
+   */
+  updateInteractionSystems() {
     // Player entities exist as ordinary entities in this scene's CRDT (1 for the
     // local player, 32-255 for remote ones), but nothing gave them collision
     // geometry — so a CL_PLAYER raycast found nothing here while the client
-    // reported hits. Runs after updateStaticEntities so the local player's
-    // Transform is already in place on the frame its capsule is created.
+    // reported hits.
     updateAvatarColliders(this)
     // Colliders that have left this scene's parcels stop existing for raycasts and
     // for avatar movement, matching the client. Runs after the avatar capsules so a

@@ -8,17 +8,37 @@ import {
   AVATAR_ENTITY_RANGE,
   entityIsInRange,
   PLAYER_CAPSULE_HALF_HEIGHT,
-  PLAYER_HEIGHT,
   StaticEntities
 } from './static-entities'
+import { globalCoordinatesToSceneCoordinatesToRef } from '../coordinates'
+import { playerEntityAtom } from '../../../decentraland/state'
 
 /**
- * Radius of a player's collision capsule, matching the one `CharacterController`
- * already builds for the LOCAL player. Kept in step with it deliberately: a scene
- * raycasting for players and the character controller walking into them should
- * disagree about a player's width for no reason.
+ * Radius of a player's collision capsule, from the reference client: both
+ * `CharacterObject.prefab` (`m_Radius: 0.3`, the local `CharacterController`) and
+ * `RemoteAvatarCollider.prefab` (`m_Radius: 0.3`) agree.
+ *
+ * NOT kept in step with this server's own `CharacterController` capsule, which is 0.4
+ * — that one is what the local avatar WALKS with, and its width is a movement-feel
+ * choice. This is what SCENES raycast against, so it has to be the width every player's
+ * client reports or a `CL_PLAYER` ray 0.35m off-axis hits here and misses everywhere
+ * else.
  */
-const AVATAR_CAPSULE_RADIUS = 0.4
+export const AVATAR_CAPSULE_RADIUS = 0.3
+
+/**
+ * Total capsule height per player kind, from the client's two prefabs. They differ, and
+ * the difference is observable: `CharacterObject.prefab` is `m_Height: 1.6` with
+ * `m_Center.y: 0.8`, `RemoteAvatarCollider.prefab` is `m_Height: 1.9` with
+ * `m_Center.y: 0.95`. In both the centre is exactly half the height, i.e. the collider
+ * stands ON the transform origin, which is what a feet-anchored player entity wants.
+ *
+ * Babylon's `CreateCapsule({ height })` is the TOTAL height including the hemispherical
+ * caps (`capsuleBuilder.js`: `heightMinusCaps = height - (radiusTop + radiusBottom)`),
+ * the same convention as Unity's `CapsuleCollider.height`, so these transfer directly.
+ */
+export const LOCAL_PLAYER_CAPSULE_HEIGHT = 1.6
+export const REMOTE_PLAYER_CAPSULE_HEIGHT = 1.9
 
 /**
  * Deliberately NOT suffixed `_collider`. `setColliderMask` keys off that suffix to
@@ -67,14 +87,14 @@ export function isRemotePlayerEntity(entityId: Entity): boolean {
   return entityIsInRange(entityId, AVATAR_ENTITY_RANGE)
 }
 
-function ensureCapsule(entity: BabylonEntity, layers: number): void {
+function ensureCapsule(entity: BabylonEntity, layers: number, height: number): BABYLON.AbstractMesh {
   for (const child of entity.getChildMeshes(true)) {
-    if (isAvatarCapsule(child)) return
+    if (isAvatarCapsule(child)) return child
   }
 
   const capsule = BABYLON.MeshBuilder.CreateCapsule(
     AVATAR_CAPSULE_NAME,
-    { height: PLAYER_HEIGHT, radius: AVATAR_CAPSULE_RADIUS },
+    { height, radius: AVATAR_CAPSULE_RADIUS },
     entity.getScene()
   )
   ;(capsule as any)[avatarCapsuleSymbol] = true
@@ -82,12 +102,52 @@ function ensureCapsule(entity: BabylonEntity, layers: number): void {
   // Player entity transforms are FEET-anchored (see PLAYER_CAPSULE_HALF_HEIGHT in
   // static-entities.ts) while `CreateCapsule` centres its mesh on the origin, so
   // the capsule has to be lifted by half its height to stand ON the entity rather
-  // than straddling it half-buried in the ground.
-  capsule.position.y = PLAYER_CAPSULE_HALF_HEIGHT
+  // than straddling it half-buried in the ground. That lift is exactly the client's
+  // `m_Center.y` for both prefabs.
+  capsule.position.y = height / 2
   capsule.parent = entity
   capsule.setEnabled(true)
 
   setColliderMask(capsule, layers)
+
+  return capsule
+}
+
+const tmpLocalPlayerPosition = new BABYLON.Vector3()
+
+/**
+ * Places the LOCAL player's capsule, which — unlike every remote one — cannot simply
+ * inherit its entity's transform.
+ *
+ * `StaticEntities.PlayerEntity` is a host->scene entity: `updateStaticEntities` writes
+ * its Transform straight into the component store to be dumped OUT to the scene, and
+ * nothing ever ingests a CRDT message naming it. A `BabylonEntity` only learns a
+ * transform from incoming CRDT, so entity 1's `appliedComponents.transform` is
+ * permanently undefined and `_setTransformParametersBeforeMatrixCalculation`
+ * (`BabylonEntity.ts:116-122`) zeroes its position on every `computeWorldMatrix`.
+ *
+ * So parenting the capsule to it and stopping there pinned the local player's collider
+ * to the SCENE ROOT ORIGIN: measured, player at (5, 0.85, 7) and capsule at
+ * (0, 0.85, 0). `CL_MAIN_PLAYER` then reported a confident hit on a phantom at the
+ * parcel corner while still missing the real player — strictly worse than the empty
+ * result it replaced, because a wrong answer is not a missing one.
+ *
+ * The position therefore comes from `playerEntityAtom` (the CharacterController capsule
+ * that actually moves) converted into scene space, which is also the local space of
+ * entity 1 since it sits at the root with an identity transform. The atom's capsule is
+ * PLAYER_HEIGHT tall and positioned by its CENTRE, so subtracting
+ * PLAYER_CAPSULE_HALF_HEIGHT gives the feet, and half of OUR capsule's height puts its
+ * centre where the client's `m_Center` sits. The two halves are different numbers
+ * (0.85 and 0.8) and that is not a slip — they belong to two capsules of different
+ * heights.
+ */
+function positionLocalPlayerCapsule(context: SceneContext, capsule: BABYLON.AbstractMesh, player: BABYLON.TransformNode) {
+  globalCoordinatesToSceneCoordinatesToRef(context, player.absolutePosition, tmpLocalPlayerPosition)
+  capsule.position.set(
+    tmpLocalPlayerPosition.x,
+    tmpLocalPlayerPosition.y - PLAYER_CAPSULE_HALF_HEIGHT + LOCAL_PLAYER_CAPSULE_HEIGHT / 2,
+    tmpLocalPlayerPosition.z
+  )
 }
 
 /**
@@ -127,15 +187,29 @@ export function updateAvatarColliders(context: SceneContext): void {
   //
   // This accessor exists for exactly this case: host-initiated, inside the reserved
   // static range.
-  ensureCapsule(
-    context.getOrCreateStaticEntity(StaticEntities.PlayerEntity),
-    ColliderLayer.CL_PLAYER | ColliderLayer.CL_MAIN_PLAYER
-  )
+  // Only once the local player actually has a position. Creating it unconditionally
+  // put a collider at the scene root origin for every scene that had not placed the
+  // player yet — a hit no client reports. Nothing is lost by waiting: the capsule
+  // appears on the first frame the position is known.
+  const player = playerEntityAtom.getOrNull()
+  if (player) {
+    const capsule = ensureCapsule(
+      context.getOrCreateStaticEntity(StaticEntities.PlayerEntity),
+      ColliderLayer.CL_PLAYER | ColliderLayer.CL_MAIN_PLAYER,
+      LOCAL_PLAYER_CAPSULE_HEIGHT
+    )
+    // EVERY frame, not just on creation — entity 1 never receives a transform of its
+    // own, so this is the only thing that makes the local capsule follow the player.
+    positionLocalPlayerCapsule(context, capsule, player)
+  }
 
   // Driven off the tracked set rather than a raw id probe, because remote ids are
   // version-packed — see SceneContext.playerEntities.
+  //
+  // No repositioning here: a remote player's entity DOES receive its Transform through
+  // incoming CRDT, so its capsule inherits the entity's position for free.
   for (const entityId of context.playerEntities) {
     const remotePlayer = context.getEntityOrNull(entityId)
-    if (remotePlayer) ensureCapsule(remotePlayer, ColliderLayer.CL_PLAYER)
+    if (remotePlayer) ensureCapsule(remotePlayer, ColliderLayer.CL_PLAYER, REMOTE_PLAYER_CAPSULE_HEIGHT)
   }
 }
