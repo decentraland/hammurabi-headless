@@ -30,6 +30,7 @@ import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-c
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
 import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import { updateAvatarColliders } from './logic/avatar-colliders'
 import { isDeniedSceneCrdtOp, sanitizeSceneCrdt } from './logic/scene-crdt-guard'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
@@ -759,6 +760,12 @@ export class SceneContext implements EngineApiInterface {
   // this method exists to be a wrapper of the function. so it can be mocked for tests without wizzardy
   updateStaticEntities() {
     updateStaticEntities(this)
+    // Player entities exist as ordinary entities in this scene's CRDT (1 for the
+    // local player, 32-255 for remote ones), but nothing gave them collision
+    // geometry — so a CL_PLAYER raycast found nothing here while the client
+    // reported hits. Runs after updateStaticEntities so the local player's
+    // Transform is already in place on the frame its capsule is created.
+    updateAvatarColliders(this)
   }
 
   // impl RuntimeApi {

@@ -8,6 +8,7 @@ import { SceneContext } from '../scene-context'
 import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoordinates } from '../coordinates'
 import { BabylonEntity } from '../BabylonEntity'
 import { pickMeshesForMask } from './colliders'
+import { isAvatarCapsule, isRemotePlayerEntity } from './avatar-colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { limits } from '../../../misc/limits'
 import { limitLogger } from '../../../misc/limit-logger'
@@ -736,10 +737,37 @@ export function pickingToRaycastHit(
     direction: ray.direction,
     globalOrigin: globalCoordinatesToSceneCoordinates(scene, ray.origin),
     length: pickingInfo.distance,
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     position: globalCoordinatesToSceneCoordinates(scene, pickingInfo.pickedPoint!),
-    entityId: getParentEntityId(pickingInfo.pickedMesh),
+    entityId: reportableEntityId(pickingInfo.pickedMesh),
     meshName: pickingInfo.pickedMesh?.name
   }
+}
+
+/**
+ * The entity id to report for a hit, or undefined when there is none to report.
+ *
+ * A REMOTE avatar is hit but reported WITHOUT an entity id, matching the client:
+ * `DoesHitColliderQualify` returns true for the other-avatars layer with
+ * `foundEntity` left null and the comment "No CRDT entity ID to report for a
+ * remote avatar in this scene".
+ *
+ * That is arguably an artifact of the client's own structure — its avatar
+ * colliders are not linked back to a CRDT entity, whereas ours ARE children of the
+ * scene entity, so the id is right there. It is suppressed anyway, because the
+ * failure mode of diverging runs the wrong way: a scene author who reads
+ * `entityId` off a remote-avatar hit would have it work here and be undefined for
+ * every real player. Matching costs us information; diverging costs them a bug.
+ *
+ * The LOCAL player is reported normally as entity 1 — the client does that too
+ * (`foundEntity = SpecialEntitiesID.PLAYER_ENTITY`).
+ */
+function reportableEntityId(mesh: BABYLON.Nullable<BABYLON.AbstractMesh>): number | undefined {
+  const entityId = getParentEntityId(mesh)
+  if (entityId !== undefined && mesh && isAvatarCapsule(mesh) && isRemotePlayerEntity(entityId)) {
+    return undefined
+  }
+  return entityId
 }
 
 // iterates the parents of the mesh until the a BabylonEntity is reached, it returns its .entityId
