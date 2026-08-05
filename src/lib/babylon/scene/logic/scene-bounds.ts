@@ -25,21 +25,30 @@ import { getColliderLayers } from './colliders'
  * and a player who walks a step outside a scene's parcels should not stop being
  * raycastable.
  *
- * COST, measured per frame: 0.192ms at 1000 colliders, 1.255ms at 10_000, and
- * 20.942ms at the 50_000 mesh ceiling. The first two are fine; the last is not, and
- * is a KNOWN limitation rather than a bound — a scene sitting at the entity cap
- * pays it every frame whether or not anything moved.
+ * COST, measured per frame: 0.397ms at 1000 colliders, 6.402ms at 10_000, and
+ * 50.55ms at the 50_000 mesh ceiling — superlinear, and 2.4x an earlier figure of
+ * 20.9ms quoted here. A scene with NO colliders at all still pays the walk: 2.633ms
+ * at 50_000 plain entities. This is a KNOWN limitation rather than a bound, and it
+ * is the largest unbounded per-frame cost left in the interaction path.
  *
  * Deliberately left un-throttled for now, because the obvious fixes are each wrong
  * in a way worth stating: skipping unmoved colliders via the world matrix's
  * `updateFlag` does not work (the render pass recomputes an active mesh's matrix
  * every frame, so the flag always changes, and a DISABLED mesh's matrix is
  * recomputed on read for the same reason), and capping the number of CHECKS per
- * frame does not bound the subtree WALK, which is 4.2ms of the 20.9ms on its own.
- * The real fix is a round-robin cursor over a cached collider list, invalidated on
- * add/remove — the same shape as the raycast rotation cursor. Filed rather than
- * rushed: getting the invalidation wrong would leave a collider unchecked, which is
- * exactly the hole this closes.
+ * frame does not bound the subtree WALK, which is a large share of the total on its
+ * own. The real fix is a round-robin cursor over a cached collider list, invalidated
+ * on add/remove — the same shape as the raycast rotation cursor — and it MUST still
+ * refresh each visited mesh's world matrix, or it reintroduces the one-way latch
+ * described below. Filed rather than rushed: getting the invalidation wrong would
+ * leave a collider unchecked, which is exactly the hole this closes.
+ *
+ * ORDERING, load-bearing: this runs from `SceneContext.updateInteractionSystems`,
+ * which `lateUpdate` calls BEFORE `processRaycasts`. It used to hang off
+ * `updateStaticEntities`, which runs after — so every raycast in a frame resolved
+ * against the previous frame's enabled-state and a scene alternating a collider in
+ * and out of its parcels had the out-of-bounds position honoured on about half of
+ * all frames, which is the griefing vector this module exists to close.
  */
 /** Slack added to each parcel plane, from the client's `EXTEND_AMOUNT`. */
 const PLANE_SLACK_METERS = 0.05

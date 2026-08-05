@@ -78,6 +78,12 @@ ARE logged, because each one changes what the scene observes (an empty result, a
 truncated hit list, a collider that has silently stopped existing) rather than
 merely deferring work to the next frame; the per-frame budget EXHAUSTION that
 simply defers a raycast is not logged.
+`maxProximityCandidates` is logged for the same reason — past it an entity stops
+being considered for proximity at all. Its key matters as much as its existence:
+it previously reported under `maxLiveEntities`, and since the throttle state is
+keyed per `Limits` field, proximity truncation SUPPRESSED the genuine entity-cap
+signal for the whole window (and vice versa) while pointing the operator at a knob
+that could not move it.
 `profileFetchCooldownMs` is normal debounce (deliberately not logged), whereas
 `emoteMetadataFetchCooldownMs` IS logged because tripping it substitutes a
 possibly-wrong `loop` flag into what the scene observes — closer to a truncation
@@ -256,9 +262,64 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   player nearness (3m search radius, 120-degree horizontal cone, highest priority
   then closest wins, one target at a time); a proximity result carries NO `hit`,
   because there is no ray and inventing one would report a direction no pointer
-  travelled. Known divergence: the client also raycasts to a proximity candidate and
-  skips it when occluded — deliberately not replicated, since it needs a per-candidate
-  raycast against the whole collider set and the occlusion is cosmetic. Raycasting
+  travelled.
+  **ONE CLOCK for `PBPointerEventsResult.timestamp` (do not add a second).** Both
+  writers — `pointer-events.ts` and `proximity-interaction.ts` — stamp it with
+  `context.currentTick`, as the client does for `Timestamp` and `TickNumber` alike.
+  The scene-side SDK gates every lookup on `timestamp > previousFrameMaxTimestamp`,
+  a maximum taken over ALL of the scene's results that never decreases, so two
+  independent counters mean the slower one is silenced permanently: a private lamport
+  counter here (advancing only on a hover CHANGE or a press) against the tick
+  (advancing 30x a second) made a single proximity event kill every hover and click in
+  the scene for the life of the process — executed against the real `@dcl/ecs`.
+  **`updateInteractionSystems` runs BEFORE `processRaycasts`** (`scene-context.ts`):
+  avatar capsules, then bounds enforcement, then proximity. Hanging them off
+  `updateStaticEntities` put them AFTER, so every raycast answered against the
+  previous frame's collider state — a scene alternating a collider in and out of its
+  parcels had the out-of-bounds position honoured on ~half of all frames, and a
+  legally re-entering platform was unhittable for a frame.
+  The hover pick admits every OCCLUDER (`CL_POINTER|CL_PHYSICS|CL_PLAYER|
+  CL_MAIN_PLAYER`) and then hovers nothing when the closest hit is not an
+  interactable, matching the client's `Reset()`; restricting the predicate to
+  interactables meant nothing could ever block a hover and it passed through walls.
+  `max_distance` is measured from the PLAYER, not from `pickInfo.distance` — the
+  camera sits 8m behind, so the protocol's default of 10 stopped qualifying ~2m out.
+  A PRESS emits ONE result however many entries match (the client fills presses once
+  per entity, outside its entry loop); only hover emits per entry.
+  PROXIMITY candidacy takes the minimum `max_player_distance` and maximum `priority`
+  over EVERY entry, not just the proximity ones — the client applies no
+  interaction-type filter, and an unset `max_player_distance` reads 0, so an entity
+  that is both clickable and proximity-aware is never a candidate there. Entities
+  declaring a proximity entry are INDEXED at component-apply time
+  (`SceneContext.proximityEntities`); the per-frame scan iterates that, bounded by
+  `maxProximityCandidates` counted BEFORE the distance test. Counting after it (an
+  in-range ceiling) bounded only the cheap half and left every out-of-range entity's
+  lookup and vector maths unbounded — 29.45ms/frame at 50_000 of them, with the
+  ceiling never firing.
+  Known divergences, all deliberate: the client also raycasts to a proximity candidate
+  and skips it when occluded (needs a per-candidate raycast against the whole collider
+  set; the occlusion is cosmetic); it measures proximity distance to the collider's
+  CLOSEST POINT and only considers entities that HAVE a collider on its proximity mask,
+  where this measures to the transform origin (reproducing it needs a spatial index or
+  a per-candidate subtree walk, i.e. exactly the per-frame cost the index removed); a
+  proximity result carries no `hit` where the client always sets one, built from the
+  cursor raycast; pointer `hit.globalOrigin` is scene-relative here and world-space in
+  the client (`RaycastUtils.cs` passes it unconverted, inconsistently with its own
+  raycast path) and `meshName` is a Babylon name where the client sends `""`. A
+  proximity result's `button` is the ENTRY's, which for the SDK's default registration
+  is `IA_ANY` — and `getInputCommand` expands `IA_ANY` over a list that does NOT
+  contain it, so `onProximityEnter()` with default opts observes nothing. That is
+  UPSTREAM, not ours: the client emits `IaAny` there too
+  (`AppendPointerEventResultsIntent.cs` gates on `IaPointer or IaAny`,
+  `WritePointerEventResultsSystem.cs` then passes `info.Button` through for non-hover
+  events). Reporting `IA_POINTER` would make this server fire an event no player
+  receives; scenes must pass `opts: { button: IA_POINTER }`.
+  Finally, note `PET_DOWN`/`PET_UP` cannot fire in production at all: `input.ts` hangs
+  off Babylon's ActionManager keyboard triggers (no DOM on a NullEngine) and its mouse
+  path is gated on `hasPointerLock = () => false`, so hover and proximity are the only
+  reachable writers. The client's global (scene-root, entity 0) input results and the
+  SDK's `onProximityDown`/`onProximityUp` are unimplemented for the same reason.
+  Raycasting
   is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
   because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
   every primitive collider was a 12-triangle box; a sphere is 1296. Those two bound
