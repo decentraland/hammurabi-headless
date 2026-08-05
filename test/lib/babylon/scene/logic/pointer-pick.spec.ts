@@ -12,11 +12,12 @@ import {
   pickActivePointerEventsEntity,
   pickPointerEventsMesh
 } from '../../../../../src/lib/babylon/scene/logic/pointer-events'
+import { updateAvatarColliders } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
 import { setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 import { pointerEventsResultComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events-result'
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../../../src/lib/decentraland/state'
-import { PLAYER_CAPSULE_HALF_HEIGHT } from '../../../../../src/lib/babylon/scene/logic/static-entities'
+import { PLAYER_CAPSULE_HALF_HEIGHT, StaticEntities } from '../../../../../src/lib/babylon/scene/logic/static-entities'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
 // The centre-screen pick had NO test at all, and no distance limit: `scene.pick`
@@ -485,6 +486,97 @@ testWithEngine(
       it('should skip the full-scene pick entirely', () => {
         pickPointerEventsMesh($.scene)
         expect(pickSpy).not.toHaveBeenCalled()
+      })
+    })
+
+    // The camera sits BEHIND the player (ArcRotateCamera, radius 8), so the local
+    // avatar is between the camera and everything the player looks at. If its capsule
+    // occludes, every pointer interaction in the game dies.
+    //
+    // The client excludes it deliberately: PLAYER_ORIGIN_RAYCAST_MASK is
+    // `OnPointerEvent | Default | OtherAvatars` and the local CharacterController layer
+    // is not in it, while OTHER avatars are — so a remote player blocks your pointer
+    // and your own body does not.
+    describe('when the local players own capsule stands between the camera and the entity', () => {
+      let entity: Entity
+      let previousPlayer: BABYLON.TransformNode | null
+
+      beforeEach(async () => {
+        previousPlayer = playerEntityAtom.getOrNull()
+        playerEntityAtom.swap({
+          absolutePosition: new Vector3(0, PLAYER_CAPSULE_HALF_HEIGHT, 3),
+          absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
+        } as unknown as BABYLON.TransformNode)
+
+        // Aim through the capsule's WAIST, not along y=0. The capsule stands on the
+        // player's feet and spans y 0..1.6, so a ray at y=0 merely grazes its bottom
+        // pole and misses — which is how the first version of this case passed against
+        // the very bug it was written for.
+        camera.position.set(0, 0.8, 0)
+        camera.setTarget(new Vector3(0, 0.8, 1))
+
+        entity = nextEntityId++ as Entity
+        created.push(entity)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(0, 0.8, 6),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, entity, ++timestamp, {
+              collisionMask: ColliderLayer.CL_POINTER,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .put(pointerEventsComponent, entity, ++timestamp, {
+              pointerEvents: [
+                {
+                  eventType: PointerEventType.PET_DOWN,
+                  interactionType: InteractionType.CURSOR,
+                  eventInfo: { maxDistance: 10_000 }
+                }
+              ]
+            } as any)
+            .finish()
+        })
+        // Builds and places the local capsule at the player — directly on the ray.
+        updateAvatarColliders($.ctx)
+        // Render once so the capsule's world matrix actually reflects the position just
+        // assigned. `computeWorldMatrix` is gated on the scene's render id, so without a
+        // frame the capsule keeps the matrix it was built with and sits at the origin —
+        // which is exactly how an earlier version of this case passed against the bug.
+        // Production gets this for free: the pick runs inside onBeforeRenderObservable.
+        $.scene.render()
+      })
+
+      afterEach(() => {
+        if (previousPlayer) playerEntityAtom.swap(previousPlayer)
+        $.ctx
+          .getOrCreateStaticEntity(StaticEntities.PlayerEntity)
+          .getChildMeshes(true)
+          .forEach((mesh) => mesh.dispose())
+      })
+
+      it('should still hover the entity behind it', () => {
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).toBe(entity)
+      })
+
+      // The other half of the same parity rule, and the reason the exclusion is keyed
+      // on CL_MAIN_PLAYER rather than on "is an avatar": OtherAvatars IS in the
+      // client's mask, so a REMOTE player standing in front of a button blocks it.
+      it('should still be blocked by a REMOTE player standing in the same place', () => {
+        const remote = $.ctx.getOrCreateStaticEntity(32 as Entity)
+        updateAvatarColliders($.ctx)
+        const capsule = remote.getChildMeshes(true).find((m) => m.name === 'avatar_capsule')!
+        capsule.position.set(0, 0.8, 3)
+        $.scene.render()
+
+        try {
+          expect(pickActivePointerEventsEntity($.scene) === null).toBe(true)
+        } finally {
+          capsule.dispose()
+        }
       })
     })
 

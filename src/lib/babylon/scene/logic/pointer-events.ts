@@ -8,6 +8,7 @@ import { pointerEventsResultComponent } from '../../../decentraland/sdk-componen
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
 import { pickingToRaycastHit, raycastResultFromRay } from './raycasts'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
+import { isAvatarCapsule } from './avatar-colliders'
 import { isHover, resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
 import { PLAYER_CAPSULE_HALF_HEIGHT } from './static-entities'
 
@@ -89,17 +90,19 @@ export const MAX_POINTER_PICK_DISTANCE = 100
  * (`PlayerOriginatedRaycastSystem.cs:93,112-113`). So a plain wall, or another player,
  * blocks interaction there.
  *
- * `CL_PHYSICS` stands in for Unity's Default layer and the avatar bits for
- * `OtherAvatars`. The `CL_CUSTOM*` bits are deliberately NOT included: this server has
- * no evidence of which Unity layer the client assigns a custom-only collider to, and
+ * `CL_PHYSICS` stands in for Unity's Default layer and `CL_PLAYER` for `OtherAvatars`.
+ *
+ * `CL_MAIN_PLAYER` is deliberately ABSENT, matching the client's mask, which names
+ * OtherAvatars but not the local CharacterController — see the capsule check in the
+ * predicate for why that distinction decides whether the pointer works at all.
+ *
+ * The `CL_CUSTOM*` bits are deliberately NOT included either: this server has no
+ * evidence of which Unity layer the client assigns a custom-only collider to, and
  * treating them as occluders would be inventing an interaction block rather than
  * reproducing one.
  */
 const POINTER_OCCLUDING_LAYERS =
-  ColliderLayer.CL_POINTER |
-  ColliderLayer.CL_PHYSICS |
-  ColliderLayer.CL_PLAYER |
-  ColliderLayer.CL_MAIN_PLAYER
+  ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS | ColliderLayer.CL_PLAYER
 
 /**
  * The centre-screen pick, or null when nothing interactable is hovered.
@@ -127,6 +130,22 @@ export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
       // griefing vector that module exists to close. The raycast path already honours
       // it via `pickMeshesForMask`.
       if (!mesh.isEnabled()) return false
+
+      // The LOCAL player's own capsule never blocks, and this is not a detail: the
+      // camera is an ArcRotateCamera at radius 8, i.e. BEHIND the avatar, so the
+      // centre-screen ray passes through your own body before it reaches anything you
+      // are looking at. Treating it as an occluder killed every pointer interaction in
+      // the game — measured, the hovered entity became null with the avatar on the ray.
+      //
+      // The client excludes it the same way: PLAYER_ORIGIN_RAYCAST_MASK is
+      // `OnPointerEvent | Default | OtherAvatars`, so the local CharacterController
+      // layer is deliberately absent while OTHER avatars are present. A remote player
+      // blocks your pointer; you do not block your own.
+      //
+      // Keyed on the capsule TAG as well as the layer, so a scene cannot make one of
+      // its own colliders unblockable — and therefore invisible to hover — merely by
+      // naming CL_MAIN_PLAYER in its collision mask.
+      if (isAvatarCapsule(mesh) && getColliderLayers(mesh) & ColliderLayer.CL_MAIN_PLAYER) return false
 
       // Every OCCLUDER, not just the interactables. Restricting the predicate to
       // CL_POINTER meshes that carry PointerEvents made them the only candidates, so

@@ -464,6 +464,29 @@ testWithEngine(
       })
     })
 
+    // DELETE_COMPONENT is a different branch from a rewrite: the applier still runs
+    // (`BabylonEntity.deleteComponent` calls `applyChanges` too), but the value it reads
+    // back is `undefined` rather than a value with no proximity entries. The entity
+    // itself stays alive, so `removeEntity`'s cleanup never fires and this is the only
+    // thing that can drop the index entry.
+    describe('when an entity drops its PointerEvents component entirely', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 1), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder().delete(pointerEventsComponent, entity, ++timestamp).finish()
+        })
+      })
+
+      it('should drop it from the proximity index', () => {
+        expect($.ctx.proximityEntities.has(entity)).toBe(false)
+      })
+    })
+
     // The client takes the minimum max_player_distance over EVERY entry, with no
     // interaction-type filter, and an unset one reads 0 — so an entity that is both
     // clickable and proximity-aware is never a proximity candidate there at all.
