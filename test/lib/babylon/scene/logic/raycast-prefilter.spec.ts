@@ -670,3 +670,100 @@ describe('raycast candidate discovery against scene-controlled masks', () => {
     })
   })
 })
+
+// Every ceiling used to be enforced AFTER discovery had walked the tree and swept every
+// collected mesh's world matrix, so a scene over the mesh ceiling — or one with a broad
+// tree and several distinct masks — paid the full cost every frame and then answered
+// empty. `maxColliderWalksPerFrame` bounds how many walks happen; it says nothing about
+// the work inside one, and `maxColliderTreeDepth` bounds depth, not breadth. Measured at
+// 60_000 colliders and 16 distinct effective masks: 233.9ms/frame.
+//
+// Discovery is now budgeted itself, so an unaffordable set is never materialized and
+// never swept. The sweep is the observable half — it is what makes such a frame
+// expensive — so that is what this measures.
+describe('raycast candidate discovery under its own budget', () => {
+  let engine: BABYLON.NullEngine
+  let scene: BABYLON.Scene
+  let root: BABYLON.TransformNode
+  let meshes: AbstractMesh[]
+
+  function raycastContext() {
+    return {
+      currentTick: 0,
+      entityId: 'budget-spec',
+      rootNode: root,
+      raycastRotationCursor: 0,
+      pendingRaycastOperations: new Set([1]),
+      components: {
+        [raycastComponent.componentId]: {
+          getOrNull: () => ({
+            queryType: RaycastQueryType.RQT_HIT_FIRST,
+            continuous: true,
+            timestamp: 0,
+            collisionMask: MASK,
+            direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
+            originOffset: undefined,
+            maxDistance: 50
+          })
+        },
+        [raycastResultComponent.componentId]: { createOrReplace: () => undefined }
+      },
+      getEntityOrNull: (id: number) => ({
+        entityId: id,
+        appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
+      })
+    } as any
+  }
+
+  /** Sweeps performed by processRaycasts alone — the scene is fully built beforehand. */
+  function sweepsDuringOneFrame(visitBudget: number): number {
+    const restore = limits.maxColliderTreeVisitsPerFrame
+    limits.maxColliderTreeVisitsPerFrame = visitBudget
+    let swept = 0
+    const original = BABYLON.AbstractMesh.prototype.computeWorldMatrix
+    const spy = jest
+      .spyOn(BABYLON.AbstractMesh.prototype, 'computeWorldMatrix')
+      .mockImplementation(function (this: any, ...args: any[]) {
+        swept++
+        return original.apply(this, args as any)
+      })
+    try {
+      processRaycasts(raycastContext())
+    } finally {
+      spy.mockRestore()
+      limits.maxColliderTreeVisitsPerFrame = restore
+    }
+    return swept
+  }
+
+  beforeEach(() => {
+    engine = new BABYLON.NullEngine()
+    scene = new BABYLON.Scene(engine)
+    root = new BABYLON.TransformNode('root', scene)
+    meshes = []
+    for (let i = 0; i < 500; i++) {
+      const box = createBoxMesh(scene, `c${i}_collider`)
+      box.parent = root
+      box.position.set(0, 0, 5 + i)
+      box.computeWorldMatrix(true)
+      setColliderMask(box, MASK)
+      meshes.push(box)
+    }
+  })
+
+  afterEach(() => {
+    scene.dispose()
+    engine.dispose()
+  })
+
+  it('should sweep every collider when the whole tree fits the allowance', () => {
+    expect(sweepsDuringOneFrame(100_000)).toBeGreaterThanOrEqual(500)
+  })
+
+  it('should sweep nothing when the allowance stops discovery short', () => {
+    expect(sweepsDuringOneFrame(50)).toBe(0)
+  })
+})

@@ -88,6 +88,7 @@ export interface Limits {
   maxRaycastHitsPerQuery: number
   maxColliderTreeDepth: number
   maxColliderWalksPerFrame: number
+  maxColliderTreeVisitsPerFrame: number
 
   // --- Pointer events ---
   maxProximityCandidates: number
@@ -262,6 +263,21 @@ const KNOBS: readonly Knob[] = [
   // constants, and a scene needing more than a handful of distinct combinations in one
   // frame is doing something unusual.
   { key: 'maxColliderWalksPerFrame', env: 'HAMMURABI_MAX_COLLIDER_WALKS_PER_FRAME', def: 16, min: 1 },
+
+  // Collider-tree NODES visited per frame across every candidate walk, raycast and
+  // pointer alike. The walk ceiling above bounds how many walks happen; this bounds the
+  // work inside them, which nothing else does — `maxColliderTreeDepth` bounds depth, and
+  // a scene can park the whole entity ceiling at depth 1.
+  //
+  // Without it the budgets were all enforced AFTER discovery had already walked the tree
+  // and swept every collected mesh's world matrix, so an over-ceiling raycast paid the
+  // full cost every frame and then answered empty. Measured at 60_000 colliders and 16
+  // distinct effective masks: 233.9ms/frame.
+  //
+  // Defaulted to the live-entity ceiling so ONE full walk of a maximal scene is always
+  // affordable — a legitimate scene with a single collision mask is never truncated —
+  // while a second maximal walk in the same frame is not.
+  { key: 'maxColliderTreeVisitsPerFrame', env: 'HAMMURABI_MAX_COLLIDER_TREE_VISITS_PER_FRAME', def: 100_000, min: 1 },
 
   // Entities examined per frame by the PROXIMITY pointer-event scan. Only entities
   // that DECLARE a proximity entry are examined at all (SceneContext.proximityEntities

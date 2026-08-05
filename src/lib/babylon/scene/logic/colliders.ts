@@ -160,7 +160,26 @@ export function getColliderLayers(mesh: AbstractMesh): number {
  * `maxColliderTreeDepth` then bounds the WORK rather than the stack. Nodes below
  * it are skipped and the drop is reported once per throttle window.
  */
-export function pickMeshesForMask(entity: BabylonEntity, mask: number): Iterable<AbstractMesh> {
+/**
+ * Work allowance for a single walk, mutated in place so a caller can spend ONE budget
+ * across several walks.
+ *
+ * `remainingVisits` bounds BREADTH, which `maxColliderTreeDepth` does not: a scene can
+ * park the entity ceiling's worth of nodes at depth 1. `maxResults` bounds what is
+ * MATERIALIZED, so a caller that is going to refuse an over-ceiling set never builds it.
+ */
+export type ColliderWalkBudget = {
+  remainingVisits: number
+  maxResults: number
+  /** Which allowance ran out, so the caller logs the ceiling that actually stopped it. */
+  truncatedBy: 'visits' | 'results' | null
+}
+
+export function pickMeshesForMask(
+  entity: BabylonEntity,
+  mask: number,
+  budget?: ColliderWalkBudget
+): Iterable<AbstractMesh> {
   if (!mask) return []
 
   const maxDepth = limits.maxColliderTreeDepth // HAMMURABI_MAX_COLLIDER_TREE_DEPTH
@@ -177,6 +196,18 @@ export function pickMeshesForMask(entity: BabylonEntity, mask: number): Iterable
   let truncated = false
 
   while (stackNodes.length) {
+    // Charged per node VISITED, before any work on it. The caller is about to refuse or
+    // defer anything past its allowance, so continuing to walk is pure waste — and it is
+    // waste a scene controls, since both the tree and the number of distinct masks that
+    // trigger a walk are scene-authored.
+    if (budget) {
+      if (budget.remainingVisits <= 0) {
+        budget.truncatedBy = 'visits'
+        break
+      }
+      budget.remainingVisits--
+    }
+
     const node = stackNodes.pop()!
     const depth = stackDepths.pop()!
 
@@ -196,6 +227,12 @@ export function pickMeshesForMask(entity: BabylonEntity, mask: number): Iterable
       bitIntersectsAndContainsAny(getColliderLayers(node), mask)
     ) {
       results.push(node)
+      // Past what the caller can afford to intersect: it will answer empty, so there is
+      // nothing to gain from collecting the rest or from sweeping their world matrices.
+      if (budget && results.length > budget.maxResults) {
+        budget.truncatedBy = 'results'
+        break
+      }
     }
 
     // `_children` is read directly rather than through `getChildren(_, true)`.

@@ -171,7 +171,13 @@ describe('limit logging wiring', () => {
         })
       })
 
-      expect(hit).toHaveBeenCalledWith('maxRaycastIntersectionsPerFrame', expect.stringContaining('60000 colliders'))
+      // The exact count is deliberately absent now: discovery STOPS at the ceiling
+      // instead of materializing the whole set to count it, which is the point of
+      // budgeting it. The KEY is what this case exists to pin.
+      expect(hit).toHaveBeenCalledWith(
+        'maxRaycastIntersectionsPerFrame',
+        expect.stringContaining('too many colliders')
+      )
     } finally {
       scene.dispose()
       engine.dispose()

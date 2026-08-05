@@ -1,7 +1,7 @@
 import { Matrix, Node, PickingInfo, PointerEventTypes, Ray, Scene, Vector3 } from '@babylonjs/core'
 import { BabylonEntity } from '../BabylonEntity'
 import { AbstractMesh as BabylonMesh } from '@babylonjs/core'
-import { floorMeshes, getColliderLayers, pickMeshesForMask } from './colliders'
+import { ColliderWalkBudget, floorMeshes, getColliderLayers, pickMeshesForMask } from './colliders'
 import { bitIntersectsAndContainsAny } from '../../../misc/bit-operations'
 import { limits } from '../../../misc/limits'
 import { limitLogger } from '../../../misc/limit-logger'
@@ -101,16 +101,18 @@ export const MAX_POINTER_PICK_DISTANCE = 100
  * (`PlayerOriginatedRaycastSystem.cs:93,112-113`). So a plain wall, or another player,
  * blocks interaction there.
  *
- * `CL_PHYSICS` stands in for Unity's Default layer and `CL_PLAYER` for `OtherAvatars`.
+ * This set is only the CANDIDATE filter handed to `pickMeshesForMask`, i.e. which bits are
+ * worth collecting; `isPointerOccluder` then applies the real rule. It is deliberately
+ * WIDER than that rule: `CL_PHYSICS` is here so a `CL_PHYSICS | CL_POINTER` collider is
+ * collected by either bit, and `CL_PLAYER` so avatar capsules are.
  *
  * `CL_MAIN_PLAYER` is deliberately ABSENT, matching the client's mask, which names
- * OtherAvatars but not the local CharacterController — see the capsule check in the
- * predicate for why that distinction decides whether the pointer works at all.
+ * OtherAvatars but not the local CharacterController — see the capsule check in
+ * `isPointerOccluder` for why that distinction decides whether the pointer works at all.
  *
- * The `CL_CUSTOM*` bits are deliberately NOT included either: this server has no
- * evidence of which Unity layer the client assigns a custom-only collider to, and
- * treating them as occluders would be inventing an interaction block rather than
- * reproducing one.
+ * The `CL_CUSTOM*` bits are deliberately NOT included: they map to SDK_CUSTOM_LAYER,
+ * which is not in the client's pointer mask, so a custom-only collider neither blocks nor
+ * receives the pointer.
  */
 const POINTER_OCCLUDING_LAYERS =
   ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS | ColliderLayer.CL_PLAYER
@@ -197,9 +199,28 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
   // `pickClosest` takes one — which is exactly why only a measurement caught it.
   const meshes = new Set<BabylonMesh>()
 
+  // BUDGETED discovery, spending ONE allowance across every loaded scene. The ceilings
+  // below used to be checked after this loop had already walked every tree and the sweep
+  // had touched every matrix, so a broad scene paid the full cost each frame and then got
+  // no hover. Truncating here means an unaffordable set is never built.
+  const budget: ColliderWalkBudget = {
+    remainingVisits: limits.maxColliderTreeVisitsPerFrame,
+    maxResults: limits.maxRaycastIntersectionsPerFrame,
+    truncatedBy: null
+  }
+
   for (const context of loadedScenesByEntityId.values()) {
-    for (const mesh of pickMeshesForMask(context.rootNode, POINTER_OCCLUDING_LAYERS)) {
+    for (const mesh of pickMeshesForMask(context.rootNode, POINTER_OCCLUDING_LAYERS, budget)) {
       if (isPointerOccluder(mesh)) meshes.add(mesh)
+    }
+    if (budget.truncatedBy) {
+      // The ceiling that actually stopped it, so an operator is pointed at the knob that
+      // can move it — and so one drop is not attributed to two throttled keys.
+      limitLogger.hit(
+        budget.truncatedBy === 'visits' ? 'maxColliderTreeVisitsPerFrame' : 'maxRaycastIntersectionsPerFrame',
+        'pointer pick: collider discovery truncated'
+      )
+      return null
     }
   }
   for (const mesh of floorMeshes) {
@@ -237,6 +258,8 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
   // the Babylon frame and processRaycasts on the scene's CRDT frame, so a shared counter
   // would make each starve the other depending on interleaving. What this bounds is one
   // pick's own work, which is the thing that was unbounded.
+  // Still checked after the floorMeshes group, which is not walked through the budget
+  // above (it is a flat set, not a tree) and so can push the total past the ceiling.
   if (meshes.size > limits.maxRaycastIntersectionsPerFrame) {
     limitLogger.hit('maxRaycastIntersectionsPerFrame', `pointer pick spans ${meshes.size} colliders`)
     return null
@@ -282,8 +305,31 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
  */
 function isPointerOccluder(mesh: BabylonMesh): boolean {
   if (!mesh.isEnabled()) return false
-  if (isAvatarCapsule(mesh) && getColliderLayers(mesh) & ColliderLayer.CL_MAIN_PLAYER) return false
-  return (getColliderLayers(mesh) & POINTER_OCCLUDING_LAYERS) !== 0
+
+  const layers = getColliderLayers(mesh)
+
+  // Avatars are not SDK colliders and do not go through the mask->layer mapping below:
+  // the remote-avatar prefab sits on OtherAvatars, which IS in the client's pointer mask,
+  // while the local CharacterController layer is not. See POINTER_OCCLUDING_LAYERS.
+  if (isAvatarCapsule(mesh)) return (layers & ColliderLayer.CL_MAIN_PLAYER) === 0
+
+  // A SCENE collider reaches the client's pointer mask only through two of its layers,
+  // and BOTH require CL_POINTER (`PhysicsLayers.TryGetUnityLayerFromSDKLayer`):
+  //
+  //   CL_PHYSICS | CL_POINTER -> Default        (in PLAYER_ORIGIN_RAYCAST_MASK)
+  //   CL_POINTER alone        -> OnPointerEvent (in PLAYER_ORIGIN_RAYCAST_MASK)
+  //   CL_PHYSICS alone        -> CharacterOnly  (NOT in it)
+  //
+  // So a physics-ONLY collider is invisible to the pointer on the client: it neither
+  // blocks nor receives. Treating CL_PHYSICS as occluding on its own was wrong in both
+  // directions — such a wall blocked hover that no client blocks, AND if its entity also
+  // carried a PointerEvents component it was returned as hoverable, since the only check
+  // after the pick was on the ENTITY. Requiring CL_POINTER on the picked MESH fixes both,
+  // because a collider that can be hovered is exactly one that can occlude.
+  //
+  // The custom bits stay out for the same reason as before: they map to SDK_CUSTOM_LAYER,
+  // which is not in the pointer mask either.
+  return (layers & ColliderLayer.CL_POINTER) !== 0
 }
 
 /**

@@ -450,9 +450,12 @@ testWithEngine(
               scale: new Vector3(4, 4, 1),
               parent: 0 as Entity
             })
-            // CL_PHYSICS only, and no PointerEvents: not interactable, but solid.
+            // The DEFAULT mask, which is what `PBMeshColliderDefaults` gives a collider
+            // that does not name one: CL_PHYSICS|CL_POINTER maps to Unity's Default
+            // layer, which IS in the client's pointer mask. No PointerEvents, so it is
+            // solid but not interactable.
             .put(meshColliderComponent, wall, ++timestamp, {
-              collisionMask: ColliderLayer.CL_PHYSICS,
+              collisionMask: ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER,
               mesh: { $case: 'box', box: {} }
             } as any)
             .finish()
@@ -576,7 +579,7 @@ testWithEngine(
                 parent: 0 as Entity
               })
               .put(meshColliderComponent, filler, ++timestamp, {
-                collisionMask: ColliderLayer.CL_PHYSICS,
+                collisionMask: ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER,
                 mesh: { $case: 'box', box: {} }
               } as any)
               .finish()
@@ -692,7 +695,7 @@ testWithEngine(
         wall.parent = otherRoot
         wall.position.set(0, 0, 3)
         wall.computeWorldMatrix(true)
-        setColliderMask(wall, ColliderLayer.CL_PHYSICS)
+        setColliderMask(wall, ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER)
 
         loadedScenesByEntityId.set('other-scene', {
           rootNode: otherRoot,
@@ -801,6 +804,56 @@ testWithEngine(
       })
     })
 
+    // A CL_PHYSICS-ONLY collider is invisible to the pointer on the client: the mask maps
+    // to Unity's CharacterOnly layer (`PhysicsLayers.TryGetUnityLayerFromSDKLayer`), which
+    // is NOT in PLAYER_ORIGIN_RAYCAST_MASK. Only CL_PHYSICS|CL_POINTER (Default) and
+    // CL_POINTER alone (OnPointerEvent) are.
+    //
+    // It was wrong here in BOTH directions. Such a collider blocked hover that no client
+    // blocks; and because the only check after the pick was on the ENTITY, an entity that
+    // also carried a PointerEvents component had its physics-only collider returned as
+    // hoverable — receiving events through geometry the client cannot even see.
+    describe('when a physics-only collider sits in front of an interactive entity', () => {
+      let behind: Entity
+      let physicsOnly: Entity
+
+      beforeEach(async () => {
+        behind = await putInteractiveBox(6)
+
+        // Physics-only, AND its entity declares PointerEvents — the exact combination
+        // that used to make it interactable.
+        physicsOnly = nextEntityId++ as Entity
+        created.push(physicsOnly)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, physicsOnly, ++timestamp, {
+              position: new Vector3(0, 0, 3),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, physicsOnly, ++timestamp, {
+              collisionMask: ColliderLayer.CL_PHYSICS,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .put(pointerEventsComponent, physicsOnly, ++timestamp, {
+              pointerEvents: [
+                { eventType: PointerEventType.PET_DOWN, interactionType: InteractionType.CURSOR, eventInfo: {} }
+              ]
+            } as any)
+            .finish()
+        })
+      })
+
+      it('should not be hoverable, however willing its entity is', () => {
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).not.toBe(physicsOnly)
+      })
+
+      it('should not block the interactive entity behind it either', () => {
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).toBe(behind)
+      })
+    })
+
     // An occluder need not belong to an entity at all: `ambientLights.ts` masks a
     // ground mesh that hangs off no BabylonEntity, so `getParentEntity` walks to the
     // root and returns null. That return had never executed — the occlusion case above
@@ -813,7 +866,7 @@ testWithEngine(
         ground = BABYLON.MeshBuilder.CreateBox('ground', { width: 8, height: 8, depth: 1 }, $.scene)
         ground.position.set(0, 0, 3)
         ground.computeWorldMatrix(true)
-        setColliderMask(ground, ColliderLayer.CL_PHYSICS)
+        setColliderMask(ground, ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER)
         // Registered exactly as `ambientLights.ts` registers the real ambient ground: it
         // is not named `*_collider`, so `setColliderMask` does not enrol it, and it hangs
         // off no entity. `floorMeshes` is what keeps it in the pointer's candidate set now

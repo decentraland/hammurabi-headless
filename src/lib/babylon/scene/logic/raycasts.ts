@@ -7,7 +7,7 @@ import { raycastComponent, raycastResultComponent } from '../../../decentraland/
 import { SceneContext } from '../scene-context'
 import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoordinates } from '../coordinates'
 import { BabylonEntity } from '../BabylonEntity'
-import { colliderLayerUnion, pickMeshesForMask } from './colliders'
+import { ColliderWalkBudget, colliderLayerUnion, pickMeshesForMask } from './colliders'
 import { isAvatarCapsule, isRemotePlayerEntity } from './avatar-colliders'
 import { intersectAnalyticSphere, NOT_ANALYTIC, resolveAnalyticSphere } from './analytic-colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
@@ -183,6 +183,17 @@ export function processRaycasts(scene: SceneContext) {
   const meshesByMask = new Map<number, BABYLON.AbstractMesh[]>()
   let colliderWalks = 0
   const maxColliderWalks = limits.maxColliderWalksPerFrame // HAMMURABI_MAX_COLLIDER_WALKS_PER_FRAME
+  let visitBudget = limits.maxColliderTreeVisitsPerFrame // HAMMURABI_MAX_COLLIDER_TREE_VISITS_PER_FRAME
+
+  /**
+   * `ok` carries the candidates; `over-ceiling` means discovery was truncated and the
+   * raycast must be answered empty; `defer` means this frame declined to discover at all
+   * and the raycast should retry next frame.
+   */
+  type MaskCandidates =
+    | { kind: 'ok'; meshes: BABYLON.AbstractMesh[] }
+    | { kind: 'over-ceiling' }
+    | { kind: 'defer' }
 
   /**
    * Candidate meshes for a mask, or null when this frame cannot afford to discover them.
@@ -201,9 +212,9 @@ export function processRaycasts(scene: SceneContext) {
    * An effective mask of 0 cannot match anything, so it answers empty WITHOUT walking —
    * the same result the walk would have produced.
    */
-  const meshesForMask = (mask: number): BABYLON.AbstractMesh[] | null => {
+  const meshesForMask = (mask: number): MaskCandidates => {
     const effectiveMask = mask & colliderLayerUnion()
-    if (effectiveMask === 0) return EMPTY_CANDIDATES
+    if (effectiveMask === 0) return { kind: 'ok', meshes: EMPTY_CANDIDATES }
 
     let meshes = meshesByMask.get(effectiveMask)
     if (!meshes) {
@@ -212,10 +223,39 @@ export function processRaycasts(scene: SceneContext) {
       // masks and force a walk for each. This is the ceiling that actually bounds it.
       if (colliderWalks >= maxColliderWalks) {
         limitLogger.hit('maxColliderWalksPerFrame', `scene ${scene.entityId}: too many distinct collision masks`)
-        return null
+        return { kind: 'defer' }
       }
       colliderWalks++
-      meshes = Array.from(pickMeshesForMask(scene.rootNode, effectiveMask))
+
+      // BUDGETED discovery. Every ceiling used to be enforced after this walk had already
+      // materialized the whole candidate list and swept every world matrix, so a scene
+      // over the mesh ceiling paid the full cost each frame and then got an empty result.
+      // Truncating here means an unaffordable set is never built and never swept.
+      const budget: ColliderWalkBudget = {
+        remainingVisits: visitBudget,
+        maxResults: maxIntersectionsPerFrame,
+        truncatedBy: null
+      }
+      meshes = Array.from(pickMeshesForMask(scene.rootNode, effectiveMask, budget))
+      visitBudget = budget.remainingVisits
+
+      if (budget.truncatedBy) {
+        // Deliberately NOT cached: this list is partial, and a later raycast on the same
+        // mask must not be answered from it.
+        //
+        // Only the VISITS ceiling is reported here. Running out of `maxResults` means the
+        // candidate set is over the MESH ceiling, which the caller's over-ceiling branch
+        // already reports under its own key — logging both would attribute one drop to
+        // two knobs, and limit-logger throttles per key, so the wrong one would suppress
+        // the right one.
+        if (budget.truncatedBy === 'visits') {
+          limitLogger.hit(
+            'maxColliderTreeVisitsPerFrame',
+            `scene ${scene.entityId}: collider discovery truncated for mask ${effectiveMask}`
+          )
+        }
+        return { kind: 'over-ceiling' }
+      }
       // Refresh world matrices ONCE per mask per frame, before anything reads
       // `minimumWorld`/`maximumWorld` off these meshes.
       //
@@ -255,7 +295,7 @@ export function processRaycasts(scene: SceneContext) {
       for (const mesh of meshes) mesh.computeWorldMatrix(false)
       meshesByMask.set(effectiveMask, meshes)
     }
-    return meshes
+    return { kind: 'ok', meshes }
   }
   const maxIntersectionsPerFrame = limits.maxRaycastIntersectionsPerFrame // HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME
   const maxTrianglesPerFrame = limits.maxRaycastTrianglesPerFrame // HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME
@@ -340,12 +380,15 @@ export function processRaycasts(scene: SceneContext) {
           // makes a zero-range raycast cost exactly what a raycast against one collider
           // costs, so `maxRaycastIntersectionsPerFrame` bounds how many can be answered
           // per frame on every path rather than on all but this one.
-          const zeroRangeMeshes = meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK)
+          const zeroRange = meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK)
           // Out of collider-walk allowance this frame: defer whole, exactly as the
           // budget-exceeded branch below does, so a continuous raycast retries next
           // frame rather than being answered from a candidate set we declined to build.
-          if (zeroRangeMeshes === null) break
-          intersectionBudget -= Math.max(1, zeroRangeMeshes.length)
+          if (zeroRange.kind === 'defer') break
+          // Discovery was truncated, so the real count is unknown and at least the mesh
+          // ceiling. Charge the ceiling: the answer is empty either way.
+          intersectionBudget -=
+            zeroRange.kind === 'over-ceiling' ? maxIntersectionsPerFrame : Math.max(1, zeroRange.meshes.length)
           RaycastResult.createOrReplace(
             entity.entityId,
             raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
@@ -353,10 +396,13 @@ export function processRaycasts(scene: SceneContext) {
         } else {
           // get a list of all possible meshes to project this ray to
           const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
-          const intersectableMeshes = meshesForMask(mask)
+          const discovered = meshesForMask(mask)
           // See the zero-range branch: no allowance left to discover a new mask's
           // candidates, so defer rather than guess.
-          if (intersectableMeshes === null) break
+          if (discovered.kind === 'defer') break
+          // Truncated: the set is over the mesh ceiling by construction, so take the
+          // over-ceiling branch below without ever having built or swept it.
+          const intersectableMeshes = discovered.kind === 'over-ceiling' ? null : discovered.meshes
 
           // The MESH ceiling pays for the bounding-box scan below: one cheap
           // ray↔box test per candidate, whether or not it survives. Enforced
@@ -374,7 +420,7 @@ export function processRaycasts(scene: SceneContext) {
           // retired a continuous raycast after a single empty result: nothing
           // re-arms it except the scene re-PUTting the component, so it stayed
           // dead even once the collider set dropped back under budget.
-          if (intersectableMeshes.length > maxIntersectionsPerFrame) {
+          if (intersectableMeshes === null || intersectableMeshes.length > maxIntersectionsPerFrame) {
             // Charged even though no scan runs. A retained continuous raycast
             // arrives here again next frame, and getting here is not free —
             // `meshesForMask` walked the whole subtree and swept every world
@@ -382,10 +428,10 @@ export function processRaycasts(scene: SceneContext) {
             // repeats that walk every frame forever, once per DISTINCT mask
             // (~4ms per mask per frame at 50k colliders): exactly the cost this
             // ceiling exists to bound.
-            intersectionBudget -= intersectableMeshes.length
+            intersectionBudget -= intersectableMeshes?.length ?? maxIntersectionsPerFrame
             limitLogger.hit(
               'maxRaycastIntersectionsPerFrame',
-              `scene ${scene.entityId}: one raycast spans ${intersectableMeshes.length} colliders`
+              `scene ${scene.entityId}: one raycast spans ${intersectableMeshes?.length ?? 'too many'} colliders`
             )
             RaycastResult.createOrReplace(
               entity.entityId,
