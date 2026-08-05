@@ -1,12 +1,14 @@
 import { Matrix, Node, PickingInfo, PointerEventTypes, Ray, Scene, Vector3 } from '@babylonjs/core'
 import { BabylonEntity } from '../BabylonEntity'
-import { getColliderLayers } from './colliders'
+import { AbstractMesh as BabylonMesh } from '@babylonjs/core'
+import { floorMeshes, getColliderLayers, pickMeshesForMask } from './colliders'
+import { bitIntersectsAndContainsAny } from '../../../misc/bit-operations'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { InputAction, InteractionType, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
 import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
-import { pickingToRaycastHit, raycastResultFromRay } from './raycasts'
+import { nearestHitAlongRay, pickingToRaycastHit, prefilterCandidates, raycastResultFromRay } from './raycasts'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
 import { isAvatarCapsule } from './avatar-colliders'
 import { isHover, resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
@@ -75,9 +77,10 @@ export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | nul
  * client would reach it, since a scene is free to ask for `maxDistance: 500` and the
  * client still cannot fire past its ray cap.
  *
- * This bounds the ANSWER, not the work: `Scene.prototype.pick` takes no distance
- * argument, so the whole scene is still tested and the check below is post-hoc. An
- * earlier version of this comment claimed the opposite.
+ * Bounds the WORK, not just the answer: it is assigned to `ray.length`, so the slab
+ * prefilter rejects anything further at the box rather than triangle-testing it and
+ * discarding the result. (It did once bound only the answer, when the pick went through
+ * `Scene.prototype.pick`, which takes no distance argument.)
  */
 export const MAX_POINTER_PICK_DISTANCE = 100
 
@@ -119,48 +122,28 @@ export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
 
   if (!camera) return null
 
-  const pickInfo = scene.pick(
+  // The picking RAY, bounded to the pick's reach, rather than `Scene.prototype.pick`.
+  //
+  // `pick` takes no distance argument, so the cap could only be applied to its ANSWER
+  // after the whole scene had been tested; Babylon's box test ignores `ray.length`
+  // entirely, so geometry hundreds of metres away was triangle-tested and then thrown
+  // away one triangle at a time. Measured: 2.86ms -> 0.28ms per frame for 2000 colliders
+  // sitting 500m down the ray.
+  //
+  // The results are identical, not merely similar: `pick` returns the CLOSEST hit, so if
+  // that hit is beyond the cap there is nothing nearer to find, and a bounded ray
+  // returning nothing is the same answer.
+  const ray = scene.createPickingRay(
     scene.getEngine().getRenderWidth() / 2,
     scene.getEngine().getRenderHeight() / 2,
-    (mesh) => {
-      // isEnabled FIRST. Passing a predicate to `scene.pick` REPLACES Babylon's
-      // default `isEnabled/isVisible/isPickable` filter (ray.js:598-607) rather than
-      // adding to it — so without this, a collider that `scene-bounds.ts` disabled for
-      // leaving its parcels still absorbed pointer events, which is verbatim the
-      // griefing vector that module exists to close. The raycast path already honours
-      // it via `pickMeshesForMask`.
-      if (!mesh.isEnabled()) return false
-
-      // The LOCAL player's own capsule never blocks, and this is not a detail: the
-      // camera is an ArcRotateCamera at radius 8, i.e. BEHIND the avatar, so the
-      // centre-screen ray passes through your own body before it reaches anything you
-      // are looking at. Treating it as an occluder killed every pointer interaction in
-      // the game — measured, the hovered entity became null with the avatar on the ray.
-      //
-      // The client excludes it the same way: PLAYER_ORIGIN_RAYCAST_MASK is
-      // `OnPointerEvent | Default | OtherAvatars`, so the local CharacterController
-      // layer is deliberately absent while OTHER avatars are present. A remote player
-      // blocks your pointer; you do not block your own.
-      //
-      // Keyed on the capsule TAG as well as the layer, so a scene cannot make one of
-      // its own colliders unblockable — and therefore invisible to hover — merely by
-      // naming CL_MAIN_PLAYER in its collision mask.
-      if (isAvatarCapsule(mesh) && getColliderLayers(mesh) & ColliderLayer.CL_MAIN_PLAYER) return false
-
-      // Every OCCLUDER, not just the interactables. Restricting the predicate to
-      // CL_POINTER meshes that carry PointerEvents made them the only candidates, so
-      // the closest hit was always interactable and nothing could ever block it: hover
-      // and click passed straight through walls, floors and other players, none of
-      // which is reachable on any client.
-      return (getColliderLayers(mesh) & POINTER_OCCLUDING_LAYERS) !== 0
-    },
-    false,
+    Matrix.Identity(),
     camera
   )
+  ray.length = MAX_POINTER_PICK_DISTANCE
 
-  if (!pickInfo.pickedMesh || !pickInfo.pickedPoint || pickInfo.distance > MAX_POINTER_PICK_DISTANCE) {
-    return null
-  }
+  const pickInfo = nearestHitAlongRay(ray, ...prefilterArgs(scene, ray))
+
+  if (!pickInfo || !pickInfo.pickedMesh || !pickInfo.pickedPoint) return null
 
   // The closest thing in front of the player is not something a scene can interact
   // with, so nothing is hovered — the client's `Reset()` branch.
@@ -168,6 +151,101 @@ export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
   if (!parentEntity || !entityHasPointerEvents(parentEntity)) return null
 
   return pickInfo
+}
+
+/**
+ * Every mesh that can block or receive the pointer, prefiltered against `ray`.
+ *
+ * The candidate set has to match what `Scene.prototype.pick` used to walk — every mesh
+ * in the Babylon scene — or occluders quietly stop occluding. Two groups live outside
+ * any single scene's node tree:
+ *
+ *   - EVERY loaded scene's root, not just one. A second SceneContext exists in ordinary
+ *     operation (the local avatar scene), and its colliders are as solid as any other's.
+ *   - `floorMeshes`, which is where the ambient ground lands. It is CL_PHYSICS and
+ *     deliberately unparented ("this port has no such parent", ambientLights.ts), and it
+ *     SHOULD occlude: the client's world floor is on the Default layer, which is in
+ *     PLAYER_ORIGIN_RAYCAST_MASK, so looking at the ground blocks hover there. Dropping
+ *     it would be the most visible regression this change could cause, and the least
+ *     obvious to spot.
+ *
+ * That list is also why `floorMeshes` finally has a reader: it was write-only.
+ */
+function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number[]] {
+  // A SET, because the two groups OVERLAP heavily. `setColliderMask` enrols any mesh
+  // named `*_collider` into `floorMeshes`, and every primitive collider is named exactly
+  // that — so nearly all of a scene's colliders appear in both groups. Collected into an
+  // array they were prefiltered and TRIANGLE-TESTED twice: measured, an 80_000-triangle
+  // floor cost 4.25ms/frame against `Scene.prototype.pick`'s 2.06ms, i.e. this
+  // optimisation ran 2x SLOWER than what it replaced until the duplicates were removed.
+  // The answer was never wrong — both hits are the same mesh at the same distance and
+  // `pickClosest` takes one — which is exactly why only a measurement caught it.
+  const meshes = new Set<BabylonMesh>()
+
+  for (const context of loadedScenesByEntityId.values()) {
+    for (const mesh of pickMeshesForMask(context.rootNode, POINTER_OCCLUDING_LAYERS)) {
+      if (isPointerOccluder(mesh)) meshes.add(mesh)
+    }
+  }
+  for (const mesh of floorMeshes) {
+    if (mesh.isEnabled(false) && bitIntersectsAndContainsAny(getColliderLayers(mesh), POINTER_OCCLUDING_LAYERS)) {
+      if (isPointerOccluder(mesh)) meshes.add(mesh)
+    }
+  }
+
+  // `getBoundingInfo()` re-derives the world box from the CACHED matrix rather than
+  // recomputing one, and `_evaluateActiveMeshes` never bumps the render id of a mesh it
+  // skipped — so without a sweep a collider is prefiltered against where it used to be.
+  // `Scene.prototype.pick` did not need this: `Ray.intersectsMesh` transforms the ray
+  // into each mesh's LOCAL space instead of comparing world boxes.
+  //
+  // HONESTLY: no test pins this, and I could not construct one. The case
+  // `raycast-stale-bounds.spec.ts` pins for the raycast path is a DISABLED scene root,
+  // and `isPointerOccluder` calls `isEnabled()` — which walks ancestors — so those meshes
+  // never reach the prefilter here. What is left is a mesh that was frustum-culled last
+  // frame and CRDT-moved onto the ray this frame: its node is dirty, but the prefilter
+  // reads `getBoundingInfo()` BEFORE any intersect call would recompute, so it would be
+  // rejected on stale bounds and never tested. That is reachable in principle and is why
+  // the sweep stays.
+  //
+  // It is not free: measured 0.315ms/frame over 10_000 candidates, about 13% of this
+  // path's total there. Delete it only with a test that fails without it.
+  for (const mesh of meshes) mesh.computeWorldMatrix(false)
+
+  const { candidates, entries, radii } = prefilterCandidates(ray, meshes)
+  return [candidates, entries, radii]
+}
+
+/**
+ * Whether `mesh` can block or receive the pointer.
+ *
+ * Carries the rules the `Scene.prototype.pick` predicate used to hold, unchanged:
+ *
+ * `isEnabled` FIRST — a collider that `scene-bounds.ts` disabled for leaving its parcels
+ * must stop absorbing pointer events, which is verbatim the griefing vector that module
+ * exists to close. (`pickMeshesForMask` already applies `isEnabled(false)`, the mesh's
+ * OWN flag; this is the same test for the `floorMeshes` group, which is not walked
+ * through it.)
+ *
+ * The LOCAL player's own capsule never blocks, and this is not a detail: the camera is
+ * an ArcRotateCamera at radius 8, i.e. BEHIND the avatar, so the centre-screen ray
+ * passes through your own body before it reaches anything you are looking at. Treating
+ * it as an occluder killed every pointer interaction in the game — measured, the hovered
+ * entity became null with the avatar on the ray.
+ *
+ * The client excludes it the same way: PLAYER_ORIGIN_RAYCAST_MASK is
+ * `OnPointerEvent | Default | OtherAvatars`, so the local CharacterController layer is
+ * deliberately absent while OTHER avatars are present. A remote player blocks your
+ * pointer; you do not block your own.
+ *
+ * Keyed on the capsule TAG as well as the layer, so a scene cannot make one of its own
+ * colliders unblockable — and therefore invisible to hover — merely by naming
+ * CL_MAIN_PLAYER in its collision mask.
+ */
+function isPointerOccluder(mesh: BabylonMesh): boolean {
+  if (!mesh.isEnabled()) return false
+  if (isAvatarCapsule(mesh) && getColliderLayers(mesh) & ColliderLayer.CL_MAIN_PLAYER) return false
+  return (getColliderLayers(mesh) & POINTER_OCCLUDING_LAYERS) !== 0
 }
 
 /**

@@ -381,23 +381,13 @@ export function processRaycasts(scene: SceneContext) {
             // DISTANCE, which is what lets RQT_HIT_FIRST stop early below. Rejecting
             // a box the ray enters beyond its length cannot lose a hit — every point
             // of that box on the ray is already out of range.
-            const candidates: BABYLON.AbstractMesh[] = []
-            const candidateEntries: number[] = []
-            // Resolved ONCE per surviving candidate and carried through to the
-            // intersection, so the shape decision that sets the bill is the same one
-            // that runs, and the `decompose` behind it is not paid for twice.
-            const candidateRadii: number[] = []
+            const { candidates, entries: candidateEntries, radii: candidateRadii } = prefilterCandidates(
+              ray,
+              intersectableMeshes
+            )
             let candidateTriangles = 0
-            for (const mesh of intersectableMeshes) {
-              const boundingBox = mesh.getBoundingInfo().boundingBox
-              const entry = rayBoxEntry(ray, boundingBox.minimumWorld, boundingBox.maximumWorld)
-              if (entry >= 0) {
-                const analyticRadius = resolveAnalyticSphere(mesh)
-                candidates.push(mesh)
-                candidateEntries.push(entry)
-                candidateRadii.push(analyticRadius)
-                candidateTriangles += candidateTriangleCost(mesh, analyticRadius)
-              }
+            for (let i = 0; i < candidates.length; i++) {
+              candidateTriangles += candidateTriangleCost(candidates[i], candidateRadii[i])
             }
 
             if (candidateTriangles > maxTrianglesPerFrame) {
@@ -648,6 +638,80 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
  * a non-sphere, or a sphere under non-uniform scale, which is an ellipsoid — and
  * those fall through to the triangle path unchanged.
  */
+/**
+ * Bounding-box prefilter: the meshes `ray` could reach, their box-ENTRY distances, and
+ * the analytic radius each will be solved with.
+ *
+ * Shared by `processRaycasts` and the pointer pick so the two cannot drift on the three
+ * decisions that decide what a ray finds: which boxes the ray enters, at what distance
+ * it enters them, and whether the shape is solved in closed form. The pointer pick used
+ * to go through `Scene.prototype.pick` instead, which agreed on none of them — it
+ * ignores `ray.length` at the box stage, has no entry ordering to early-out on, and
+ * always walks a sphere's 1296 triangles.
+ *
+ * `processRaycasts` charges its triangle budget BETWEEN this and the intersection, which
+ * is why the two stages are separate functions rather than one call.
+ *
+ * The caller is responsible for refreshing world matrices first — `getBoundingInfo()`
+ * re-derives `minimumWorld`/`maximumWorld` from the CACHED matrix, so a mesh that
+ * `_evaluateActiveMeshes` skipped reports stale bounds and is rejected or admitted for
+ * where it used to be.
+ */
+export function prefilterCandidates(
+  ray: Ray,
+  meshes: Iterable<BABYLON.AbstractMesh>
+): { candidates: BABYLON.AbstractMesh[]; entries: number[]; radii: number[] } {
+  const candidates: BABYLON.AbstractMesh[] = []
+  const entries: number[] = []
+  // Resolved ONCE per surviving candidate and carried through to the intersection, so
+  // the shape decision that sets the bill is the same one that runs, and the
+  // `decompose` behind it is not paid for twice.
+  const radii: number[] = []
+
+  for (const mesh of meshes) {
+    const boundingBox = mesh.getBoundingInfo().boundingBox
+    const entry = rayBoxEntry(ray, boundingBox.minimumWorld, boundingBox.maximumWorld)
+    if (entry >= 0) {
+      candidates.push(mesh)
+      entries.push(entry)
+      radii.push(resolveAnalyticSphere(mesh))
+    }
+  }
+
+  return { candidates, entries, radii }
+}
+
+/**
+ * Nearest hit along `ray` among already-prefiltered candidates, or null.
+ *
+ * The pointer pick's half of the shared core: `intersectCandidates` in RQT_HIT_FIRST
+ * mode already visits candidates in box-entry order and stops once the best hit is
+ * nearer than the next box can begin, which is the early-out `Scene.prototype.pick`
+ * lacks entirely (it tests every mesh and takes the minimum).
+ */
+export function nearestHitAlongRay(
+  ray: Ray,
+  candidates: BABYLON.AbstractMesh[],
+  entries: number[],
+  radii: number[]
+): BABYLON.Nullable<BABYLON.PickingInfo> {
+  const { results } = intersectCandidates(ray, candidates, entries, radii, RaycastQueryType.RQT_HIT_FIRST)
+  const closest = pickClosest(results)
+  if (!closest) return null
+
+  // `Scene.prototype.pick` sets `ray` on the PickingInfo it returns and callers rely on
+  // it — the pointer path reads `lastPickPoint.ray` to build the RaycastHit it reports to
+  // the scene. `Ray.intersectsMesh` does not: it transforms the ray into the mesh's LOCAL
+  // space and hands that to `mesh.intersects`, so the field comes back null and the hit
+  // builder throws on `ray.direction`.
+  //
+  // Assigned here rather than inside `intersectCandidate` because `processRaycasts` passes
+  // the world ray to `pickingToRaycastHit` explicitly and never reads this field, so this
+  // is the pointer path's contract to keep, not the raycast path's.
+  closest.ray = ray
+  return closest
+}
+
 function intersectCandidate(
   ray: Ray,
   mesh: BABYLON.AbstractMesh,

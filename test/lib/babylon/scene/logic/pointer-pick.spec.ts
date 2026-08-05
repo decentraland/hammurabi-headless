@@ -13,7 +13,7 @@ import {
   pickPointerEventsMesh
 } from '../../../../../src/lib/babylon/scene/logic/pointer-events'
 import { updateAvatarColliders } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
-import { setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
+import { addFloorMesh, floorMeshes, setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 import { pointerEventsResultComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events-result'
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../../../src/lib/decentraland/state'
@@ -489,6 +489,179 @@ testWithEngine(
       })
     })
 
+    // The candidate set is a SET because its two groups overlap: `setColliderMask` enrols
+    // every mesh named `*_collider` into `floorMeshes`, and every primitive collider is
+    // named exactly that — so a scene's colliders are in both the scene-root walk and the
+    // floor group. Collected into an array they were triangle-tested TWICE, which made
+    // this path 2x slower than the `Scene.prototype.pick` it replaced on a heavy mesh
+    // (4.25ms against 2.06ms for an 80 000-triangle floor).
+    //
+    // The ANSWER was never wrong — both hits are the same mesh at the same distance — so
+    // only a measurement or this assertion can catch it. Counting `intersects` calls is
+    // the property itself: each candidate is tested once per pick.
+    describe('when a collider is reachable through both the scene root and floorMeshes', () => {
+      let entity: Entity
+      let intersects: jest.SpyInstance
+
+      beforeEach(async () => {
+        // A CYLINDER, off-axis. A box cannot show this: its AABB entry distance EQUALS
+        // its surface hit, so the HIT_FIRST early-out (`entries[i] >= nearestHit`) skips
+        // the duplicate for free and the bug hides. Here the ray enters the bounding box
+        // at 3.5 and meets the curved surface at 3.6, so the duplicate is genuinely
+        // tested. A sphere would not work either — it takes the analytic path and never
+        // calls `intersects` at all.
+        entity = nextEntityId++ as Entity
+        created.push(entity)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(-0.3, 0, 5),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, entity, ++timestamp, {
+              collisionMask: ColliderLayer.CL_POINTER,
+              mesh: { $case: 'cylinder', cylinder: {} }
+            } as any)
+            .put(pointerEventsComponent, entity, ++timestamp, {
+              pointerEvents: [
+                { eventType: PointerEventType.PET_DOWN, interactionType: InteractionType.CURSOR, eventInfo: {} }
+              ]
+            } as any)
+            .finish()
+        })
+        const collider = $.ctx.entities.get(entity)!.appliedComponents.meshCollider!.collider!
+        expect(floorMeshes.has(collider)).toBe(true) // the overlap this case exists for
+        intersects = jest.spyOn(collider, 'intersects')
+        pickActivePointerEventsEntity($.scene)
+      })
+
+      afterEach(() => {
+        intersects.mockRestore()
+      })
+
+      it('should intersect it once per pick, not once per group it appears in', () => {
+        expect(intersects).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    // The prefilter reads `getBoundingInfo()`, which re-derives the world box from the
+    // CACHED matrix — and `_evaluateActiveMeshes` never bumps the render id of a mesh it
+    // skipped, so without an explicit sweep a collider is prefiltered against where it
+    // USED to be. `Scene.prototype.pick` never needed this because `Ray.intersectsMesh`
+    // transforms the ray into each mesh's LOCAL space instead of comparing world boxes.
+    //
+    // The raycast path has `raycast-stale-bounds.spec.ts` for its own sweep; this is the
+    // pointer path's equivalent. Moving the collider far OFF-AXIS is what makes it
+    // discriminating: stale bounds still place it on the ray, so it stays a candidate and
+    // is reported as hovered when it is nowhere near the crosshair.
+    describe('when a hovered collider moves off-axis without a frame in between', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putInteractiveBox(5)
+        pickPointerEventsMesh($.scene)
+
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(50, 0, 5),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .finish()
+        })
+      })
+
+      it('should stop being hovered, rather than being picked where it used to be', () => {
+        expect(pickActivePointerEventsEntity($.scene) === null).toBe(true)
+      })
+    })
+
+    // The pick resolves a SphereMesh in closed form, the same way raycasts do. It used
+    // to go through `Scene.prototype.pick` and so through Babylon's 1296-triangle hull,
+    // which is an inscribed polyhedron — it reports the surface slightly FURTHER away
+    // than the true sphere, and the two paths disagreed by up to 3.8mm on the same
+    // collider. The client's SphereCollider is analytic, so this converges on both.
+    //
+    // Measured OFF-AXIS deliberately: dead-centre the tessellation has a vertex exactly
+    // at the pole and both paths return 3.5 exactly, so a centred ray cannot tell them
+    // apart. At 0.3m off-axis the analytic answer is 3.600 and the hull's is 3.602.
+    describe('when the pointer grazes a sphere collider off-centre', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        created.push(entity)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(-0.3, 0, 5),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, entity, ++timestamp, {
+              collisionMask: ColliderLayer.CL_POINTER,
+              mesh: { $case: 'sphere', sphere: {} }
+            } as any)
+            .put(pointerEventsComponent, entity, ++timestamp, {
+              pointerEvents: [
+                { eventType: PointerEventType.PET_DOWN, interactionType: InteractionType.CURSOR, eventInfo: {} }
+              ]
+            } as any)
+            .finish()
+        })
+        pickPointerEventsMesh($.scene)
+        interactWithScene(PointerEventType.PET_DOWN, InputAction.IA_PRIMARY)
+      })
+
+      // 3.600 is the true sphere; the tessellated hull answers 3.602. The tolerance sits
+      // between them, so this fails if the pick falls back to triangles.
+      it('should report the analytic surface, not the tessellated hull', () => {
+        expect(resultsFor(entity)[0].hit.length).toBeCloseTo(3.6, 3)
+      })
+    })
+
+    // The pick walks every LOADED scene's root, not just one. A second SceneContext
+    // exists in ordinary operation (the local avatar scene), and its colliders are as
+    // solid as any other's — walking only one root would let a neighbouring scene's wall
+    // stop occluding, which `Scene.prototype.pick` never did because it saw every mesh.
+    describe('when an occluder belongs to a DIFFERENT loaded scene', () => {
+      let otherRoot: BABYLON.TransformNode
+
+      beforeEach(async () => {
+        await putInteractiveBox(6)
+
+        otherRoot = new BABYLON.TransformNode('other-scene-root', $.scene)
+        // Deliberately NOT given the `_collider` name suffix: that suffix makes
+        // setColliderMask enrol the mesh in floorMeshes, which would keep it a candidate
+        // through the OTHER group and let a mutant that walks only one scene root survive
+        // this case. Only the scene-root walk can find it.
+        const wall = BABYLON.MeshBuilder.CreateBox('other-scene-wall', { width: 4, height: 4, depth: 1 }, $.scene)
+        wall.parent = otherRoot
+        wall.position.set(0, 0, 3)
+        wall.computeWorldMatrix(true)
+        setColliderMask(wall, ColliderLayer.CL_PHYSICS)
+
+        loadedScenesByEntityId.set('other-scene', {
+          rootNode: otherRoot,
+          components: { [pointerEventsComponent.componentId]: { iterator: () => [][Symbol.iterator]() } }
+        } as any)
+      })
+
+      afterEach(() => {
+        loadedScenesByEntityId.delete('other-scene')
+        otherRoot.dispose(false)
+      })
+
+      it('should be blocked by it, as it was when the pick saw every mesh', () => {
+        expect(pickActivePointerEventsEntity($.scene) === null).toBe(true)
+      })
+    })
+
     // The camera sits BEHIND the player (ArcRotateCamera, radius 8), so the local
     // avatar is between the camera and everything the player looks at. If its capsule
     // occludes, every pointer interaction in the game dies.
@@ -593,6 +766,11 @@ testWithEngine(
         ground.position.set(0, 0, 3)
         ground.computeWorldMatrix(true)
         setColliderMask(ground, ColliderLayer.CL_PHYSICS)
+        // Registered exactly as `ambientLights.ts` registers the real ambient ground: it
+        // is not named `*_collider`, so `setColliderMask` does not enrol it, and it hangs
+        // off no entity. `floorMeshes` is what keeps it in the pointer's candidate set now
+        // that the pick walks scene roots instead of every mesh in the Babylon scene.
+        addFloorMesh(ground)
       })
 
       afterEach(() => {
