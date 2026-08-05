@@ -60,7 +60,6 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
   <div class="row"><span>camera</span><span id="campos">–</span></div>
   <div id="modes">
     <button id="m-fly" class="active">fly</button>
-    <button id="m-orbit">orbit</button>
     <button id="m-follow">follow</button>
     <button id="m-eyes">eyes</button>
   </div>
@@ -109,10 +108,13 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
   fly.inputs.removeByType('FreeCameraKeyboardMoveInput')
   fly.attachControl(canvas, true)
 
-  var orbit = new BABYLON.ArcRotateCamera('orbit', -Math.PI / 2, Math.PI / 3.2, 34, BABYLON.Vector3.Zero(), scene)
-  orbit.wheelPrecision = 12
-  orbit.lowerRadiusLimit = 1
-  orbit.panningSensibility = 250 // right-drag pans the target
+  // Chase camera for follow mode: an ArcRotate orbiting the SELECTION, so you can
+  // swing around whatever you are tracking. Panning is disabled on purpose — the
+  // follow lerp rewrites the target every frame, so a pan would only fight it.
+  var followCam = new BABYLON.ArcRotateCamera('follow', -Math.PI / 2, Math.PI / 3.2, 12, BABYLON.Vector3.Zero(), scene)
+  followCam.wheelPrecision = 12
+  followCam.lowerRadiusLimit = 1
+  followCam.panningSensibility = 0
 
   var eyes = new BABYLON.FreeCamera('eyes', new BABYLON.Vector3(0, 2, 0), scene)
   eyes.minZ = 0.05
@@ -161,7 +163,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
   }
 
   var mode = 'fly'
-  var MODE_BUTTONS = { fly: 'm-fly', orbit: 'm-orbit', follow: 'm-follow', eyes: 'm-eyes' }
+  var MODE_BUTTONS = { fly: 'm-fly', follow: 'm-follow', eyes: 'm-eyes' }
 
   function setMode(next) {
     mode = next
@@ -171,15 +173,15 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     // Exactly one camera holds the pointer input at a time, or drag-look and
     // orbit-drag fight over the same gesture.
     fly.detachControl()
-    orbit.detachControl()
+    followCam.detachControl()
     if (next === 'fly') {
       scene.activeCamera = fly
       fly.attachControl(canvas, true)
     } else if (next === 'eyes') {
       scene.activeCamera = eyes
     } else {
-      scene.activeCamera = orbit
-      orbit.attachControl(canvas, true)
+      scene.activeCamera = followCam
+      followCam.attachControl(canvas, true)
     }
     canvas.focus()
   }
@@ -417,7 +419,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     fly.position.copyFrom(head.subtract(facing.scale(4.5)).add(new BABYLON.Vector3(0, 1.4, 0)))
     fly.setTarget(head)
     if (mode !== 'follow' && mode !== 'eyes') { setMode('fly') }
-    if (mode === 'follow') { orbit.target.copyFrom(head) }
+    if (mode === 'follow') { followCam.target.copyFrom(head) }
   }
 
   // Rebuilding this list every snapshot (15Hz) would replace the row under the
@@ -527,7 +529,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     // happening, which is why this opened "at a distance" before.
     if (!framed && playerState) {
       framed = true
-      orbit.target.set(playerState.p[0], playerState.p[1] + HALF_HEIGHT, playerState.p[2])
+      followCam.target.set(playerState.p[0], playerState.p[1] + HALF_HEIGHT, playerState.p[2])
       goToSelected()
     }
 
@@ -577,23 +579,12 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
     if (keys.ShiftLeft || keys.ShiftRight) { speed *= 5 }
     if (keys.ControlLeft || keys.ControlRight) { speed *= 0.25 }
 
-    if (mode === 'orbit' || mode === 'follow') {
-      // Slide the orbit target itself — otherwise "moving" in orbit mode can
-      // only ever circle whatever it was already pointed at.
-      orbit.getDirectionToRef(BABYLON.Axis.Z, fwd)
-      fwd.y = 0
-      if (fwd.lengthSquared() > 0.0001) { fwd.normalize() }
-      orbit.getDirectionToRef(BABYLON.Axis.X, right)
-      right.y = 0
-      if (right.lengthSquared() > 0.0001) { right.normalize() }
-      moveDir.set(0, 0, 0)
-      moveDir.addInPlace(fwd.scale(forwardAxis))
-      moveDir.addInPlace(right.scale(strafeAxis))
-      moveDir.y += verticalAxis
-      orbit.target.addInPlace(moveDir.scale(speed))
-      // Panning in follow mode would fight the tracking every frame.
-      if (mode === 'follow') { setMode('orbit') }
-      return
+    if (mode === 'follow') {
+      // Moving means you no longer want to be locked to the selection: hand over
+      // to fly from exactly where the chase camera is, so there is no jump.
+      fly.position.copyFrom(followCam.globalPosition)
+      fly.setTarget(followCam.target.clone())
+      setMode('fly')
     }
 
     if (mode !== 'fly') { return }
@@ -629,7 +620,7 @@ export const VIEWER_PAGE_HTML = `<!doctype html>
       var p = tracked.p
       if (mode === 'follow') {
         tmpV.set(p[0], p[1] + HALF_HEIGHT, p[2])
-        BABYLON.Vector3.LerpToRef(orbit.target, tmpV, 0.2, orbit.target)
+        BABYLON.Vector3.LerpToRef(followCam.target, tmpV, 0.2, followCam.target)
       } else if (mode === 'eyes') {
         // Roughly eye level on that capsule, looking where its yaw points — for
         // the server's own player this is the closest thing to standing inside

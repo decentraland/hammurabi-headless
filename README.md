@@ -148,7 +148,7 @@ host's own scene graph directly.
 
 | | |
 | --- | --- |
-| **Camera** | `fly` (default: WASD + `E`/`Q` up-down, drag to look, `shift` ×5, `ctrl` ×¼), `orbit` (drag to rotate, right-drag or WASD to pan, wheel to zoom), `follow` (orbits the selection), `eyes` (stands in the selection, looking where its yaw points) |
+| **Camera** | `fly` (default: WASD + `E`/`Q` up-down, drag to look, `shift` ×5, `ctrl` ×¼), `follow` (orbits the selection — drag to swing around it, wheel to zoom; any movement key hands back to `fly` from where you were), `eyes` (stands in the selection, looking where its yaw points) |
 | **Going places** | Click any row in the go-to list to select and jump behind it. `F` = server player, `N` = next peer, `G` = re-frame the selection. `follow`/`eyes` ride whatever is selected, so you can watch a specific peer. |
 | **Capsules** | green = this server's player entity; blue = a connected peer, one per avatar-range entity, positioned from that peer's comms packets |
 | **Orange wireframe** | a shape the scene declared but the host does not build (e.g. a cylinder `MeshRenderer`) — a real server behavior, surfaced rather than hidden |
