@@ -31,6 +31,7 @@ import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
 import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
 import { updateAvatarColliders } from './logic/avatar-colliders'
+import { enforceColliderBounds } from './logic/scene-bounds'
 import { isDeniedSceneCrdtOp, sanitizeSceneCrdt } from './logic/scene-crdt-guard'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
@@ -283,7 +284,12 @@ export class SceneContext implements EngineApiInterface {
       // as per https://docs.decentraland.org/creator/development-guide/scene-limitations/
       const height = Math.log2(this.metadata.scene.parcels.length + 1) * 20
 
-      if (minX) {
+      // `minX !== null`, not `if (minX)`. A parcel coordinate of 0 is falsy, so a
+      // scene whose leftmost parcel sits on x=0 built NO bounding box at all — it
+      // was never frustum-culled, and now would never have its colliders
+      // bounds-checked either. raycast-stale-bounds.spec.ts picks parcel 1,1
+      // specifically to dodge this.
+      if (minX !== null) {
         this.boundingBox = new BABYLON.BoundingBox(
           new Vector3(minX! * PARCEL_SIZE_METERS, -1, minZ! * PARCEL_SIZE_METERS),
           new Vector3((maxX! + 1) * PARCEL_SIZE_METERS, height, (maxZ! + 1) * PARCEL_SIZE_METERS)
@@ -766,6 +772,10 @@ export class SceneContext implements EngineApiInterface {
     // reported hits. Runs after updateStaticEntities so the local player's
     // Transform is already in place on the frame its capsule is created.
     updateAvatarColliders(this)
+    // Colliders that have left this scene's parcels stop existing for raycasts and
+    // for avatar movement, matching the client. Runs after the avatar capsules so a
+    // player who steps outside is not itself disabled — see scene-bounds.ts.
+    enforceColliderBounds(this)
   }
 
   // impl RuntimeApi {

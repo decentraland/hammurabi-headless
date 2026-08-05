@@ -102,7 +102,20 @@ export function pickMeshesForMask(entity: BabylonEntity, mask: number): Iterable
     const depth = stackDepths.pop()!
 
     // The root is the entity itself, never one of its own descendants.
-    if (node !== entity && node instanceof AbstractMesh && bitIntersectsAndContainsAny(getColliderLayers(node), mask)) {
+    //
+    // `isEnabled(false)` reads the mesh's OWN flag and ignores ancestors, which is
+    // the whole distinction: `scene-bounds.ts` disables an individual collider that
+    // has left the scene's parcels and it must stop being a candidate, while
+    // frustum culling disables the scene ROOT and its colliders must KEEP being
+    // candidates — a scene the camera is not looking at still answers raycasts.
+    // Checking `isEnabled()` with its default ancestor walk would conflate the two
+    // and silently kill raycasting for every culled scene.
+    if (
+      node !== entity &&
+      node instanceof AbstractMesh &&
+      node.isEnabled(false) &&
+      bitIntersectsAndContainsAny(getColliderLayers(node), mask)
+    ) {
       results.push(node)
     }
 

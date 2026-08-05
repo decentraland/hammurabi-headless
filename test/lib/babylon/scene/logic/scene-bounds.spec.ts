@@ -1,0 +1,284 @@
+import { Quaternion, Vector3 } from '@babylonjs/core'
+import { Scene } from '@dcl/schemas'
+import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
+import { meshColliderComponent } from '../../../../../src/lib/decentraland/sdk-components/mesh-collider-component'
+import { transformComponent } from '../../../../../src/lib/decentraland/sdk-components/transform-component'
+import { enforceColliderBounds } from '../../../../../src/lib/babylon/scene/logic/scene-bounds'
+import { updateAvatarColliders } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
+import { pickMeshesForMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
+import { StaticEntities } from '../../../../../src/lib/babylon/scene/logic/static-entities'
+import { Entity } from '../../../../../src/lib/decentraland/types'
+import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
+
+// Nothing enforced scene bounds here. A scene could put a collider over a
+// NEIGHBOUR's parcel and this server honoured it in raycasts and in avatar
+// movement, while every player's client disabled it — so on an authoritative
+// server one scene could block movement or absorb pointer events on land it does
+// not own. A griefing vector, not just a parity difference.
+//
+// Matches the client's `CheckColliderBoundsSystem`:
+//   `bounds.max.y <= sceneGeometry.Height && CircumscribedPlanes.Contains(bounds)`
+// — full containment in XZ, a CEILING on Y, and deliberately no floor.
+
+const MASK = ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS
+
+testWithEngine(
+  'scene collider bounds',
+  {
+    baseUrl: '/',
+    // A single parcel at 1,1 spans world x,z in [16, 32). One parcel makes the
+    // height log2(1+1)*20 = 20.
+    entity: {
+      content: [],
+      metadata: { scene: { base: '1,1', parcels: ['1,1'] } } as unknown as Scene,
+      type: 'scene'
+    },
+    urn: 'scene-bounds'
+  },
+  ($) => {
+    let timestamp = 0
+    let nextEntityId = 700
+
+    /** Puts a unit box collider at a SCENE-LOCAL position and enforces bounds. */
+    async function putColliderAt(position: Vector3): Promise<Entity> {
+      const entity = nextEntityId++ as Entity
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder()
+          .put(transformComponent, entity, ++timestamp, {
+            position,
+            rotation: Quaternion.Identity(),
+            scale: new Vector3(1, 1, 1),
+            parent: 0 as Entity
+          })
+          .put(meshColliderComponent, entity, ++timestamp, {
+            collisionMask: MASK,
+            mesh: { $case: 'box', box: {} }
+          } as any)
+          .finish()
+      })
+      enforceColliderBounds($.ctx)
+      return entity
+    }
+
+    const colliderOf = (entity: Entity) => $.ctx.entities.get(entity)!.appliedComponents.meshCollider!.collider!
+    const isCandidate = (entity: Entity) =>
+      Array.from(pickMeshesForMask($.ctx.rootNode, MASK)).includes(colliderOf(entity))
+
+    beforeEach(() => {
+      $.startEngine()
+    })
+
+    describe('when a collider sits well inside the scene parcel', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putColliderAt(new Vector3(8, 1, 8))
+      })
+
+      it('should stay enabled', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(true)
+      })
+
+      it('should still be offered to raycasts', () => {
+        expect(isCandidate(entity)).toBe(true)
+      })
+    })
+
+    describe('when a collider is pushed onto a neighbouring parcel', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        // Scene-local x=40 is world x=56, a parcel and a half past this scene's
+        // eastern edge at world x=32.
+        entity = await putColliderAt(new Vector3(40, 1, 8))
+      })
+
+      it('should be disabled, as the client disables it', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(false)
+      })
+
+      // The point of the whole exercise: an out-of-bounds collider must stop
+      // answering raycasts, or a scene can absorb pointer events on land it does
+      // not own.
+      it('should stop being a raycast candidate', () => {
+        expect(isCandidate(entity)).toBe(false)
+      })
+    })
+
+    describe('when a collider straddles the parcel edge', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        // Centre at scene-local x=15.75 puts the box's far face at 16.25, a
+        // quarter-metre past the parcel's eastern edge.
+        entity = await putColliderAt(new Vector3(15.75, 1, 8))
+      })
+
+      // The client tests CONTAINMENT of the whole bounds, not intersection, so a
+      // collider poking out at all is out.
+      it('should be disabled, because containment is of the whole box', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(false)
+      })
+    })
+
+    describe('when a collider is above the scene height limit', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        // One parcel gives log2(2)*20 = 20 metres of height.
+        entity = await putColliderAt(new Vector3(8, 25, 8))
+      })
+
+      it('should be disabled', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(false)
+      })
+    })
+
+    describe('when a collider is below ground level', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putColliderAt(new Vector3(8, -30, 8))
+      })
+
+      // The client checks only `bounds.max.y <= Height` — there is no floor, and a
+      // scene burying a collider is not reaching anyone else's land.
+      it('should stay enabled, since the client bounds only the ceiling', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(true)
+      })
+    })
+
+    describe('when an out-of-bounds collider comes back inside', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putColliderAt(new Vector3(40, 1, 8))
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(8, 1, 8),
+              rotation: Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .finish()
+        })
+        colliderOf(entity).computeWorldMatrix(true)
+        enforceColliderBounds($.ctx)
+      })
+
+      // One-way disabling would let a scene permanently kill its own colliders by
+      // moving them out and back — a moving platform would stop existing.
+      it('should be re-enabled rather than disabled forever', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(true)
+      })
+    })
+
+    describe('when a player walks outside the scene parcels', () => {
+      let capsule: ReturnType<typeof avatarCapsule>
+
+      function avatarCapsule() {
+        return $.ctx
+          .getOrCreateStaticEntity(StaticEntities.PlayerEntity)
+          .getChildMeshes(true)
+          .find((mesh) => mesh.name === 'avatar_capsule')!
+      }
+
+      beforeEach(() => {
+        // Materialize the player entity first: updateAvatarColliders only gives
+        // capsules to entities that already exist.
+        $.ctx.getOrCreateStaticEntity(StaticEntities.PlayerEntity)
+        updateAvatarColliders($.ctx)
+        // Entity 1 sits at the scene origin, which for a scene based at 1,1 is world
+        // (16,0,16) — the parcel's own corner, so the capsule straddles the edge and
+        // would fail a containment test.
+        enforceColliderBounds($.ctx)
+        capsule = avatarCapsule()
+      })
+
+      // Avatars are not scene-authored geometry, the client does not bounds-check
+      // them, and a player standing on a parcel edge should not stop being
+      // raycastable.
+      it('should leave the avatar capsule enabled', () => {
+        expect(capsule.isEnabled(false)).toBe(true)
+      })
+    })
+  }
+)
+
+// The block above drives `enforceColliderBounds` directly, because
+// babylon-test-helper mocks `ctx.updateStaticEntities` — which is where the
+// production wiring lives. Verified by mutation: removing the call from
+// scene-context.ts left every case above green while nothing enforced bounds at
+// all in production.
+testWithEngine(
+  'scene collider bounds, wired into the frame',
+  {
+    baseUrl: '/',
+    entity: {
+      content: [],
+      metadata: { scene: { base: '1,1', parcels: ['1,1'] } } as unknown as Scene,
+      type: 'scene'
+    },
+    urn: 'scene-bounds-wiring'
+  },
+  ($) => {
+    let timestamp = 0
+    let outOfBounds: Entity
+
+    beforeEach(async () => {
+      $.startEngine()
+      outOfBounds = 800 as Entity
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder()
+          .put(transformComponent, outOfBounds, ++timestamp, {
+            // Scene-local x=40 is world x=56, well past this parcel's edge at 32.
+            position: new Vector3(40, 1, 8),
+            rotation: Quaternion.Identity(),
+            scale: new Vector3(1, 1, 1),
+            parent: 0 as Entity
+          })
+          .put(meshColliderComponent, outOfBounds, ++timestamp, {
+            collisionMask: MASK,
+            mesh: { $case: 'box', box: {} }
+          } as any)
+          .finish()
+      })
+
+      const spy = $.ctx.updateStaticEntities as unknown as jest.SpyInstance
+      spy.mockRestore()
+      $.ctx.updateStaticEntities()
+    })
+
+    afterEach(() => {
+      jest.spyOn($.ctx, 'updateStaticEntities').mockImplementation(() => void 0)
+    })
+
+    it('should disable an out-of-bounds collider without anything calling the system by hand', () => {
+      const collider = $.ctx.entities.get(outOfBounds)!.appliedComponents.meshCollider!.collider!
+      expect(collider.isEnabled(false)).toBe(false)
+    })
+  }
+)
+
+// `if (minX)` treated a parcel coordinate of 0 as "no scene bounds at all", so a
+// scene whose leftmost parcel sits on x=0 built no bounding box — it was never
+// frustum-culled, and with bounds enforcement it would never be checked either.
+// Genesis City is centred on 0,0, so this is not an exotic layout.
+testWithEngine(
+  'a scene whose leftmost parcel sits on x=0',
+  {
+    baseUrl: '/',
+    entity: {
+      content: [],
+      metadata: { scene: { base: '0,0', parcels: ['0,0'] } } as unknown as Scene,
+      type: 'scene'
+    },
+    urn: 'scene-bounds-origin'
+  },
+  ($) => {
+    it('should still build a bounding box, so its colliders can be bounds-checked', () => {
+      expect($.ctx.boundingBox === undefined).toBe(false)
+    })
+  }
+)
