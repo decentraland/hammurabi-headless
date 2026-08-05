@@ -118,6 +118,15 @@ testWithEngine(
       it('should report the entry button rather than a sentinel', () => {
         expect(resultsFor(entity)[0].button).toBe(InputAction.IA_ANY)
       })
+
+      // THE TICK, not a private counter. The scene-side SDK gates every lookup on
+      // `timestamp > previousFrameMaxTimestamp`, with the maximum taken over ALL
+      // entities' results — so a second counter that lags the cursor path's (it always
+      // does, hover fires every frame) makes every proximity result look stale and be
+      // silently discarded. The client uses TickNumber for both fields.
+      it('should timestamp from the scene tick, the same source as every other result', () => {
+        expect(resultsFor(entity)[0].timestamp).toBe($.ctx.currentTick)
+      })
     })
 
     describe('when the entity is behind the player', () => {
@@ -280,6 +289,35 @@ testWithEngine(
 
       it('should pick exactly one, not both', () => {
         expect(resultsFor(far)).toEqual([])
+      })
+    })
+
+    // Without a ceiling this scanned EVERY entity holding a PointerEvents component,
+    // every frame, per scene, in a quota-free lateUpdate: 3.86ms at 3000 entities, so
+    // ~130ms/frame at the 100_000 entity cap. The client never examines more than 32,
+    // because that is the size of its OverlapSphereNonAlloc buffer.
+    //
+    // Observable through the ceiling's consequence: the highest-priority entity is
+    // declared LAST, past the limit, so it is never examined and cannot win. Without
+    // the ceiling it would.
+    describe('when more proximity candidates are in range than the ceiling allows', () => {
+      let beyondTheCeiling: Entity
+
+      beforeEach(async () => {
+        // 33 ordinary candidates fill the 32-candidate allowance.
+        for (let i = 0; i < 33; i++) {
+          await putProximityEntity(new Vector3(0, 0, 2), [proximityEntry()])
+        }
+        // Declared last, and the only one that would win on priority.
+        beyondTheCeiling = await putProximityEntity(new Vector3(0, 0, 1), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3, priority: 99 } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should never reach the entity past the ceiling, however high its priority', () => {
+        expect(resultsFor(beyondTheCeiling)).toEqual([])
       })
     })
 

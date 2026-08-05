@@ -41,6 +41,19 @@ function getAnalyticSphereRadius(mesh: BABYLON.AbstractMesh): number | undefined
   return (mesh as any)[analyticSphereSymbol]
 }
 
+/**
+ * Whether this candidate will be solved in closed form rather than by triangle.
+ *
+ * Exported so the raycast BUDGET can bill it for the work it really does. Billing an
+ * analytic sphere its 1296 tessellated triangles made a raycast crossing ~463 of them
+ * exceed the whole per-frame triangle ceiling and be answered with an EMPTY result —
+ * permanently, for a continuous raycast — when its real cost is under a millisecond.
+ * A refusal is not a deferral, so that scene never recovered.
+ */
+export function isAnalyticCandidate(mesh: BABYLON.AbstractMesh): boolean {
+  return getAnalyticSphereRadius(mesh) !== undefined
+}
+
 /** Largest relative difference between world-scale axes still treated as uniform. */
 const UNIFORM_SCALE_TOLERANCE = 1e-4
 
@@ -75,6 +88,21 @@ export function intersectAnalyticSphere(
   world.decompose(tmpScale, undefined, tmpCentre)
 
   const scale = tmpScale.x
+
+  // NON-FINITE FIRST, and it must come before the uniform-scale guard rather than
+  // after: `Math.abs(NaN - NaN) > tol` is FALSE, so a NaN matrix sails through that
+  // check. `transform-component.ts` reads position/rotation/scale as raw readFloat32
+  // with no finiteness validation, so a scene can send NaN — and then `radius` is NaN,
+  // `discriminant < 0` is false, `distance < 0` and `distance > ray.length` are both
+  // false, and this returns a PHANTOM HIT with NaN distance, position and normal,
+  // serialized into the scene's CRDT every frame. `pickClosest` even lets the NaN
+  // entry win. The triangle path cleanly misses the same mesh.
+  //
+  // Radius 0 is rejected with it: a zero-scaled sphere otherwise reports a hit for any
+  // ray aimed exactly at its centre, where the triangle path has no geometry to hit.
+  if (!Number.isFinite(scale) || scale === 0) return null
+  if (!Number.isFinite(tmpCentre.x) || !Number.isFinite(tmpCentre.y) || !Number.isFinite(tmpCentre.z)) return null
+
   if (
     Math.abs(tmpScale.x - tmpScale.y) > UNIFORM_SCALE_TOLERANCE * Math.max(1, Math.abs(scale)) ||
     Math.abs(tmpScale.y - tmpScale.z) > UNIFORM_SCALE_TOLERANCE * Math.max(1, Math.abs(scale))

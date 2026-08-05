@@ -41,6 +41,12 @@ import { getColliderLayers } from './colliders'
  * rushed: getting the invalidation wrong would leave a collider unchecked, which is
  * exactly the hole this closes.
  */
+/** Slack added to each parcel plane, from the client's `EXTEND_AMOUNT`. */
+const PLANE_SLACK_METERS = 0.05
+
+/** Cap on the collider-bounds shrink, from the client's `BOUNDS_OFFSET_EPSILON`. */
+const BOUNDS_SHRINK_METERS = 0.3
+
 export function enforceColliderBounds(context: SceneContext): void {
   const bounds = context.boundingBox
   if (!bounds) return
@@ -52,12 +58,45 @@ export function enforceColliderBounds(context: SceneContext): void {
   const maxY = bounds.maximumWorld.y
 
   for (const mesh of collectColliders(context.rootNode)) {
+    // REFRESH before reading. `getBoundingInfo()` re-derives minimumWorld/maximumWorld
+    // from the CACHED world matrix, and `_evaluateActiveMeshes` skips a mesh that is
+    // `!isEnabled()` — so once this disabled a collider, nothing ever recomputed its
+    // matrix again and the disable was a ONE-WAY LATCH. A moving platform that swung
+    // over a neighbour's parcel, or any collider created out of bounds and then
+    // positioned, stayed dead for the life of the process.
+    //
+    // The same staleness let the check be BYPASSED: while a scene is frustum-culled
+    // its root is disabled, so a collider moved out of bounds during that window was
+    // measured at its old position and stayed enabled — reopening the very griefing
+    // vector this closes, since `pickMeshesForMask` uses `isEnabled(false)` and
+    // `meshesForMask` then refreshes the matrix for the raycast itself.
+    //
+    // This is the same sweep `meshesForMask` performs for the raycast candidates.
+    mesh.computeWorldMatrix(false)
+
     const colliderBounds = mesh.getBoundingInfo().boundingBox
     const low = colliderBounds.minimumWorld
     const high = colliderBounds.maximumWorld
 
+    // TOLERANCES, both mirroring the client. Without them a collider that merely
+    // TOUCHES its parcel edge is disabled by float error: measured, an ordinary
+    // parcel-filling 16x16 floor was disabled at 2 of 5 plain yaw rotations by an
+    // overhang of 1.8e-15 m. Babylon world matrices are Float32Array, so the sign of
+    // that error is not predictable and the result flickers frame to frame — exactly
+    // what the client's epsilon exists to prevent (`EXTEND_AMOUNT`'s comment reads
+    // "to prevent on-boundary flickering (float accuracy)").
+    //
+    //   ParcelMathHelper.CreateSceneGeometry: EXTEND_AMOUNT = 0.05 on each plane
+    //   SceneCircumscribedPlanes.Contains:    bounds.Expand(-min(size/2, 0.3))
+    //
+    // `Expand` is symmetric, so the client's shrink is half its argument per side.
+    const shrink = Math.min((high.x - low.x) / 2, (high.z - low.z) / 2, BOUNDS_SHRINK_METERS) / 2
     const inside =
-      high.y <= maxY && low.x >= minX && high.x <= maxX && low.z >= minZ && high.z <= maxZ
+      high.y <= maxY &&
+      low.x + shrink >= minX - PLANE_SLACK_METERS &&
+      high.x - shrink <= maxX + PLANE_SLACK_METERS &&
+      low.z + shrink >= minZ - PLANE_SLACK_METERS &&
+      high.z - shrink <= maxZ + PLANE_SLACK_METERS
 
     // `isEnabled(false)` reads the mesh's OWN flag, ignoring ancestors: the scene
     // root is disabled wholesale by frustum culling, and treating that as "this

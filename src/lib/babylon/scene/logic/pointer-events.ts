@@ -8,7 +8,8 @@ import { pointerEventsResultComponent } from '../../../decentraland/sdk-componen
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
 import { pickingToRaycastHit, raycastResultFromRay } from './raycasts'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
-import { resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
+import { isHover, resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
+import { PLAYER_CAPSULE_HALF_HEIGHT } from './static-entities'
 
 // returns true if the entity has PointerEvents
 export function entityHasPointerEvents(entity: BabylonEntity) {
@@ -61,10 +62,13 @@ export function pickPointerEventsMesh(scene: Scene) {
  * Reach of the centre-screen pointer pick, matching the client's
  * `PlayerOriginatedRaycastSystem.MAX_RAYCAST_DISTANCE`.
  *
- * The pick was previously unbounded — `scene.pick` tests the whole scene — so an
- * entity a kilometre away could be hovered and clicked here while no client would
- * reach it. The per-entry `maxDistance` filter below would reject most of those
- * anyway, but bounding the pick means the work is not done in the first place.
+ * An entity a kilometre away could otherwise be hovered and clicked here while no
+ * client would reach it, since a scene is free to ask for `maxDistance: 500` and the
+ * client still cannot fire past its ray cap.
+ *
+ * This bounds the ANSWER, not the work: `Scene.prototype.pick` takes no distance
+ * argument, so the whole scene is still tested and the check below is post-hoc. An
+ * earlier version of this comment claimed the opposite.
  */
 export const MAX_POINTER_PICK_DISTANCE = 100
 
@@ -77,6 +81,14 @@ export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | nul
     scene.getEngine().getRenderWidth() / 2,
     scene.getEngine().getRenderHeight() / 2,
     (mesh) => {
+      // isEnabled FIRST. Passing a predicate to `scene.pick` REPLACES Babylon's
+      // default `isEnabled/isVisible/isPickable` filter (ray.js:598-607) rather than
+      // adding to it — so without this, a collider that `scene-bounds.ts` disabled for
+      // leaving its parcels still absorbed pointer events, which is verbatim the
+      // griefing vector that module exists to close. The raycast path already honours
+      // it via `pickMeshesForMask`.
+      if (!mesh.isEnabled()) return false
+
       // select meshes with CL_POINTER
       if (getColliderLayers(mesh) & ColliderLayer.CL_POINTER) {
 
@@ -106,13 +118,23 @@ export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | nul
  * player's position is not known yet.
  *
  * Feeds the protocol's `max_player_distance` check. Infinity rather than 0 for the
- * unknown case: 0 would make every proximity-style entry qualify before the player
+ * unknown case: 0 would make every distance-gated entry qualify before the player
  * even exists.
+ *
+ * Measured from the player's FEET, not the capsule centre. The client uses two
+ * different origins and it is easy to conflate them: `PlayerInteractionEntity.
+ * PlayerPosition` — what feeds this check — is `cc.transform.position`, the
+ * CharacterController's own transform, whereas its PROXIMITY system explicitly
+ * computes `TransformPoint(cc.center)` because it wants the centre. `playerEntityAtom`
+ * holds the capsule, whose position IS its centre, so using it raw put every
+ * max_player_distance check PLAYER_CAPSULE_HALF_HEIGHT (0.85m) out.
  */
 function distanceFromPlayer(point: Vector3): number {
   const player = playerEntityAtom.getOrNull()
   if (!player) return Number.POSITIVE_INFINITY
-  return Vector3.Distance(player.absolutePosition, point)
+  const feet = player.absolutePosition.clone()
+  feet.y -= PLAYER_CAPSULE_HALF_HEIGHT
+  return Vector3.Distance(feet, point)
 }
 
 function addPointerEventResult(entity: BabylonEntity, result: Omit<PBPointerEventsResult, "tickNumber">) {
@@ -185,11 +207,24 @@ export function interactWithScene(eventType: PointerEventType, action: InputActi
   for (const entry of firing) {
     addPointerEventResult(lastPickedEntity, {
       state: eventType,
-      // The ENTRY's button, not the raw input. For a real press that is the same
-      // value unless the entry said IA_ANY; for a HOVER it is the only sensible
-      // answer, and it replaces the `InputAction.UNRECOGNIZED` (-1) this used to
-      // send — a ts-proto "unknown enum" sentinel that no scene can match on.
-      button: resolvePointerInfo(entry.eventInfo).button,
+      // HOVER reports IA_POINTER; a press reports the RAW input action. Neither is a
+      // free choice, and reporting the ENTRY's button — which an earlier revision did
+      // for both — is wrong twice over.
+      //
+      // Hover: the client hard-codes it in `WritePointerEventResultsSystem` with the
+      // comment "If the event is a Hover, the scenes are expecting an input action of
+      // type IaPointer." The SDK confirms it — `getInputCommand` expands IA_ANY over
+      // `[IA_POINTER, IA_PRIMARY, ...]`, a list that does NOT contain IA_ANY, and
+      // matches `command.button === inputAction` exactly. An IA_ANY-buttoned hover is
+      // invisible to every scene.
+      //
+      // Press: the client reports the concrete action pressed
+      // (`TryAppendButtonAction` -> `AddInputAction(ecsInputAction, ...)`), never the
+      // entry's. Reporting the entry's breaks the canonical SDK click, whose default
+      // entry is `{PET_DOWN, IA_ANY}`: the result carried IA_ANY and
+      // `getInputCommand(IA_ANY, PET_DOWN, entity)` resolved to null, so
+      // `onPointerDown` never fired.
+      button: isHover(eventType) ? InputAction.IA_POINTER : action,
       hit,
       timestamp: globalLamportTimestamp++
     })

@@ -9,7 +9,7 @@ import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoo
 import { BabylonEntity } from '../BabylonEntity'
 import { pickMeshesForMask } from './colliders'
 import { isAvatarCapsule, isRemotePlayerEntity } from './avatar-colliders'
-import { intersectAnalyticSphere } from './analytic-colliders'
+import { intersectAnalyticSphere, isAnalyticCandidate } from './analytic-colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { limits } from '../../../misc/limits'
 import { limitLogger } from '../../../misc/limit-logger'
@@ -138,6 +138,20 @@ const TRIANGLE_COST_FLOOR = 12
  * O(vertices) `_generatePointsArray` on its first ray test anyway.
  */
 function candidateTriangleCost(mesh: BABYLON.AbstractMesh): number {
+  // An analytic candidate never touches a triangle, so billing it the tessellated
+  // count is not conservatism — it is wrong, and wrong in a way that produces FALSE
+  // EMPTY RESULTS. Measured: 463 analytic spheres bill 600 048 triangles, over the
+  // whole per-frame ceiling, so the raycast is refused with an empty result even
+  // though intersecting all 500 of them analytically takes 0.84ms. A refusal is not a
+  // deferral, so a CONTINUOUS raycast in a scene like that (a ball pit, a bullet
+  // field) reported nothing on every frame forever, while the client's PhysX
+  // SphereCollider reported the hit — the exact class of divergence this PR exists to
+  // remove.
+  //
+  // Billed at the floor, the same as a box: both are O(1) per ray, and the floor is
+  // what the ceiling's own default was derived from (50_000 x 12).
+  if (isAnalyticCandidate(mesh)) return TRIANGLE_COST_FLOOR
+
   const totalIndices = mesh.getTotalIndices()
   const triangles = totalIndices > 0 ? totalIndices / 3 : mesh.getTotalVertices() / 3
   return Math.max(triangles, TRIANGLE_COST_FLOOR)
@@ -261,10 +275,22 @@ export function processRaycasts(scene: SceneContext) {
           // so a one-shot leaves the pending set rather than being retried
           // forever.
         } else if (ray.length <= 0) {
-          // A zero range cannot hit anything, so answer it without walking the
-          // mask or charging either ceiling. The client reaches the same outcome
-          // by passing 0 to Physics.RaycastNonAlloc, which returns no hits — but
-          // it still WRITES the result, so this does too.
+          // A zero range cannot hit anything, so skip the prefilter and the
+          // intersection — but it is still CHARGED the mesh cost, and that is
+          // load-bearing rather than tidy.
+          //
+          // An unset `maxDistance` is a zero-length ray, so this is the DEFAULT path
+          // for any scene that never sets the field. Left un-charged it was a
+          // per-frame amplifier exempt from both ceilings: measured, 50_000 continuous
+          // raycasts with `maxDistance` unset emitted 50_000 results in 30.1ms — ~90%
+          // of a 33ms frame at the default 30 FPS — while charging nothing, and each
+          // result is also an outgoing PutComponentOperation, so the CRDT stream
+          // amplifies with it. The identical scene is throttled on main, which always
+          // charged `intersectableMeshes.length`.
+          //
+          // `meshesForMask` is memoized per mask per frame, so charging the real cost
+          // adds a map lookup for every raycast after the first of its mask.
+          intersectionBudget -= meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK).length
           RaycastResult.createOrReplace(
             entity.entityId,
             raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
@@ -438,12 +464,12 @@ export function raycastResultFromRay(
     // cares about while keeping ones behind it. The sort runs only when the cap is
     // actually exceeded, so the ordinary path pays nothing for it.
     //
-    // NOTE for anyone mutation-testing this: replacing the sort with a plain
-    // `results.slice(0, maxHits)` is an EQUIVALENT mutant, not a gap. Babylon's
-    // `intersectsMeshes` ends with `results.sort(this._comparePickingInfo)`, so the
-    // list already arrives nearest-first and no input can distinguish the two. The
-    // sort is defensive, exactly like `pickClosest` below — it keeps the guarantee
-    // in this file rather than borrowing it from a library internal.
+    // LOAD-BEARING, and it did not used to be. While this path went through
+    // `ray.intersectsMeshes` the list arrived nearest-first from Babylon's own sort,
+    // so an earlier version of this note called the sort an equivalent mutant. The
+    // analytic-sphere round replaced that call with a hand-rolled loop, which is now
+    // responsible for its own ordering — `intersectCandidates` sorts, and if either
+    // sort is removed this cap keeps the FARTHEST hits.
     const maxHits = limits.maxRaycastHitsPerQuery // HAMMURABI_MAX_RAYCAST_HITS_PER_QUERY
     let kept = results
     if (results.length > maxHits) {
@@ -589,6 +615,15 @@ function intersectCandidates(
       const info = intersectCandidate(ray, mesh)
       if (info?.hit) all.push(info)
     }
+    // SORTED, nearest first. This loop replaced `ray.intersectsMeshes`, which ends
+    // with `results.sort(this._comparePickingInfo)` (ray.js:291) — dropping it made
+    // QUERY_ALL hits arrive in scene-tree pre-order instead, so a scene reading
+    // `hits[0]` as "the nearest" silently got an arbitrary one. Measured: candidates
+    // [far z=80, near z=20] produced lengths [79.5, 19.5].
+    //
+    // It also feeds the nearest-first truncation in `raycastResultFromRay`, which
+    // would otherwise keep the FARTHEST hits from an unsorted list.
+    all.sort((a, b) => a.distance - b.distance)
     return { results: all, refundedTriangles: 0 }
   }
 
@@ -661,6 +696,16 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
     ray.origin
   )
 
+  // The entity's own position, WITHOUT the offset. The target-style directions below
+  // aim from HERE, not from the ray origin: the client computes
+  // `rayOrigin = entityPosition + OriginOffset` but every direction as
+  // `target - entityPosition` (RaycastUtils.TryCreateRay). Subtracting the offset
+  // origin instead skewed the direction by that offset, so a scene combining a
+  // globalTarget/targetEntity with a non-zero originOffset aimed somewhere the
+  // client does not — and the offset test only covered globalDirection, where the
+  // direction is offset-independent and the bug is invisible.
+  const entityPosition = entity.absolutePosition
+
   // and then calculate the global direction, relative to the
   if (!raycast.direction) {
     // NO ray at all, matching the client's `default: ray = default; return false`
@@ -703,7 +748,7 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
     // scene one is to make it easy to point towards a pin-pointed element
     // in global space, like a fixed tower
     ray.direction
-      .set(globalTarget.x - globalOrigin.x, globalTarget.y - globalOrigin.y, globalTarget.z - globalOrigin.z)
+      .set(globalTarget.x - entityPosition.x, globalTarget.y - entityPosition.y, globalTarget.z - entityPosition.z)
       .normalize()
   } else if (raycast.direction?.$case == 'targetEntity') {
     const targetEntity = scene.getEntityOrNull(raycast.direction.targetEntity)
@@ -724,7 +769,7 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
     // scene one is to make it easy to point towards a pin-pointed element
     // in global space, like a fixed tower
     ray.direction
-      .set(globalTarget.x - globalOrigin.x, globalTarget.y - globalOrigin.y, globalTarget.z - globalOrigin.z)
+      .set(globalTarget.x - entityPosition.x, globalTarget.y - entityPosition.y, globalTarget.z - entityPosition.z)
       .normalize()
   }
 

@@ -127,31 +127,31 @@ testWithEngine(
 
     })
 
-    // A zero-range raycast is answered without walking the mask or charging either
-    // ceiling: it cannot hit anything, so billing it for a full candidate scan would
-    // let a scene spend the frame's budget on raycasts that provably do nothing.
+    // A zero-range raycast skips the prefilter and the intersection but is still
+    // CHARGED the mesh cost — and that is load-bearing, not tidy. An unset maxDistance
+    // IS a zero-length ray, so this is the default path for any scene that never sets
+    // the field. Left un-charged it was an amplifier exempt from both ceilings:
+    // measured, 50_000 continuous raycasts emitted 50_000 results in 30.1ms, ~90% of a
+    // 33ms frame, while charging nothing — and each result is an outgoing
+    // PutComponentOperation, so the CRDT stream amplified with it. main throttles the
+    // identical scene because it always charged the candidate count.
     //
-    // Asserted through a SECOND raycast rather than the zero-range one's own result,
-    // which is an empty hit list either way and cannot tell the two paths apart.
+    // An earlier version of this describe asserted the OPPOSITE, pinning the exemption
+    // as a feature.
     describe('when a zero-range raycast shares a frame with a real one', () => {
-      let realRaycast: Entity
+      let processed: number[]
       let restore: number
 
       beforeEach(async () => {
         restore = limits.maxRaycastIntersectionsPerFrame
         // Exactly ONE raycast's worth of budget, measured rather than guessed:
-        // colliders accumulate across this file's tests, so a hard-coded 1 would
-        // put the pair over the MESH ceiling and both would be refused — the test
-        // would fail for a reason that has nothing to do with the zero-range path.
+        // colliders accumulate across this file's tests.
         limits.maxRaycastIntersectionsPerFrame = Array.from(pickMeshesForMask($.ctx.rootNode, MASK)).length
-
-        // The rotation cursor survives between tests in this shared SceneContext.
-        // Left where an earlier test put it, the real raycast could be visited
-        // FIRST and would pass whether or not the zero-range one charged anything.
         $.ctx.raycastRotationCursor = 0
+        processed = []
 
         const zeroRange = nextEntityId++ as Entity
-        realRaycast = nextEntityId++ as Entity
+        const realRaycast = nextEntityId++ as Entity
         const aimedAtTheBox = {
           queryType: RaycastQueryType.RQT_HIT_FIRST,
           continuous: false,
@@ -166,22 +166,22 @@ testWithEngine(
             .put(raycastComponent, realRaycast, ++timestamp, { timestamp: 1, maxDistance: 20, ...aimedAtTheBox } as any)
             .finish()
         })
-        // NO explicit processRaycasts here. `crdtSendToRenderer` resolves out of
-        // lateUpdate, so the await above already drove the one pass that matters —
-        // the one where both raycasts share a single frame's budget. A second pass
-        // starts with a FRESH budget and runs the deferred raycast anyway, which
-        // makes the assertion below pass whether or not the zero-range one charged.
-        // Verified: with the explicit call, the mutation that charges a zero-range
-        // raycast survives.
+
+        const Results = $.ctx.components[raycastResultComponent.componentId]
+        for (const entity of [zeroRange, realRaycast]) {
+          if (Results.getOrNull(entity)) processed.push(entity)
+        }
       })
 
       afterEach(() => {
         limits.maxRaycastIntersectionsPerFrame = restore
       })
 
-      it('should leave the real raycast enough budget to run in the same frame', () => {
-        const result = $.ctx.components[raycastResultComponent.componentId].getOrNull(realRaycast) as any
-        expect(result?.hits ?? null).toHaveLength(1)
+      // The zero-range one consumes the frame's whole budget, exactly as a real
+      // raycast against the same collider set would, so the second is deferred. That
+      // is the point: a zero-range answer is not free.
+      it('should spend the frame budget, deferring the second raycast', () => {
+        expect(processed).toHaveLength(1)
       })
     })
 

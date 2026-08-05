@@ -125,6 +125,30 @@ testWithEngine(
       })
     })
 
+    // The client computes `rayOrigin = entityPosition + OriginOffset` but every
+    // direction as `target - entityPosition`. Subtracting the OFFSET origin instead
+    // skewed the aim by that offset — and the offset case above only covered
+    // globalDirection, where direction is offset-independent and the bug is invisible.
+    describe('when a globalTarget raycast also carries an originOffset', () => {
+      beforeEach(async () => {
+        // Entity at the scene origin, offset 5m along +X, target 10m along +Z. Aiming
+        // from the ENTITY gives (0,0,1); aiming from the offset origin gives a vector
+        // skewed by -5 on X.
+        await fire({
+          maxDistance: 100,
+          queryType: RaycastQueryType.RQT_HIT_FIRST,
+          collisionMask: PHYSICS_ONLY,
+          originOffset: new Vector3(5, 0, 0),
+          direction: { $case: 'globalTarget', globalTarget: new Vector3(0, 0, 10) }
+        })
+      })
+
+      it('should aim from the entity position, not from the offset ray origin', () => {
+        const direction = resultOf(raycastEntity).direction
+        expect([direction.x, direction.y, direction.z].map((n) => Math.round(n * 1000) / 1000)).toEqual([0, 0, 1])
+      })
+    })
+
     // RaycastUtils.TryCreateRay: `rayDirection = entityRotation * sdkRaycast.LocalDirection`,
     // then `.normalized`. Rotation only — no scale — and unit length.
     //

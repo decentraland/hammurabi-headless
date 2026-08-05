@@ -162,6 +162,41 @@ describe('analytic sphere colliders', () => {
     })
   })
 
+  // transform-component.ts reads position/rotation/scale as raw readFloat32 with no
+  // finiteness validation, so a scene can send NaN. `Math.abs(NaN - NaN) > tol` is
+  // FALSE, so the uniform-scale guard does not catch it, and every subsequent
+  // comparison against NaN is false too — so without an explicit check this returned a
+  // PHANTOM HIT with NaN distance, position and normal, serialized into the scene's
+  // CRDT every frame. The triangle path cleanly misses the same mesh.
+  describe('when the world matrix is not finite', () => {
+    beforeEach(() => {
+      sphere.position.set(Number.NaN, Number.NaN, Number.NaN)
+      sphere.computeWorldMatrix(true)
+    })
+
+    it('should decline it rather than reporting a NaN hit', () => {
+      expect(intersectAnalyticSphere(rayFrom(0), sphere)).toBeNull()
+    })
+
+    it('should agree with the triangle path, which also misses', () => {
+      expect(rayFrom(0).intersectsMesh(sphere, false).hit).toBe(false)
+    })
+  })
+
+  describe('when the entity scales the sphere to nothing', () => {
+    beforeEach(() => {
+      sphere.scaling.setAll(0)
+      sphere.computeWorldMatrix(true)
+    })
+
+    // A zero radius passes the uniform-scale guard, and a ray aimed exactly at the
+    // centre then satisfies the quadratic — reporting a hit on geometry that has no
+    // surface at all.
+    it('should decline it rather than reporting a hit on a degenerate sphere', () => {
+      expect(intersectAnalyticSphere(rayFrom(0), sphere)).toBeNull()
+    })
+  })
+
   describe('when the mesh was never tagged as a sphere', () => {
     let untagged: BABYLON.Mesh
 

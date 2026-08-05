@@ -14,7 +14,8 @@ import {
 } from '../../../../../src/lib/babylon/scene/logic/pointer-events'
 import { pointerEventsResultComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events-result'
 import { Entity } from '../../../../../src/lib/decentraland/types'
-import { loadedScenesByEntityId } from '../../../../../src/lib/decentraland/state'
+import { loadedScenesByEntityId, playerEntityAtom } from '../../../../../src/lib/decentraland/state'
+import { PLAYER_CAPSULE_HALF_HEIGHT } from '../../../../../src/lib/babylon/scene/logic/static-entities'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
 // The centre-screen pick had NO test at all, and no distance limit: `scene.pick`
@@ -192,10 +193,13 @@ testWithEngine(
         expect(resultsFor(entity)).toHaveLength(1)
       })
 
-      // The ENTRY's button, not the raw input. This is also what replaced the
-      // `InputAction.UNRECOGNIZED` (-1) that hovers used to report.
-      it('should report the entry button rather than the raw input', () => {
-        expect(resultsFor(entity)[0].button).toBe(InputAction.IA_ANY)
+      // The RAW input action, not the entry's button. The client reports the concrete
+      // action pressed (`AddInputAction(ecsInputAction, ...)`), and it matters: the
+      // canonical SDK click declares `{PET_DOWN, IA_ANY}`, so reporting the entry's
+      // button gave the scene IA_ANY and `getInputCommand(IA_ANY, PET_DOWN, entity)`
+      // resolved to null — onPointerDown never fired.
+      it('should report the raw input action, which is what the SDK matches on', () => {
+        expect(resultsFor(entity)[0].button).toBe(InputAction.IA_SECONDARY)
       })
     })
 
@@ -215,6 +219,83 @@ testWithEngine(
       // distance filter can refuse the event.
       it('should emit nothing, because the entry only reaches 10 metres', () => {
         expect(resultsFor(entity)).toEqual([])
+      })
+    })
+
+    // The client measures max_player_distance from the player's FEET
+    // (`PlayerInteractionEntity.PlayerPosition` is `cc.transform.position`), while its
+    // PROXIMITY system deliberately uses the capsule CENTRE. `playerEntityAtom` holds
+    // the capsule, so using it raw put this check 0.85m out — and nothing exercised
+    // max_player_distance through the pointer path at all, so it was unverified.
+    //
+    // Discriminating fixture: the box's near face is at z=2.5, so the hit point is
+    // 2.500m from the FEET at the origin and 2.640m from the capsule CENTRE 0.85m up.
+    // A threshold of 2.55 sits between them, so only a feet-based measurement fires.
+    describe('when an entry gates on max_player_distance alone', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        playerEntityAtom.swap({
+          absolutePosition: new Vector3(0, PLAYER_CAPSULE_HALF_HEIGHT, 0),
+          absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
+        } as unknown as BABYLON.TransformNode)
+
+        entity = await putInteractiveBox(3, [
+          {
+            eventType: PointerEventType.PET_DOWN,
+            interactionType: InteractionType.CURSOR,
+            // maxPlayerDistance ONLY, so the camera check is not what decides this.
+            eventInfo: { maxPlayerDistance: 2.55 }
+          }
+        ])
+        pickPointerEventsMesh($.scene)
+        interactWithScene(PointerEventType.PET_DOWN, InputAction.IA_ANY)
+      })
+
+      it('should measure from the feet, so the entry qualifies', () => {
+        expect(resultsFor(entity)).toHaveLength(1)
+      })
+    })
+
+    // Passing a predicate to `scene.pick` REPLACES Babylon's default
+    // isEnabled/isVisible/isPickable filter rather than adding to it, so without an
+    // explicit check a collider that scene-bounds.ts disabled for leaving its parcels
+    // still absorbed pointer events — verbatim the griefing vector that module exists
+    // to close. The raycast path already honoured it.
+    describe('when an interactive collider has been disabled', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putInteractiveBox(5)
+        const collider = $.ctx.entities.get(entity)!.appliedComponents.meshCollider!.collider!
+        collider.setEnabled(false)
+      })
+
+      it('should not be picked', () => {
+        expect(pickActivePointerEventsEntity($.scene) === null).toBe(true)
+      })
+    })
+
+    // The client hard-codes IA_POINTER for hover in WritePointerEventResultsSystem,
+    // with the comment "the scenes are expecting an input action of type IaPointer" —
+    // and the SDK confirms it: getInputCommand expands IA_ANY over a list that does not
+    // contain IA_ANY, so an IA_ANY-buttoned hover is invisible to every scene.
+    describe('when hovering an entity that declares a hover entry', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putInteractiveBox(5, [
+          { eventType: PointerEventType.PET_HOVER_ENTER, interactionType: InteractionType.CURSOR, eventInfo: {} }
+        ])
+        pickPointerEventsMesh($.scene)
+      })
+
+      it('should report the hover', () => {
+        expect(resultsFor(entity).map((r) => r.state)).toEqual([PointerEventType.PET_HOVER_ENTER])
+      })
+
+      it('should report IA_POINTER, the only value a scene can match a hover on', () => {
+        expect(resultsFor(entity)[0].button).toBe(InputAction.IA_POINTER)
       })
     })
   }

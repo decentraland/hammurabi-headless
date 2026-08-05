@@ -59,11 +59,20 @@ export function interactionTypeOf(entry: PBPointerEvents_Entry): InteractionType
  * no button reacts to all of them. Hover events carry no button on the wire, so they
  * match on event type alone and REPORT the entry's own button.
  */
+export function isHover(eventType: PointerEventType): boolean {
+  return eventType === PointerEventType.PET_HOVER_ENTER || eventType === PointerEventType.PET_HOVER_LEAVE
+}
+
 export function entryAccepts(entry: PBPointerEvents_Entry, eventType: PointerEventType, action: InputAction): boolean {
   if (entry.eventType !== eventType) return false
 
-  if (eventType === PointerEventType.PET_HOVER_ENTER || eventType === PointerEventType.PET_HOVER_LEAVE) {
-    return true
+  if (isHover(eventType)) {
+    // Still button-gated, just not against the pressed input. The client's
+    // `AppendPointerInputIfQualified` requires `Button is IaPointer or IaAny` for
+    // EVERY enter/leave append, so an entry declaring `{PET_HOVER_ENTER, IA_PRIMARY}`
+    // fires here and nowhere else.
+    const { button } = resolvePointerInfo(entry.eventInfo)
+    return button === InputAction.IA_POINTER || button === InputAction.IA_ANY
   }
 
   const { button } = resolvePointerInfo(entry.eventInfo)
@@ -71,44 +80,51 @@ export function entryAccepts(entry: PBPointerEvents_Entry, eventType: PointerEve
 }
 
 /**
- * The protocol's distance rules, quoted from pointer_events.proto:
+ * Whether an entry's distance criteria are met.
  *
- *   1) only `max_distance`        -> camera distance <= max_distance
- *   2) only `max_player_distance` -> player distance <= max_player_distance
- *   3) BOTH                       -> either check passing is enough (OR)
- *   4) neither                    -> as if max_distance were 10
+ * `pointer_events.proto` documents FOUR branches — only `max_distance` means the
+ * camera check, only `max_player_distance` means the player check, both means either
+ * passing is enough, neither behaves as if `max_distance` were 10. The client does
+ * NOT implement four branches, and cannot: `ProcessPointerEventsSystem` calls
+ * `info.PrepareDefaultValues()` on the same Info instance immediately before the
+ * check, and assigning a C# protobuf `optional` scalar SETS ITS HAS-BIT
+ * (`PointerEvents.gen.cs`: `set { _hasBits0 |= 2; ... }`). So both fields always read
+ * as present by then and only the OR branch is ever reached.
  *
- * Note case 3 is an OR, not an AND: an entity can be reachable either by pointing at
- * it from across the room or by standing next to it, and requiring both would make
- * the pair strictly more restrictive than one alone. Presence is tested on the RAW
- * info because "unset" and "set to 0" mean different things here — `maxDistance: 0`
- * is a legitimate "only when touching".
+ * We follow the client, per the standing decision for proto-vs-client conflicts, so
+ * this is one expression: the camera check against `max_distance` (default 10) OR the
+ * player check against `max_player_distance` (default 0).
+ *
+ * That is not equivalent to the proto text in one case, and it is a case scenes hit:
+ * an entry setting ONLY `max_player_distance` is reachable from up to 10 metres away
+ * on every client, where a literal reading of the proto would restrict it to the
+ * player check alone. Implementing the proto made us silently stricter than every
+ * player's machine.
+ *
+ * The default-0 player term is effectively "never" rather than "always", which is why
+ * the maxDistance-only and neither-set cases still behave as the proto describes.
  */
 export function isQualifiedByDistance(
   info: PBPointerEvents_Info | undefined,
   cameraDistance: number,
   playerDistance: number
 ): boolean {
-  const hasMaxDistance = info?.maxDistance !== undefined
-  const hasMaxPlayerDistance = info?.maxPlayerDistance !== undefined
   const resolved = resolvePointerInfo(info)
-
-  if (hasMaxDistance && !hasMaxPlayerDistance) return cameraDistance <= resolved.maxDistance
-  if (!hasMaxDistance && hasMaxPlayerDistance) return playerDistance <= resolved.maxPlayerDistance
-  if (hasMaxDistance && hasMaxPlayerDistance) {
-    return cameraDistance <= resolved.maxDistance || playerDistance <= resolved.maxPlayerDistance
-  }
-  return cameraDistance <= resolved.maxDistance
+  return cameraDistance <= resolved.maxDistance || playerDistance <= resolved.maxPlayerDistance
 }
 
 /**
- * The entries of `entries` that should fire, highest `priority` first and nothing
- * below the winning priority.
+ * The entries of `entries` that should fire.
  *
- * `priority` is documented as "resolution order when multiple events overlap, higher
- * wins". An entity declaring a low-priority and a high-priority entry for the same
- * button must report only the high one, or a scene using priority to disambiguate
- * gets both and cannot tell which the player meant.
+ * `priority` is deliberately NOT applied here. The proto describes it as "resolution
+ * order when multiple events overlap, higher wins", and an earlier revision used it to
+ * keep only the top-priority entries — but the client never filters an entity's entry
+ * list by it. `grep -rn "\.Priority"` across its Interaction assembly hits only
+ * `PlayerOriginatedProximitySystem`, where priority selects which ENTITY becomes the
+ * proximity target. That is implemented, in proximity-interaction.ts.
+ *
+ * Dropping entries here made this server emit fewer results than every client for an
+ * entity that declares two qualifying entries at different priorities.
  */
 export function selectFiringEntries(
   entries: PBPointerEvents_Entry[],
@@ -118,20 +134,10 @@ export function selectFiringEntries(
   playerDistance: number,
   interactionType: InteractionType
 ): PBPointerEvents_Entry[] {
-  const qualified = entries.filter(
+  return entries.filter(
     (entry) =>
       interactionTypeOf(entry) === interactionType &&
       entryAccepts(entry, eventType, action) &&
       isQualifiedByDistance(entry.eventInfo, cameraDistance, playerDistance)
   )
-
-  if (qualified.length < 2) return qualified
-
-  let winning = 0
-  for (const entry of qualified) {
-    const { priority } = resolvePointerInfo(entry.eventInfo)
-    if (priority > winning) winning = priority
-  }
-
-  return qualified.filter((entry) => resolvePointerInfo(entry.eventInfo).priority === winning)
 }

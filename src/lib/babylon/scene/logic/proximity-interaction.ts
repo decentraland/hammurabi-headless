@@ -6,6 +6,7 @@ import { Entity } from '../../../decentraland/types'
 import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { playerEntityAtom } from '../../../decentraland/state'
+import { limitLogger } from '../../../misc/limit-logger'
 import { interactionTypeOf, resolvePointerInfo } from './pointer-event-filter'
 
 /**
@@ -19,7 +20,10 @@ import { interactionTypeOf, resolvePointerInfo } from './pointer-event-filter'
  * player. The reference client implements it in `PlayerOriginatedProximitySystem`.
  *
  * The client's geometry, matched here:
- *   - origin is the player capsule's CENTRE, not its feet
+ *   - origin is the player capsule's CENTRE, not its feet. NOTE this differs from
+ *     the POINTER path's `max_player_distance`, which the client measures from the
+ *     feet (`cc.transform.position`) — the proximity system deliberately computes
+ *     `TransformPoint(cc.center)` instead. Two origins, 0.85m apart, easy to conflate.
  *   - candidates within PROXIMITY_SEARCH_RADIUS metres
  *   - inside a 120-degree HORIZONTAL cone in front of the player, so something
  *     behind you does not trigger
@@ -37,6 +41,20 @@ import { interactionTypeOf, resolvePointerInfo } from './pointer-event-filter'
 /** Radius searched around the player, from the client's PROXIMITY_DEFAULT_MAX_DISTANCE. */
 const PROXIMITY_SEARCH_RADIUS = 3
 
+/**
+ * Ceiling on entities examined per frame, mirroring the client's fixed 32-collider
+ * `OverlapSphereNonAlloc` buffer.
+ *
+ * Without it this scanned EVERY entity holding a PointerEvents component, every frame,
+ * per scene, inside a quota-free `lateUpdate`: measured 3.86ms at 3000 entities, so
+ * ~130ms/frame at the 100_000 entity cap. The client never examines more than 32
+ * candidates because its buffer cannot hold more.
+ *
+ * Examined, not matched: entities are skipped cheaply before counting, so the ceiling
+ * bounds real work rather than truncating at an arbitrary point in the map.
+ */
+const PROXIMITY_MAX_CANDIDATES = 32
+
 /** Horizontal field of view in front of the player, from the client's constant. */
 const PROXIMITY_FOV_ANGLE_DEGREES = 120
 
@@ -45,8 +63,6 @@ const FOV_HALF_ANGLE_COS = Math.cos(((PROXIMITY_FOV_ANGLE_DEGREES / 2) * Math.PI
 
 /** The entity currently in proximity, per scene, so ENTER/LEAVE fire on change only. */
 const proximityTargets = new WeakMap<SceneContext, Entity>()
-
-let proximityLamportTimestamp = 0
 
 /**
  * Smallest `maxPlayerDistance` and highest `priority` across an entity's PROXIMITY
@@ -128,8 +144,14 @@ function findProximityTarget(context: SceneContext, playerPosition: Vector3, for
   let bestEntity: Entity | null = null
   let bestPriority = -1
   let bestDistance = Number.POSITIVE_INFINITY
+  let examined = 0
 
   for (const [entityId, value] of PointerEvents.iterator()) {
+    if (examined >= PROXIMITY_MAX_CANDIDATES) {
+      limitLogger.hit('maxLiveEntities', `scene ${context.entityId}: proximity candidates truncated`)
+      break
+    }
+
     const criteria = proximityCriteria(value)
     if (!criteria) continue
 
@@ -140,6 +162,11 @@ function findProximityTarget(context: SceneContext, playerPosition: Vector3, for
     const distance = toTarget.length()
 
     if (distance > PROXIMITY_SEARCH_RADIUS || distance > criteria.maxPlayerDistance) continue
+
+    // Counted only once a candidate is genuinely in range, so the ceiling bounds the
+    // expensive tail (cone test, priority compare) rather than cutting the scan at an
+    // arbitrary point in the component map.
+    examined++
 
     // Cone test on the FLATTENED direction, so looking up or down does not change
     // who is in front of you. A candidate exactly on the player is skipped rather
@@ -182,12 +209,24 @@ function emitProximityResults(
   for (const entry of value.pointerEvents) {
     if (interactionTypeOf(entry) !== InteractionType.PROXIMITY) continue
     if (entry.eventType !== eventType) continue
+    const { button } = resolvePointerInfo(entry.eventInfo)
+    if (button !== InputAction.IA_POINTER && button !== InputAction.IA_ANY) continue
 
     PointerEventsResult.addValue(entityId, {
-      button: resolvePointerInfo(entry.eventInfo).button ?? InputAction.IA_ANY,
+      // Button-gated like the cursor path: the client's AppendPointerInputIfQualified
+      // requires IaPointer or IaAny for every enter/leave append.
+      button: resolvePointerInfo(entry.eventInfo).button,
       state: eventType,
       hit: undefined,
-      timestamp: proximityLamportTimestamp++,
+      // THE TICK, not a private counter. An earlier revision used its own lamport
+      // counter here, independent of the cursor path's — and the scene-side SDK gates
+      // every lookup on `timestamp > previousFrameMaxTimestamp`, where the maximum is
+      // taken over ALL entities' results in the scene. Once the cursor counter ran
+      // ahead (it always does, hover fires every frame) every proximity result looked
+      // stale and was silently discarded, and low timestamps are also the first
+      // trimmed by the store's 100-element cap. The client uses TickNumber for both
+      // fields; one source is the only thing that works.
+      timestamp: context.currentTick,
       tickNumber: context.currentTick
     })
   }

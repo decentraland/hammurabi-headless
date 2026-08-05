@@ -98,44 +98,83 @@ describe('pointer event filtering', () => {
     })
   })
 
-  // Hover carries no button on the wire, so it matches on event type alone and the
-  // REPORTED button comes from the entry.
+  // Hover carries no button on the wire, so it is not matched against the pressed
+  // input — but it IS still gated on the entry's own button. The client's
+  // `AppendPointerInputIfQualified` requires `Button is IaPointer or IaAny` for every
+  // enter/leave append.
   describe('when the event is a hover', () => {
-    it('should accept it regardless of the button asked about', () => {
+    it('should accept an entry that names IA_POINTER', () => {
+      expect(
+        entryAccepts(
+          entry({ eventType: PointerEventType.PET_HOVER_ENTER, eventInfo: { button: InputAction.IA_POINTER } }),
+          PointerEventType.PET_HOVER_ENTER,
+          InputAction.IA_ANY
+        )
+      ).toBe(true)
+    })
+
+    it('should accept an entry that names IA_ANY', () => {
+      expect(
+        entryAccepts(
+          entry({ eventType: PointerEventType.PET_HOVER_ENTER, eventInfo: {} }),
+          PointerEventType.PET_HOVER_ENTER,
+          InputAction.IA_ANY
+        )
+      ).toBe(true)
+    })
+
+    // An earlier revision accepted this, so a `{PET_HOVER_ENTER, IA_PRIMARY}` entry
+    // fired here and nowhere else.
+    it('should reject an entry naming any other button, as the client does', () => {
       expect(
         entryAccepts(
           entry({ eventType: PointerEventType.PET_HOVER_ENTER, eventInfo: { button: InputAction.IA_PRIMARY } }),
           PointerEventType.PET_HOVER_ENTER,
           InputAction.IA_ANY
         )
-      ).toBe(true)
+      ).toBe(false)
     })
   })
 
-  // The four cases are quoted from pointer_events.proto.
+  // The proto documents FOUR branches. The client cannot implement them: it calls
+  // PrepareDefaultValues on the same Info instance immediately before the check, and
+  // assigning a C# protobuf optional scalar SETS ITS HAS-BIT, so both fields always
+  // read as present and only the OR branch is reachable. We follow the client.
+  //
+  // NOTE these cases pass a large playerDistance whenever the player term is meant to
+  // be false. maxPlayerDistance defaults to 0, so `playerDistance <= 0` is satisfied
+  // by a player standing exactly on the hit point — an edge the client shares, but one
+  // that makes 0 a misleading "don't care" value in a test.
   describe('when only maxDistance is present', () => {
-    it('should qualify within it, ignoring how far the player is', () => {
+    it('should qualify within it', () => {
       expect(isQualifiedByDistance({ maxDistance: 5 }, 4, 1000)).toBe(true)
     })
 
     it('should not qualify beyond it', () => {
-      expect(isQualifiedByDistance({ maxDistance: 5 }, 6, 0)).toBe(false)
+      expect(isQualifiedByDistance({ maxDistance: 5 }, 6, 1000)).toBe(false)
     })
   })
 
+  // THE CASE THAT CHANGED. A literal reading of the proto restricts this to the player
+  // check alone; the client also allows the default 10m camera check, so implementing
+  // the proto made this server silently STRICTER than every player's machine.
   describe('when only maxPlayerDistance is present', () => {
-    it('should qualify on player distance, ignoring the camera distance', () => {
+    it('should qualify on player distance when the camera is far away', () => {
       expect(isQualifiedByDistance({ maxPlayerDistance: 2 }, 1000, 1)).toBe(true)
     })
 
-    it('should not qualify when the player is too far', () => {
-      expect(isQualifiedByDistance({ maxPlayerDistance: 2 }, 0, 3)).toBe(false)
+    it('should ALSO qualify within the default 10m camera range, as the client does', () => {
+      expect(isQualifiedByDistance({ maxPlayerDistance: 2 }, 5, 500)).toBe(true)
+    })
+
+    it('should not qualify when both the camera and the player are out of range', () => {
+      expect(isQualifiedByDistance({ maxPlayerDistance: 2 }, 1000, 3)).toBe(false)
     })
   })
 
   // OR, not AND. An entity can be reachable either by pointing at it from across the
   // room or by standing next to it; requiring both would make the pair strictly more
-  // restrictive than either alone, which is not what the protocol says.
+  // restrictive than either alone.
   describe('when both distances are present', () => {
     it('should qualify when only the camera check passes', () => {
       expect(isQualifiedByDistance({ maxDistance: 20, maxPlayerDistance: 2 }, 15, 50)).toBe(true)
@@ -156,7 +195,7 @@ describe('pointer event filtering', () => {
     })
 
     it('should reject past 10 metres, which is what made anything clickable before', () => {
-      expect(isQualifiedByDistance({}, 10.1, 0)).toBe(false)
+      expect(isQualifiedByDistance({}, 10.1, 1000)).toBe(false)
     })
   })
 
@@ -176,9 +215,12 @@ describe('pointer event filtering', () => {
     })
   })
 
-  // `priority` is documented as "resolution order when multiple events overlap,
-  // higher wins". Reporting both would leave a scene unable to tell which the player
-  // meant, which is the whole reason the field exists.
+  // `priority` deliberately does NOT filter an entity's entry list. The proto calls it
+  // "resolution order when multiple events overlap, higher wins", and an earlier
+  // revision read that as "keep only the top-priority entries" — but the client never
+  // does: its only use of Priority is in PlayerOriginatedProximitySystem, selecting
+  // which ENTITY becomes the proximity target. Filtering here made this server emit
+  // FEWER results than every client.
   describe('when several qualifying entries have different priorities', () => {
     let firing: PBPointerEvents_Entry[]
 
@@ -197,22 +239,8 @@ describe('pointer event filtering', () => {
       )
     })
 
-    it('should report only the highest', () => {
-      expect(firing.map((e) => resolvePointerInfo(e.eventInfo).priority)).toEqual([7])
-    })
-  })
-
-  describe('when several qualifying entries share the top priority', () => {
-    it('should report all of them, since none outranks another', () => {
-      const firing = selectFiringEntries(
-        [entry({ eventInfo: { priority: 4 } }), entry({ eventInfo: { priority: 4 } })],
-        PointerEventType.PET_DOWN,
-        InputAction.IA_ANY,
-        1,
-        1,
-        InteractionType.CURSOR
-      )
-      expect(firing).toHaveLength(2)
+    it('should report all of them, leaving priority to the proximity target choice', () => {
+      expect(firing.map((e) => resolvePointerInfo(e.eventInfo).priority)).toEqual([1, 7, 3])
     })
   })
 

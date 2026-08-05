@@ -8,13 +8,18 @@ import {
   raycastResultComponent
 } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
 import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/raycasts'
-import { updateAvatarColliders } from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
+import {
+  isRemotePlayerEntity,
+  updateAvatarColliders
+} from '../../../../../src/lib/babylon/scene/logic/avatar-colliders'
 import { floorMeshes, getColliderLayers, setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 import {
+  AVATAR_ENTITY_RANGE,
   PLAYER_CAPSULE_HALF_HEIGHT,
   PLAYER_HEIGHT,
   StaticEntities
 } from '../../../../../src/lib/babylon/scene/logic/static-entities'
+import { EntityUtils } from '../../../../../src/lib/decentraland/crdt-internal/generational-index-pool'
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
@@ -248,6 +253,58 @@ testWithEngine(
 
       it('should build the avatar capsules, so the feature is reachable in production', () => {
         expect(capsuleOf(StaticEntities.PlayerEntity) === undefined).toBe(false)
+      })
+    })
+
+    // A REUSED slot. PlayerEntityManager returns `toEntityId(number, version + 1)`, so
+    // a slot's second occupant is `32 | (1 << 16)` = 65568 — which a raw
+    // `id >= 32 && id < 256` comparison rejects and a `for (id = 32; id < 256)` probe
+    // never reaches. Every player after the first join/leave cycle on a slot was
+    // invisible to CL_PLAYER, and the whole spec passed because it only ever used
+    // version-0 ids.
+    describe('when a remote slot has been reused, so its id carries a version', () => {
+      let versioned: Entity
+
+      beforeEach(() => {
+        versioned = EntityUtils.toEntityId(AVATAR_ENTITY_RANGE[0], 1)
+        // The path avatar CRDT ingestion takes.
+        ;($.ctx as any).tryGetOrCreateEntity(versioned)
+        updateAvatarColliders($.ctx)
+      })
+
+      it('should recognise it as a remote player despite the version bits', () => {
+        expect(isRemotePlayerEntity(versioned)).toBe(true)
+      })
+
+      // Not via capsuleOf: that uses getOrCreateStaticEntity, which rejects ids at or
+      // past MAX_RESERVED_ENTITY, and a versioned id is numerically far past it.
+      it('should give it a capsule', () => {
+        const capsules = $.ctx
+          .getEntityOrNull(versioned)!
+          .getChildMeshes(true)
+          .filter((mesh) => mesh.name === 'avatar_capsule')
+        expect(capsules).toHaveLength(1)
+      })
+    })
+
+    // BabylonEntity.dispose() calls super.dispose(true, false), and
+    // TransformNode.dispose(doNotRecurse) DETACHES children rather than disposing them
+    // — so an orphaned capsule survives in scene.meshes, re-evaluated every frame, one
+    // per join/leave cycle for the life of the process.
+    describe('when a player entity is removed', () => {
+      let capsule: ReturnType<typeof capsuleOf>
+
+      beforeEach(() => {
+        capsule = capsuleOf(FIRST_REMOTE_PLAYER)
+        $.ctx.removeEntity(FIRST_REMOTE_PLAYER)
+      })
+
+      it('should dispose its capsule rather than orphaning it into the scene', () => {
+        expect(capsule!.isDisposed()).toBe(true)
+      })
+
+      it('should stop tracking it as a player entity', () => {
+        expect($.ctx.playerEntities.has(FIRST_REMOTE_PLAYER)).toBe(false)
       })
     })
 

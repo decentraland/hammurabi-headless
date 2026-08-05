@@ -105,6 +105,77 @@ testWithEngine(
       })
     })
 
+    // A parcel-FILLING floor is the ordinary case, and without the client's tolerances
+    // it was disabled by float error: measured, a 16x16 box at plain yaw rotations was
+    // disabled at 2 of 5 angles by an overhang of 1.8e-15 m. Babylon world matrices are
+    // Float32Array so the sign is unpredictable, which makes it flicker frame to frame
+    // — exactly what the client's EXTEND_AMOUNT comment ("to prevent on-boundary
+    // flickering (float accuracy)") exists to stop. On an authoritative server the
+    // consequence is players falling through a floor that every client keeps.
+    describe('when a collider exactly fills its parcel', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(8, 1, 8),
+              rotation: Quaternion.Identity(),
+              // A 16x16 unit box scaled to span the whole parcel, flush with all four
+              // edges — so any intolerance at all disables it.
+              scale: new Vector3(16, 1, 16),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, entity, ++timestamp, {
+              collisionMask: MASK,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .finish()
+        })
+        enforceColliderBounds($.ctx)
+      })
+
+      it('should stay enabled rather than being killed by float error at the edge', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(true)
+      })
+    })
+
+    // The two client tolerances cover different magnitudes, and only the pair is
+    // parity. The 0.05m plane slack absorbs float error at a flush edge (the case
+    // above); the bounds shrink — min(size/2, 0.3)/2 per side, so 0.15m for anything
+    // 1.2m or wider — absorbs a real overhang. A collider hanging over by 0.1m is
+    // inside the client's ~0.2m total and outside the slack alone, so this is the case
+    // that distinguishes them.
+    describe('when a wide collider overhangs by less than the client tolerates', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              // 16 wide, centred 0.1m past the parcel centre, so its east face sits
+              // 0.1m beyond the edge.
+              position: new Vector3(8.1, 1, 8),
+              rotation: Quaternion.Identity(),
+              scale: new Vector3(16, 1, 16),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, entity, ++timestamp, {
+              collisionMask: MASK,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .finish()
+        })
+        enforceColliderBounds($.ctx)
+      })
+
+      it('should stay enabled, matching the client rather than being stricter', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(true)
+      })
+    })
+
     describe('when a collider straddles the parcel edge', () => {
       let entity: Entity
 
@@ -163,7 +234,12 @@ testWithEngine(
             })
             .finish()
         })
-        colliderOf(entity).computeWorldMatrix(true)
+        // NO hand-written computeWorldMatrix here. An earlier version of this fixture
+        // had one, and it was the only reason this passed: `getBoundingInfo()` reads
+        // the CACHED matrix and `_evaluateActiveMeshes` skips disabled meshes, so
+        // production never refreshed a disabled collider and the disable was a
+        // one-way latch. The refresh belongs in enforceColliderBounds, and this test
+        // only proves that if it does not do the work itself.
         enforceColliderBounds($.ctx)
       })
 

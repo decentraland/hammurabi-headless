@@ -4,7 +4,13 @@ import type { SceneContext } from '../scene-context'
 import type { BabylonEntity } from '../BabylonEntity'
 import { Entity } from '../../../decentraland/types'
 import { setColliderMask } from './colliders'
-import { AVATAR_ENTITY_RANGE, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_HEIGHT, StaticEntities } from './static-entities'
+import {
+  AVATAR_ENTITY_RANGE,
+  entityIsInRange,
+  PLAYER_CAPSULE_HALF_HEIGHT,
+  PLAYER_HEIGHT,
+  StaticEntities
+} from './static-entities'
 
 /**
  * Radius of a player's collision capsule, matching the one `CharacterController`
@@ -35,11 +41,30 @@ export function isAvatarCapsule(mesh: BABYLON.AbstractMesh): boolean {
 }
 
 /**
+ * Disposes the capsules attached to `entity`, if any.
+ *
+ * Necessary because `BabylonEntity.dispose()` calls `super.dispose(true, false)` and
+ * `TransformNode.dispose(doNotRecurse = true)` DETACHES child transform nodes instead
+ * of disposing them — an orphaned capsule survives in `scene.meshes`, re-evaluated
+ * every frame, one per join/leave cycle forever.
+ */
+export function disposeAvatarCapsules(entity: BabylonEntity): void {
+  for (const child of entity.getChildMeshes(true)) {
+    if (isAvatarCapsule(child)) child.dispose()
+  }
+}
+
+/**
  * True for the entity ids the avatar-comms system allocates to OTHER players.
  * The local player is `StaticEntities.PlayerEntity` and is not in this range.
  */
-export function isRemotePlayerEntity(entityId: number): boolean {
-  return entityId >= AVATAR_ENTITY_RANGE[0] && entityId < AVATAR_ENTITY_RANGE[1]
+export function isRemotePlayerEntity(entityId: Entity): boolean {
+  // Through `entityIsInRange`, which UNPACKS the version. A raw `id >= 32 && id < 256`
+  // comparison silently failed for every reused slot: PlayerEntityManager returns
+  // `toEntityId(number, version + 1)`, so a slot's second occupant is `32 | (1 << 16)`
+  // = 65568. That also meant `reportableEntityId` handed a scene the entity id for a
+  // remote avatar, contradicting the client's deliberate `foundEntity = null`.
+  return entityIsInRange(entityId, AVATAR_ENTITY_RANGE)
 }
 
 function ensureCapsule(entity: BabylonEntity, layers: number): void {
@@ -85,19 +110,32 @@ function ensureCapsule(entity: BabylonEntity, layers: number): void {
  * lookups per frame is a constant this cannot be made to scale with.
  *
  * The capsules are children of the player `BabylonEntity`, so they inherit its
- * transform for free and are disposed with it when the player leaves — there is no
- * teardown path here on purpose.
+ * transform for free. They are NOT disposed with it: `TransformNode.dispose(true)`
+ * DETACHES children (`parent = null`) rather than disposing them, so an orphaned
+ * capsule would stay in `scene.meshes` and be re-evaluated every frame forever — one
+ * leak per join/leave cycle. `disposeAvatarCapsules` is called from the entity
+ * teardown path for that reason.
  */
 export function updateAvatarColliders(context: SceneContext): void {
-  const localPlayer = context.getEntityOrNull(StaticEntities.PlayerEntity)
-  if (localPlayer) {
-    ensureCapsule(localPlayer, ColliderLayer.CL_PLAYER | ColliderLayer.CL_MAIN_PLAYER)
-  }
+  // getOrCreate, NOT getEntityOrNull. A host `BabylonEntity` is only ever
+  // materialized by INCOMING CRDT (`tryGetOrCreateEntity`), and entity 1's Transform
+  // is written host->scene straight into the component store — so nothing ingests a
+  // message naming it and `getEntityOrNull(1)` was null in every real scene.
+  // Measured on a live SceneContext: `live entities: [0]`. The local player therefore
+  // never got a capsule and CL_MAIN_PLAYER found nobody, while every spec passed
+  // because its fixture called getOrCreateStaticEntity itself.
+  //
+  // This accessor exists for exactly this case: host-initiated, inside the reserved
+  // static range.
+  ensureCapsule(
+    context.getOrCreateStaticEntity(StaticEntities.PlayerEntity),
+    ColliderLayer.CL_PLAYER | ColliderLayer.CL_MAIN_PLAYER
+  )
 
-  for (let entityId = AVATAR_ENTITY_RANGE[0]; entityId < AVATAR_ENTITY_RANGE[1]; entityId++) {
-    const remotePlayer = context.getEntityOrNull(entityId as Entity)
-    if (remotePlayer) {
-      ensureCapsule(remotePlayer, ColliderLayer.CL_PLAYER)
-    }
+  // Driven off the tracked set rather than a raw id probe, because remote ids are
+  // version-packed — see SceneContext.playerEntities.
+  for (const entityId of context.playerEntities) {
+    const remotePlayer = context.getEntityOrNull(entityId)
+    if (remotePlayer) ensureCapsule(remotePlayer, ColliderLayer.CL_PLAYER)
   }
 }

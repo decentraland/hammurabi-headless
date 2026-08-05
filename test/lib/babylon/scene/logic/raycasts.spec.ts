@@ -5,6 +5,8 @@ import { processRaycasts } from '../../../../../src/lib/babylon/scene/logic/rayc
 import { limits } from '../../../../../src/lib/misc/limits'
 import { raycastComponent, raycastResultComponent } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
 import { setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
+import { setAnalyticSphere } from '../../../../../src/lib/babylon/scene/logic/analytic-colliders'
+import { PRIMITIVE_SPHERE_RADIUS } from '../../../../../src/lib/babylon/scene/logic/primitive-meshes'
 
 // processRaycasts discovers the meshes to test against via
 // pickMeshesForMask(scene.rootNode, mask), which walks the subtree from
@@ -30,6 +32,7 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
   let sphereOffAxis: BABYLON.Mesh
   let nearCollider: BABYLON.Mesh
   let farCollider: BABYLON.Mesh
+  let analyticSphere: BABYLON.Mesh
 
   beforeAll(() => {
     engine = new BABYLON.NullEngine()
@@ -60,7 +63,13 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
     sphereOffAxis.position.set(5000, 0, 50)
     sphereOffAxis.computeWorldMatrix(true)
 
-    for (const mesh of [box, sphere, plane, sphereOffAxis, nearCollider, farCollider]) {
+    // Tagged analytic, exactly as mesh-collider-component does for a SphereMesh.
+    analyticSphere = BABYLON.MeshBuilder.CreateSphere('analytic_collider', { diameter: 1, segments: 16 }, scene)
+    analyticSphere.position.set(0, 0, 50)
+    analyticSphere.computeWorldMatrix(true)
+    setAnalyticSphere(analyticSphere, PRIMITIVE_SPHERE_RADIUS)
+
+    for (const mesh of [box, sphere, plane, sphereOffAxis, nearCollider, farCollider, analyticSphere]) {
       setColliderMask(mesh, ALL_COLLIDER_LAYERS)
     }
   })
@@ -555,6 +564,53 @@ describe('when a scene queues raycasts whose total intersection cost exceeds the
         'near_collider',
         'near_collider'
       ])
+    })
+  })
+
+  // Babylon's `intersectsMeshes` ends with `results.sort(this._comparePickingInfo)`.
+  // The analytic-sphere round replaced that call with a hand-rolled loop, which dropped
+  // the sort — so QUERY_ALL hits arrived in scene-tree pre-order and a scene reading
+  // `hits[0]` as "the nearest" silently got an arbitrary one. It also feeds the
+  // nearest-first truncation, which would otherwise keep the FARTHEST hits.
+  describe('when an RQT_QUERY_ALL raycast is fed candidates farthest-first', () => {
+    let lengths: number[]
+
+    beforeEach(() => {
+      const results: any[] = []
+      const fake = makeFakeSceneCapturing(new Set<number>([1]), [farCollider, nearCollider], undefined, (r) =>
+        results.push(r)
+      )
+      fake.components[raycastComponent.componentId].getOrNull().queryType = RaycastQueryType.RQT_QUERY_ALL
+
+      processRaycasts(fake)
+      lengths = results[0].hits.map((hit: any) => hit.length)
+    })
+
+    it('should report the hits nearest-first regardless of candidate order', () => {
+      expect(lengths).toEqual([...lengths].sort((a, b) => a - b))
+    })
+
+    it('should put the nearest collider first', () => {
+      expect(lengths[0]).toBeCloseTo(19.5, 1)
+    })
+  })
+
+  // An analytic sphere never touches a triangle, so billing it the tessellated 1296
+  // made a raycast crossing 463+ of them exceed the whole per-frame ceiling and be
+  // answered with an EMPTY result — permanently, since that branch does not defer —
+  // for work measured at under 2ms. Billed at the floor, the same as a box.
+  describe('when a raycast crosses far more analytic spheres than the tessellated ceiling allowed', () => {
+    let results: any[]
+
+    beforeEach(() => {
+      results = []
+      // 500 > 600_000/1296 = 463, the old refusal threshold.
+      const spheres = new Array(500).fill(analyticSphere)
+      processRaycasts(makeFakeSceneCapturing(new Set<number>([1]), spheres, undefined, (r) => results.push(r)))
+    })
+
+    it('should still report the hit rather than refusing the raycast', () => {
+      expect(results[0].hits).toHaveLength(1)
     })
   })
 

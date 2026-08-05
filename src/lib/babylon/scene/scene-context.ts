@@ -29,8 +29,14 @@ import {
 import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-component'
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
-import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
-import { updateAvatarColliders } from './logic/avatar-colliders'
+import {
+  StaticEntities,
+  MAX_RESERVED_ENTITY,
+  AVATAR_ENTITY_RANGE,
+  entityIsInRange,
+  updateStaticEntities
+} from './logic/static-entities'
+import { disposeAvatarCapsules, updateAvatarColliders } from './logic/avatar-colliders'
 import { enforceColliderBounds } from './logic/scene-bounds'
 import { updateProximityInteractions } from './logic/proximity-interaction'
 import { isDeniedSceneCrdtOp, sanitizeSceneCrdt } from './logic/scene-crdt-guard'
@@ -170,6 +176,20 @@ export class SceneContext implements EngineApiInterface {
   // raycasts against a budget fitting one, and raycasts 2 and 3 produced no result
   // across 20 frames. Advancing this each frame turns that into round-robin.
   raycastRotationCursor = 0
+
+  /**
+   * Live entities in the avatar-comms range (32..255), maintained as they are
+   * created and removed so `updateAvatarColliders` does not have to find them.
+   *
+   * It cannot find them by probing raw ids: `PlayerEntityManager` VERSION-PACKS them
+   * (`toEntityId(number, version + 1)` on slot reuse), so a slot's second occupant is
+   * `32 | (1 << 16)` and a `32..255` loop never reaches it — every player after the
+   * first join/leave cycle on a slot was invisible to CL_PLAYER raycasts. Scanning
+   * all of `entities` instead would be O(entity cap) every frame per scene.
+   *
+   * Membership is tested with `entityIsInRange`, which UNPACKS the version.
+   */
+  playerEntities = new Set<Entity>()
 
   // log function for tests
   log: (...args: any[]) => void = (...args) => console.log(this.rootNode.name, ...args)
@@ -353,6 +373,10 @@ export class SceneContext implements EngineApiInterface {
         this.unparentedEntities.add(child.entityId)
       }
       this.hierarchyChanged = true
+      // Before dispose: TransformNode.dispose(doNotRecurse) DETACHES children rather
+      // than disposing them, so an avatar capsule would be orphaned into scene.meshes
+      // and re-evaluated every frame for the life of the process.
+      disposeAvatarCapsules(entity)
       entity.dispose()
       // dispose() only clears the component VALUES (entityDeleted). The CRDT
       // bookkeeping (LWW timestamps / updatedAtTick) must be purged explicitly
@@ -370,6 +394,7 @@ export class SceneContext implements EngineApiInterface {
       }
       this.entities.delete(entityId)
       this.unparentedEntities.delete(entityId)
+      this.playerEntities.delete(entityId)
     }
   }
 
@@ -386,6 +411,7 @@ export class SceneContext implements EngineApiInterface {
       // every new entity is parented to the scene's rootEntity by default
       entity.parent = this.rootNode
       this.entities.set(entityId, entity)
+      if (entityIsInRange(entityId, AVATAR_ENTITY_RANGE)) this.playerEntities.add(entityId)
     }
     return entity
   }
