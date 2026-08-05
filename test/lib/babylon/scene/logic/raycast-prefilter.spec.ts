@@ -9,7 +9,8 @@ import {
   raycastComponent,
   raycastResultComponent
 } from '../../../../../src/lib/decentraland/sdk-components/raycast-component'
-import { createSphereMesh, createBoxMesh } from '../../../../../src/lib/babylon/scene/logic/primitive-meshes'
+import { createSphereMesh, createBoxMesh, PRIMITIVE_SPHERE_RADIUS } from '../../../../../src/lib/babylon/scene/logic/primitive-meshes'
+import { setAnalyticSphere } from '../../../../../src/lib/babylon/scene/logic/analytic-colliders'
 
 // Two optimisations changed HOW the raycast reaches its answer, so the answer
 // itself needs pinning against the path they replaced:
@@ -284,6 +285,95 @@ describe('raycast prefilter and early-out', () => {
     // budget and the second would be deferred to the next frame.
     it('should leave the frame enough budget for a second raycast', () => {
       expect(processedSecond).toBe(true)
+    })
+  })
+
+  // The triangle budget exempts a candidate that will be solved in CLOSED FORM, and
+  // for a while it granted that exemption for merely being TAGGED as a sphere. But
+  // `intersectAnalyticSphere` bails on non-uniform scale — an ellipsoid is not that
+  // equation — and the caller then walks all 1296 triangles, so `scale: (1, 2, 1)` on a
+  // SphereMesh collider was billed 12 for work costing 1296. A 108x undercount reachable
+  // from one line of scene code; at the ceilings, 50_000 of them bill exactly the budget
+  // and all run in a single ~2.4s frame with both ceilings reporting themselves happy.
+  //
+  // Observable through the budget: a ceiling of 100 triangles admits a correctly-billed
+  // uniform sphere (12) and refuses a correctly-billed non-uniform one (1296).
+  describe('when a sphere collider is scaled non-uniformly, so it cannot be solved analytically', () => {
+    let uniformHits: any[]
+    let nonUniformHits: any[]
+
+    beforeEach(() => {
+      const restore = limits.maxRaycastTrianglesPerFrame
+      limits.maxRaycastTrianglesPerFrame = 100
+
+      try {
+        const answer = (scaling: Vector3): any[] => {
+          const sphere = createSphereMesh(scene, 'ball_collider')
+          sphere.position.set(0, 0, 5)
+          sphere.scaling.copyFrom(scaling)
+          sphere.computeWorldMatrix(true)
+          setColliderMask(sphere, MASK)
+          setAnalyticSphere(sphere, PRIMITIVE_SPHERE_RADIUS)
+
+          let hits: any[] = []
+          processRaycasts(fakeScene([sphere], RaycastQueryType.RQT_HIT_FIRST, 50, (r) => (hits = r.hits)))
+          sphere.dispose()
+          return hits
+        }
+
+        uniformHits = answer(new Vector3(1, 1, 1))
+        nonUniformHits = answer(new Vector3(1, 2, 1))
+      } finally {
+        limits.maxRaycastTrianglesPerFrame = restore
+      }
+    })
+
+    it('should still answer the uniform sphere, which really is billed twelve', () => {
+      expect(uniformHits).toHaveLength(1)
+    })
+
+    it('should refuse the non-uniform one, because it is billed the triangles it will walk', () => {
+      expect(nonUniformHits).toHaveLength(0)
+    })
+  })
+
+  // Every comparison against NaN is false, so a NaN AABB never assigned into
+  // tmin/tmax and `rayBoxEntry` returned 0 — "the ray origin is already inside this
+  // box" — for a box that does not exist. It admitted 300/300 unreachable colliders in
+  // one measurement, defeating the maxDistance prefilter and letting one cheap
+  // arrangement make every ray in the scene maximally expensive. Transforms are raw
+  // readFloat32 with no finiteness validation, so a scene can send this.
+  //
+  // Observable through the budget again: the box alone is billed 12 and fits in a
+  // ceiling of 100, but admitting the unreachable sphere adds 1296 and the whole
+  // raycast is refused.
+  describe('when a collider carries a NaN transform', () => {
+    let hits: any[]
+
+    beforeEach(() => {
+      const restore = limits.maxRaycastTrianglesPerFrame
+      limits.maxRaycastTrianglesPerFrame = 100
+
+      try {
+        const box = createBoxMesh(scene, 'real_collider')
+        box.position.set(0, 0, 5)
+        box.computeWorldMatrix(true)
+        setColliderMask(box, MASK)
+
+        const ghost = createSphereMesh(scene, 'ghost_collider')
+        ghost.position.set(NaN, NaN, NaN)
+        ghost.computeWorldMatrix(true)
+        setColliderMask(ghost, MASK)
+
+        hits = []
+        processRaycasts(fakeScene([box, ghost], RaycastQueryType.RQT_HIT_FIRST, 50, (r) => (hits = r.hits)))
+      } finally {
+        limits.maxRaycastTrianglesPerFrame = restore
+      }
+    })
+
+    it('should not admit it as a candidate, so the real collider is still answered', () => {
+      expect(hits).toHaveLength(1)
     })
   })
 })

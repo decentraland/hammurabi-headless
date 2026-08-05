@@ -547,28 +547,33 @@ function pickClosest<T extends { distance: number }>(elems: T[]): T | undefined 
  * measurably slower than field access on the hot path.
  */
 function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
-  // A NaN AABB must MISS rather than fall through the slab tests below, and it does
-  // not fall through the way it looks like it would. Every `>`/`<` against NaN is
-  // false, so `near`/`far` are never assigned into `tmin`/`tmax`: those stay 0 and
-  // `ray.length`, both finite, and the `tmin > tmax` rejections therefore never fire
-  // either. The function returns 0 — "the ray origin is already inside this box" — for
-  // a box that does not exist. Measured: a 1m ray at world (16,0,16) admitted 300/300
-  // colliders whose entity transform was NaN and which it cannot geometrically reach.
+  // A DEGENERATE AABB must MISS rather than fall through the slab tests below, and it
+  // does not fall through the way it looks like it would.
+  //
+  // Reachable because `transform-component.ts` reads the transform as raw readFloat32
+  // with no finiteness validation. What a NaN transform actually produces is NOT a NaN
+  // box: `BoundingBox._update` min/maxes over the transformed corners, every comparison
+  // against NaN is false, and the accumulators keep their sentinels — so the box comes
+  // back INVERTED, `minimumWorld = +1.8e308` and `maximumWorld = -1.8e308` (measured,
+  // Babylon 6.4.1). Both components are finite, so a finiteness check does not see it.
+  //
+  // Either shape then sails through: with inverted bounds `near`/`far` are ±1.8e308 and
+  // neither `near > tmin` nor `far < tmax` holds, and with NaN neither holds either — so
+  // `tmin`/`tmax` keep 0 and `ray.length`, the `tmin > tmax` rejections never fire, and
+  // the function returns 0, "the ray origin is already inside this box", for a box that
+  // does not exist. Measured: a 1m ray admitted 300/300 colliders it cannot reach.
   //
   // The consequence is cost, not a false hit (`resolveAnalyticSphere` rejects NaN and
   // the triangle path misses), but it defeats the `maxDistance`-aware prefilter this
   // function exists to be, so one cheap arrangement makes every ray in the scene
-  // maximally expensive. Reachable because `transform-component.ts` reads the
-  // transform as raw readFloat32 with no finiteness validation.
+  // maximally expensive.
+  //
+  // `!(min <= max)` rather than `min > max` so the same test rejects NaN, where every
+  // comparison is false. A zero-extent box has `min === max` and is kept.
   //
   // Checked here rather than left to `enforceColliderBounds` to disable: that runs a
   // frame later at best, and only for a scene that has parcel metadata.
-  if (
-    !Number.isFinite(min.x) || !Number.isFinite(min.y) || !Number.isFinite(min.z) ||
-    !Number.isFinite(max.x) || !Number.isFinite(max.y) || !Number.isFinite(max.z)
-  ) {
-    return -1
-  }
+  if (!(min.x <= max.x) || !(min.y <= max.y) || !(min.z <= max.z)) return -1
 
   let tmin = 0
   let tmax = ray.length

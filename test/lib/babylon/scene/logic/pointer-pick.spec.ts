@@ -228,9 +228,16 @@ testWithEngine(
     // the capsule, so using it raw put this check 0.85m out — and nothing exercised
     // max_player_distance through the pointer path at all, so it was unverified.
     //
-    // Discriminating fixture: the box's near face is at z=2.5, so the hit point is
-    // 2.500m from the FEET at the origin and 2.640m from the capsule CENTRE 0.85m up.
-    // A threshold of 2.55 sits between them, so only a feet-based measurement fires.
+    // Discriminating fixture, and it has to work harder than it looks. The distance
+    // rules are a single OR, and `max_distance` defaults to 10 — so with the box
+    // anywhere inside 10m the FIRST term qualifies it whatever origin the player
+    // distance uses, and the test proves nothing. (It did not, for a while: removing
+    // the feet offset entirely left all 12 cases in this file green.)
+    //
+    // So the box sits at z=12, near face 11.5, putting it past the default
+    // `max_distance` and leaving `max_player_distance` as the only term that can fire.
+    // From the FEET at the origin that hit point is 11.500m; from the capsule CENTRE
+    // 0.85m up it is 11.531m. A threshold of 11.52 sits between them.
     describe('when an entry gates on max_player_distance alone', () => {
       let entity: Entity
 
@@ -240,12 +247,12 @@ testWithEngine(
           absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
         } as unknown as BABYLON.TransformNode)
 
-        entity = await putInteractiveBox(3, [
+        entity = await putInteractiveBox(12, [
           {
             eventType: PointerEventType.PET_DOWN,
             interactionType: InteractionType.CURSOR,
             // maxPlayerDistance ONLY, so the camera check is not what decides this.
-            eventInfo: { maxPlayerDistance: 2.55 }
+            eventInfo: { maxPlayerDistance: 11.52 }
           }
         ])
         pickPointerEventsMesh($.scene)
@@ -296,6 +303,161 @@ testWithEngine(
 
       it('should report IA_POINTER, the only value a scene can match a hover on', () => {
         expect(resultsFor(entity)[0].button).toBe(InputAction.IA_POINTER)
+      })
+
+      // One clock for every PointerEventsResult in the scene. The SDK gates on
+      // `timestamp > previousFrameMaxTimestamp`, a maximum taken over ALL entities and
+      // never decreasing, so a private counter here alongside proximity's tick meant a
+      // single proximity event silenced every hover and click in the scene forever.
+      it('should timestamp from the scene tick, the same source proximity uses', () => {
+        expect(resultsFor(entity)[0].timestamp).toBe($.ctx.currentTick)
+      })
+    })
+
+    // The pick used to assign `lastPickPoint` before the leave was emitted, so the
+    // OUTGOING entity's leave was distance-gated against the INCOMING entity's distance
+    // and carried its hit. Looking from a near button to a far one dropped the leave
+    // entirely and stranded the scene's hover state on the first button.
+    describe('when the pointer moves from a near entity to a distant one', () => {
+      let near: Entity
+
+      beforeEach(async () => {
+        near = await putInteractiveBox(3, [
+          { eventType: PointerEventType.PET_HOVER_ENTER, interactionType: InteractionType.CURSOR, eventInfo: {} },
+          // Default maxDistance of 10: satisfied by this entity's own 2.5m pick,
+          // and not by the 29.5m one that replaces it.
+          { eventType: PointerEventType.PET_HOVER_LEAVE, interactionType: InteractionType.CURSOR, eventInfo: {} }
+        ])
+        pickPointerEventsMesh($.scene)
+
+        // A second entity off to the side, so it does not sit behind the first — which
+        // would now be occluded rather than picked.
+        const far = nextEntityId++ as Entity
+        created.push(far)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, far, ++timestamp, {
+              position: new Vector3(30, 0, 0),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, far, ++timestamp, {
+              collisionMask: ColliderLayer.CL_POINTER,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .put(pointerEventsComponent, far, ++timestamp, {
+              pointerEvents: [
+                {
+                  eventType: PointerEventType.PET_HOVER_ENTER,
+                  interactionType: InteractionType.CURSOR,
+                  eventInfo: { maxDistance: 10_000 }
+                }
+              ]
+            } as any)
+            .finish()
+        })
+        camera.setTarget(new Vector3(1, 0, 0))
+        pickPointerEventsMesh($.scene)
+      })
+
+      it('should still fire the leave for the entity it left', () => {
+        expect(resultsFor(near).map((r) => r.state)).toEqual([
+          PointerEventType.PET_HOVER_ENTER,
+          PointerEventType.PET_HOVER_LEAVE
+        ])
+      })
+    })
+
+    // `max_distance` is measured from the PLAYER, not from the camera. This server's
+    // camera sits 8m behind the player, so measuring from it made the protocol's own
+    // default of 10 stop qualifying about two metres in front of the player — entities
+    // every client reports as interactable out to 10m were silently unclickable.
+    describe('when the player stands well ahead of the camera', () => {
+      let entity: Entity
+      let previousPlayer: BABYLON.TransformNode | null
+
+      beforeEach(async () => {
+        previousPlayer = playerEntityAtom.getOrNull()
+        // Camera at the origin, player 8m down +Z — the production geometry.
+        playerEntityAtom.swap({
+          absolutePosition: new Vector3(0, PLAYER_CAPSULE_HALF_HEIGHT, 8),
+          absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
+        } as unknown as BABYLON.TransformNode)
+
+        // 11.5m from the camera, 3.6m from the player: only a player-relative
+        // measurement leaves it inside the default max_distance of 10.
+        entity = await putInteractiveBox(12, [
+          { eventType: PointerEventType.PET_DOWN, interactionType: InteractionType.CURSOR, eventInfo: {} }
+        ])
+        pickPointerEventsMesh($.scene)
+        interactWithScene(PointerEventType.PET_DOWN, InputAction.IA_PRIMARY)
+      })
+
+      afterEach(() => {
+        if (previousPlayer) playerEntityAtom.swap(previousPlayer)
+      })
+
+      it('should qualify, because the distance is measured from the player', () => {
+        expect(resultsFor(entity)).toHaveLength(1)
+      })
+    })
+
+    // The client fills press results once per ENTITY, outside its entry loop
+    // (`TryAppendButtonAction`), and only hover/proximity go per entry. Emitting per
+    // entry produced byte-identical duplicates once presses started reporting the raw
+    // action, halving a 10-element result history for nothing.
+    describe('when two entries both qualify for the same press', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putInteractiveBox(3, [
+          { eventType: PointerEventType.PET_DOWN, interactionType: InteractionType.CURSOR, eventInfo: {} },
+          {
+            eventType: PointerEventType.PET_DOWN,
+            interactionType: InteractionType.CURSOR,
+            eventInfo: { button: InputAction.IA_PRIMARY }
+          }
+        ])
+        pickPointerEventsMesh($.scene)
+        interactWithScene(PointerEventType.PET_DOWN, InputAction.IA_PRIMARY)
+      })
+
+      it('should emit one result rather than one per entry', () => {
+        expect(resultsFor(entity)).toHaveLength(1)
+      })
+    })
+
+    // The predicate used to admit only interactables, so the closest hit was always
+    // interactable and nothing could block it: hover and click passed through walls,
+    // floors and other players, none of which is reachable on any client. The client
+    // casts one closest hit over OnPointerEvent | Default | OtherAvatars and hovers
+    // nothing when that hit is not a scene interactable.
+    describe('when a plain physics collider stands between the player and the entity', () => {
+      beforeEach(async () => {
+        await putInteractiveBox(6)
+
+        const wall = nextEntityId++ as Entity
+        created.push(wall)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, wall, ++timestamp, {
+              position: new Vector3(0, 0, 3),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(4, 4, 1),
+              parent: 0 as Entity
+            })
+            // CL_PHYSICS only, and no PointerEvents: not interactable, but solid.
+            .put(meshColliderComponent, wall, ++timestamp, {
+              collisionMask: ColliderLayer.CL_PHYSICS,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .finish()
+        })
+      })
+
+      it('should hover nothing, because the wall is what the pointer reaches first', () => {
+        expect(pickActivePointerEventsEntity($.scene)).toBeNull()
       })
     })
   }

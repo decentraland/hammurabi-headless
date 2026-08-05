@@ -363,6 +363,25 @@ testWithEngine(
       })
     })
 
+    // The client's AppendPointerInputIfQualified requires IaPointer or IaAny for every
+    // proximity enter/leave append, and nothing pinned that here: removing the gate
+    // left all 18 proximity cases green.
+    describe('when a proximity entry asks for a button that is neither POINTER nor ANY', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 1), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3, button: InputAction.IA_PRIMARY } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should emit nothing, as the client does not append it either', () => {
+        expect(resultsFor(entity)).toEqual([])
+      })
+    })
+
     describe('when an entity declares only CURSOR entries', () => {
       let entity: Entity
 

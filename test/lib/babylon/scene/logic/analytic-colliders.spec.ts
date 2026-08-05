@@ -183,6 +183,29 @@ describe('analytic sphere colliders', () => {
     })
   })
 
+  // The guard read only the X component for a while, which left the identical hole one
+  // axis over: X is finite and non-zero, the centre is finite, and the uniform check
+  // then evaluates `Math.abs(1 - NaN) > tol` and `Math.abs(NaN - 1) > tol` — both false
+  // — so the mesh was accepted and answered with a confident hit against a sphere of
+  // radius 0.5, while the triangle path misses it entirely.
+  //
+  // Y and Z are covered separately because a single `||` chain is easy to write with
+  // one of the three operands missing, and that is exactly how the first version went
+  // wrong.
+  describe.each([
+    ['Y', new Vector3(1, Number.NaN, 1)],
+    ['Z', new Vector3(1, 1, Number.NaN)]
+  ])('when only the %s scale component is not finite', (_axis, scaling) => {
+    beforeEach(() => {
+      sphere.scaling.copyFrom(scaling)
+      sphere.computeWorldMatrix(true)
+    })
+
+    it('should decline it rather than reporting a hit the mesh does not have', () => {
+      expect(intersectAnalyticSphere(rayFrom(0), sphere)).toBeNull()
+    })
+  })
+
   describe('when the entity scales the sphere to nothing', () => {
     beforeEach(() => {
       sphere.scaling.setAll(0)

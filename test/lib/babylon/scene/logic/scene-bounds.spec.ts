@@ -177,6 +177,43 @@ testWithEngine(
       })
     })
 
+    // ...and this is the case that pins the SLACK specifically, which nothing did:
+    // setting PLANE_SLACK_METERS to 0 left every other bounds case green, because the
+    // shrink alone absorbed them.
+    //
+    // The shrink is min(sizeX/2, sizeZ/2, 0.3)/2 of the COLLIDER's own size, so a tiny
+    // collider gets a tiny shrink: at 0.02 across it is 0.005, and an overhang of 0.03
+    // is inside the 0.05 plane slack but well outside the shrink. Only the pair keeps
+    // it enabled.
+    describe('when a very small collider overhangs by more than its own shrink', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = nextEntityId++ as Entity
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              // Scene-local x=16.02 is world x=32.02: a 0.02-wide box centred there
+              // reaches 0.03 past the parcel's eastern edge at world x=32.
+              position: new Vector3(16.02, 1, 8),
+              rotation: Quaternion.Identity(),
+              scale: new Vector3(0.02, 0.02, 0.02),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, entity, ++timestamp, {
+              collisionMask: MASK,
+              mesh: { $case: 'box', box: {} }
+            } as any)
+            .finish()
+        })
+        enforceColliderBounds($.ctx)
+      })
+
+      it('should stay enabled, because the plane slack covers what the shrink cannot', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(true)
+      })
+    })
+
     describe('when a collider straddles the parcel edge', () => {
       let entity: Entity
 

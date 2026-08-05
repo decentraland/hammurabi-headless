@@ -20,6 +20,8 @@ const RAYCASTS_PATH = '../../../src/lib/babylon/scene/logic/raycasts'
 const RAYCAST_COMPONENT_PATH = '../../../src/lib/decentraland/sdk-components/raycast-component'
 const COLLIDERS_PATH = '../../../src/lib/babylon/scene/logic/colliders'
 const LIMITS_PATH = '../../../src/lib/misc/limits'
+const PROXIMITY_PATH = '../../../src/lib/babylon/scene/logic/proximity-interaction'
+const STATE_PATH = '../../../src/lib/decentraland/state'
 // Matches any collisionMask. pickMeshesForMask applies the real layer predicate
 // while it walks, and the tag MUST come from the same freshly-required colliders
 // module these tests load: its `Symbol('isCollider')` is module-scoped, so a tag
@@ -337,6 +339,55 @@ describe('limit logging wiring', () => {
       limits.maxColliderTreeDepth = restore
       scene.dispose()
       engine.dispose()
+    }
+  })
+
+  // This truncation used to report under `maxLiveEntities`, a key it does not own.
+  // limit-logger throttles per key, so proximity truncation suppressed the genuine
+  // entity-cap signal for the whole window and vice versa, while telling an operator to
+  // raise a knob that could not move it.
+  it('reports the maxProximityCandidates key when the proximity scan is truncated', () => {
+    const hit = jest.fn()
+    jest.resetModules()
+    jest.doMock(LIMIT_LOGGER_PATH, () => ({ limitLogger: { hit } }))
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const BABYLON = require('@babylonjs/core')
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { updateProximityInteractions } = require(PROXIMITY_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { playerEntityAtom } = require(STATE_PATH)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { limits } = require(LIMITS_PATH)
+
+    const previousPlayer = playerEntityAtom.getOrNull()
+    const restore = limits.maxProximityCandidates
+    try {
+      limits.maxProximityCandidates = 1
+      playerEntityAtom.swap({
+        absolutePosition: new BABYLON.Vector3(0, 0.85, 0),
+        absoluteRotationQuaternion: BABYLON.Quaternion.Identity()
+      })
+
+      // Two indexed proximity entities against an allowance of one. They never need to
+      // resolve to a real BabylonEntity: the ceiling is checked before the lookup,
+      // which is the whole point of counting before the distance test.
+      const criteria = { maxPlayerDistance: 3, priority: 0, value: { pointerEvents: [] } }
+      const context = {
+        entityId: 'proximity-wiring',
+        proximityEntities: new Map([
+          [700, criteria],
+          [701, criteria]
+        ]),
+        getEntityOrNull: () => null,
+        components: {}
+      }
+
+      updateProximityInteractions(context)
+
+      expect(hit).toHaveBeenCalledWith('maxProximityCandidates', expect.stringContaining('truncated'))
+    } finally {
+      limits.maxProximityCandidates = restore
+      if (previousPlayer) playerEntityAtom.swap(previousPlayer)
     }
   })
 
