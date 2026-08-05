@@ -438,3 +438,235 @@ describe('raycast prefilter and early-out', () => {
     })
   })
 })
+
+// P1b: `computeRayDirection` validated maxDistance and rejected an exactly-zero
+// direction, but nothing else. Every other input is a raw scene-controlled protobuf
+// float — originOffset, the direction oneofs, the entity Transform — so NaN and Infinity
+// are reachable, and the zero check does NOT catch them (`lengthSquared()` of a NaN
+// vector is NaN, and `NaN === 0` is false).
+//
+// A NaN ray then failed OPEN the whole way down: `rayBoxEntry` only validated the BOX so
+// the candidate was admitted, and every rejection in `intersectAnalyticSphere` is a `<`
+// or `>` comparison that is false for NaN. Measured before the fix: NaN origin, NaN
+// direction and Infinity origin each produced `HIT distance=NaN point=NaN,NaN,NaN` while
+// the triangle path correctly missed — and `pickClosest` lets a NaN distance win, because
+// `NaN < x` is false.
+describe('raycast against non-finite ray inputs', () => {
+  let engine: BABYLON.NullEngine
+  let scene: BABYLON.Scene
+
+  beforeEach(() => {
+    engine = new BABYLON.NullEngine()
+    scene = new BABYLON.Scene(engine)
+  })
+
+  afterEach(() => {
+    scene.dispose()
+    engine.dispose()
+  })
+
+  describe.each([
+    ['a NaN originOffset', { originOffset: { x: NaN, y: 0, z: 0 } }],
+    ['a NaN globalDirection', { direction: { $case: 'globalDirection', globalDirection: new Vector3(NaN, 0, 1) } }],
+    ['an Infinite originOffset', { originOffset: { x: Infinity, y: 0, z: 0 } }]
+  ])('when a scene sends %s', (_label, override) => {
+    let hits: any[]
+    let resultWritten: boolean
+
+    beforeEach(() => {
+      const sphere = createSphereMesh(scene, 'ball_collider')
+      sphere.position.set(0, 0, 5)
+      sphere.computeWorldMatrix(true)
+      setColliderMask(sphere, MASK)
+      setAnalyticSphere(sphere, PRIMITIVE_SPHERE_RADIUS)
+
+      resultWritten = false
+      hits = []
+      const raycast: any = {
+        queryType: RaycastQueryType.RQT_HIT_FIRST,
+        continuous: false,
+        timestamp: 0,
+        collisionMask: MASK,
+        direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
+        originOffset: undefined,
+        maxDistance: 50,
+        ...override
+      }
+      const ctx: any = {
+        currentTick: 0,
+        entityId: 'nan-ray',
+        rootNode: { position: Vector3.Zero(), getChildren: () => [sphere] },
+        raycastRotationCursor: 0,
+        pendingRaycastOperations: new Set([1]),
+        components: {
+          [raycastComponent.componentId]: { getOrNull: () => raycast },
+          [raycastResultComponent.componentId]: {
+            createOrReplace: (_id: number, value: any) => {
+              resultWritten = true
+              hits = value.hits
+            }
+          }
+        },
+        getEntityOrNull: (id: number) => ({
+          entityId: id,
+          appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
+          getWorldMatrix: () => Matrix.Identity(),
+          absolutePosition: Vector3.Zero(),
+          absoluteRotationQuaternion: Quaternion.Identity()
+        })
+      }
+      processRaycasts(ctx)
+    })
+
+    // Matching the malformed-direction case: a ray that cannot be evaluated is not a ray,
+    // so there is no result at all rather than a result full of NaN.
+    it('should write no result rather than a phantom hit', () => {
+      expect(resultWritten).toBe(false)
+    })
+
+    it('should report no hits', () => {
+      expect(hits).toEqual([])
+    })
+  })
+})
+
+// `processRaycasts` caches candidate discovery per collision mask, and the mask is
+// SCENE-CONTROLLED. Keyed on the raw mask, a scene issued N continuous raycasts on N
+// distinct masks and paid N full collider-subtree walks per frame — charged nothing,
+// because the budget is taken from the MATCHED list and a mask matching nothing matches
+// nothing. Measured at 500 raycasts over 10_000 colliders: 91.98ms/frame, against 0.55ms
+// once they shared a cache entry.
+//
+// Two defences, and both are needed. The layer UNION answers "no live collider carries
+// any of these bits" without walking. The per-frame WALK CEILING bounds what is left,
+// because with k layer bits in use a scene can still name 2^k-1 distinct effective masks
+// that each match something — so each case below sets up the collider layers it needs.
+describe('raycast candidate discovery against scene-controlled masks', () => {
+  let engine: BABYLON.NullEngine
+  let scene: BABYLON.Scene
+  let walked: number
+
+  /** Counts real subtree walks: `pickMeshesForMask` reaches the root's children once each. */
+  function runWith(colliderLayers: number[], masks: number[]) {
+    const meshes: AbstractMesh[] = []
+    colliderLayers.forEach((layer, i) => {
+      const box = createBoxMesh(scene, `c${i}_collider`)
+      box.position.set(0, 0, 5 + i)
+      box.computeWorldMatrix(true)
+      setColliderMask(box, layer)
+      meshes.push(box)
+    })
+
+    const raycasts = new Map<number, any>()
+    masks.forEach((collisionMask, i) =>
+      raycasts.set(1000 + i, {
+        queryType: RaycastQueryType.RQT_HIT_FIRST,
+        continuous: true,
+        timestamp: 0,
+        collisionMask,
+        direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
+        originOffset: undefined,
+        maxDistance: 50
+      })
+    )
+
+    walked = 0
+    processRaycasts({
+      currentTick: 0,
+      entityId: 'mask-spec',
+      rootNode: {
+        position: Vector3.Zero(),
+        getChildren: () => {
+          walked++
+          return meshes
+        }
+      },
+      raycastRotationCursor: 0,
+      pendingRaycastOperations: new Set(masks.map((_, i) => 1000 + i)),
+      components: {
+        [raycastComponent.componentId]: { getOrNull: (id: number) => raycasts.get(id) },
+        [raycastResultComponent.componentId]: { createOrReplace: () => undefined }
+      },
+      getEntityOrNull: (id: number) => ({
+        entityId: id,
+        appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
+      })
+    } as any)
+  }
+
+  beforeEach(() => {
+    engine = new BABYLON.NullEngine()
+    scene = new BABYLON.Scene(engine)
+  })
+
+  afterEach(() => {
+    scene.dispose()
+    engine.dispose()
+  })
+
+  describe('when many raycasts use distinct masks that no live collider can match', () => {
+    beforeEach(() => {
+      // Colliders on CL_POINTER|CL_PHYSICS only; every mask names CL_CUSTOM bits.
+      runWith(
+        [MASK, MASK, MASK],
+        Array.from({ length: 200 }, (_, i) => ColliderLayer.CL_CUSTOM1 << (i % 8))
+      )
+    })
+
+    it('should not walk the collider subtree at all', () => {
+      expect(walked).toBe(0)
+    })
+  })
+
+  describe('when many raycasts use masks differing only in bits no collider carries', () => {
+    beforeEach(() => {
+      // Same EFFECTIVE mask every time: CL_POINTER plus junk that is masked off.
+      runWith(
+        [MASK, MASK, MASK],
+        Array.from({ length: 200 }, (_, i) => ColliderLayer.CL_POINTER | (ColliderLayer.CL_CUSTOM1 << (i % 8)))
+      )
+    })
+
+    it('should walk once, because the effective mask is identical', () => {
+      expect(walked).toBe(1)
+    })
+  })
+
+  describe('when many raycasts use distinct masks that each match something', () => {
+    let restore: number
+
+    beforeEach(() => {
+      restore = limits.maxColliderWalksPerFrame
+      limits.maxColliderWalksPerFrame = 4
+      // Eight LIVE layers, so distinct subsets are genuinely distinct effective masks
+      // and the union cannot short-circuit any of them. Only the ceiling can.
+      const live = [
+        ColliderLayer.CL_POINTER,
+        ColliderLayer.CL_PHYSICS,
+        ColliderLayer.CL_CUSTOM1,
+        ColliderLayer.CL_CUSTOM2,
+        ColliderLayer.CL_CUSTOM3,
+        ColliderLayer.CL_CUSTOM4,
+        ColliderLayer.CL_CUSTOM5,
+        ColliderLayer.CL_CUSTOM6
+      ]
+      const masks = Array.from({ length: 50 }, (_, i) => {
+        let mask = 0
+        for (let bit = 0; bit < live.length; bit++) if (((i + 1) >>> bit) & 1) mask |= live[bit]
+        return mask || live[0]
+      })
+      runWith(live, masks)
+    })
+
+    afterEach(() => {
+      limits.maxColliderWalksPerFrame = restore
+    })
+
+    it('should stop walking once the per-frame ceiling is reached', () => {
+      expect(walked).toBe(4)
+    })
+  })
+})

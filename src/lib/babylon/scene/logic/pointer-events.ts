@@ -3,12 +3,20 @@ import { BabylonEntity } from '../BabylonEntity'
 import { AbstractMesh as BabylonMesh } from '@babylonjs/core'
 import { floorMeshes, getColliderLayers, pickMeshesForMask } from './colliders'
 import { bitIntersectsAndContainsAny } from '../../../misc/bit-operations'
+import { limits } from '../../../misc/limits'
+import { limitLogger } from '../../../misc/limit-logger'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { InputAction, InteractionType, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
 import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
-import { nearestHitAlongRay, pickingToRaycastHit, prefilterCandidates, raycastResultFromRay } from './raycasts'
+import {
+  candidateTriangleCost,
+  nearestHitAlongRay,
+  pickingToRaycastHit,
+  prefilterCandidates,
+  raycastResultFromRay
+} from './raycasts'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
 import { isAvatarCapsule } from './avatar-colliders'
 import { isHover, resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
@@ -141,7 +149,14 @@ export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
   )
   ray.length = MAX_POINTER_PICK_DISTANCE
 
-  const pickInfo = nearestHitAlongRay(ray, ...prefilterArgs(scene, ray))
+  const affordable = prefilterArgs(scene, ray)
+  // Over the per-pick ceilings: hover NOTHING this frame rather than resolve against a
+  // partial candidate set. A hover is authoritative — it is what a scene's onPointerDown
+  // fires against — and a nearest hit taken from a subset is not merely late, it can name
+  // the wrong entity because the one that would have occluded it was never tested.
+  if (!affordable) return null
+
+  const pickInfo = nearestHitAlongRay(ray, ...affordable)
 
   if (!pickInfo || !pickInfo.pickedMesh || !pickInfo.pickedPoint) return null
 
@@ -171,7 +186,7 @@ export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
  *
  * That list is also why `floorMeshes` finally has a reader: it was write-only.
  */
-function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number[]] {
+function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number[]] | null {
   // A SET, because the two groups OVERLAP heavily. `setColliderMask` enrols any mesh
   // named `*_collider` into `floorMeshes`, and every primitive collider is named exactly
   // that — so nearly all of a scene's colliders appear in both groups. Collected into an
@@ -212,7 +227,30 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
   // path's total there. Delete it only with a test that fails without it.
   for (const mesh of meshes) mesh.computeWorldMatrix(false)
 
+  // The SAME ceilings that protect processRaycasts, applied per pick. This path runs
+  // every frame from onBeforeRenderObservable for any scene that declares a single
+  // PointerEvents component, walks every loaded scene's colliders and then triangle-tests
+  // whatever the prefilter admits — so without them a scene bounds the host's frame time
+  // purely by how many colliders it puts under the crosshair.
+  //
+  // A per-pick cap, NOT a running budget shared with the raycasts: the pick happens on
+  // the Babylon frame and processRaycasts on the scene's CRDT frame, so a shared counter
+  // would make each starve the other depending on interleaving. What this bounds is one
+  // pick's own work, which is the thing that was unbounded.
+  if (meshes.size > limits.maxRaycastIntersectionsPerFrame) {
+    limitLogger.hit('maxRaycastIntersectionsPerFrame', `pointer pick spans ${meshes.size} colliders`)
+    return null
+  }
+
   const { candidates, entries, radii } = prefilterCandidates(ray, meshes)
+
+  let triangles = 0
+  for (let i = 0; i < candidates.length; i++) triangles += candidateTriangleCost(candidates[i], radii[i])
+  if (triangles > limits.maxRaycastTrianglesPerFrame) {
+    limitLogger.hit('maxRaycastTrianglesPerFrame', `pointer pick spans ${triangles} triangles`)
+    return null
+  }
+
   return [candidates, entries, radii]
 }
 

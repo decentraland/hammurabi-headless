@@ -155,6 +155,19 @@ export function intersectAnalyticSphere(
 ): BABYLON.Nullable<BABYLON.PickingInfo> {
   if (worldRadius === NOT_ANALYTIC) return null
 
+  // The RAY, defensively. `computeRayDirection` already fails closed on a non-finite
+  // ray, so this is belt-and-braces — but it is the cheap half of a bug that was real:
+  // every rejection below is a `<` or `>` comparison, and all of them are FALSE for NaN,
+  // so a NaN ray walked straight through `discriminant < 0`, `distance < 0` and
+  // `distance > ray.length` to return a hit with NaN distance, point and normal. The
+  // mesh side has been guarded since this file was written; the ray side had not.
+  if (
+    !Number.isFinite(ray.origin.x) || !Number.isFinite(ray.origin.y) || !Number.isFinite(ray.origin.z) ||
+    !Number.isFinite(ray.direction.x) || !Number.isFinite(ray.direction.y) || !Number.isFinite(ray.direction.z)
+  ) {
+    return null
+  }
+
   // Just the translation, not another `decompose`: the centre of a sphere centred on
   // its own local origin IS its world matrix's translation, and `resolveAnalyticSphere`
   // already established that it is finite.

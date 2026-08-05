@@ -18,6 +18,7 @@ import { pointerEventsResultComponent } from '../../../../../src/lib/decentralan
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../../../src/lib/decentraland/state'
 import { PLAYER_CAPSULE_HALF_HEIGHT, StaticEntities } from '../../../../../src/lib/babylon/scene/logic/static-entities'
+import { limits } from '../../../../../src/lib/misc/limits'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
 // The centre-screen pick had NO test at all, and no distance limit: `scene.pick`
@@ -543,6 +544,53 @@ testWithEngine(
 
       it('should intersect it once per pick, not once per group it appears in', () => {
         expect(intersects).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    // The pick shares the raycast core but ran without its ceilings, and it runs EVERY
+    // FRAME from onBeforeRenderObservable for any scene that declares a single
+    // PointerEvents component. A scene bounds the host's frame time purely by how many
+    // colliders it puts under the crosshair.
+    //
+    // Over the ceiling it hovers NOTHING rather than resolving against a partial set: a
+    // hover is authoritative (it is what onPointerDown fires against), and a nearest hit
+    // taken from a subset can name the WRONG entity, because whatever would have occluded
+    // it was never tested. Late is recoverable; wrong is not.
+    describe('when more colliders sit under the pointer than the ceiling allows', () => {
+      let restore: number
+
+      beforeEach(async () => {
+        restore = limits.maxRaycastIntersectionsPerFrame
+        await putInteractiveBox(5)
+        // Extra occluders BEHIND the interactable, so a partial candidate set would
+        // still find it and the assertion would not discriminate.
+        for (let i = 0; i < 5; i++) {
+          const filler = nextEntityId++ as Entity
+          created.push(filler)
+          await $.ctx.crdtSendToRenderer({
+            data: new CrdtBuilder()
+              .put(transformComponent, filler, ++timestamp, {
+                position: new Vector3(0, 0, 8 + i),
+                rotation: BABYLON.Quaternion.Identity(),
+                scale: new Vector3(1, 1, 1),
+                parent: 0 as Entity
+              })
+              .put(meshColliderComponent, filler, ++timestamp, {
+                collisionMask: ColliderLayer.CL_PHYSICS,
+                mesh: { $case: 'box', box: {} }
+              } as any)
+              .finish()
+          })
+        }
+        limits.maxRaycastIntersectionsPerFrame = 2
+      })
+
+      afterEach(() => {
+        limits.maxRaycastIntersectionsPerFrame = restore
+      })
+
+      it('should hover nothing rather than answer from a partial candidate set', () => {
+        expect(pickActivePointerEventsEntity($.scene) === null).toBe(true)
       })
     })
 

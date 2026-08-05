@@ -87,6 +87,7 @@ export interface Limits {
   maxRaycastTrianglesPerFrame: number
   maxRaycastHitsPerQuery: number
   maxColliderTreeDepth: number
+  maxColliderWalksPerFrame: number
 
   // --- Pointer events ---
   maxProximityCandidates: number
@@ -245,6 +246,22 @@ const KNOBS: readonly Knob[] = [
   // all; this bounds the WORK instead, and sits far above any plausible scene
   // hierarchy.
   { key: 'maxColliderTreeDepth', env: 'HAMMURABI_MAX_COLLIDER_TREE_DEPTH', def: 1_024, min: 1 },
+
+  // Distinct collision masks whose candidate list may be BUILT in one frame. Each miss
+  // walks the scene's whole collider subtree, and the mask is scene-controlled, so
+  // without this a scene issues N continuous raycasts on N distinct masks and pays N
+  // full walks per frame — measured 91.98ms/frame at 500 raycasts over 10_000 colliders.
+  //
+  // The per-mask cache and the `colliderLayerUnion` early-return remove most of that
+  // (a mask no live collider can match never walks at all), but they do not bound it:
+  // with k layer bits in use a scene can still name 2^k-1 distinct EFFECTIVE masks. This
+  // is the actual ceiling. Raycasts past it are DEFERRED, not refused, and the rotation
+  // cursor gives different ones first pick each frame.
+  //
+  // 16 is far above what a real scene uses: masks come from the SDK's ColliderLayer
+  // constants, and a scene needing more than a handful of distinct combinations in one
+  // frame is doing something unusual.
+  { key: 'maxColliderWalksPerFrame', env: 'HAMMURABI_MAX_COLLIDER_WALKS_PER_FRAME', def: 16, min: 1 },
 
   // Entities examined per frame by the PROXIMITY pointer-event scan. Only entities
   // that DECLARE a proximity entry are examined at all (SceneContext.proximityEntities

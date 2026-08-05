@@ -40,8 +40,83 @@ export const colliderMaterial = memoize((scene: Scene) => {
 })
 
 
+/**
+ * How many live colliders carry each of the 32 collider-layer bits.
+ *
+ * Exists so a raycast can answer "no collider anywhere uses any of these bits" WITHOUT
+ * walking the scene. `processRaycasts` caches its candidate list per collision mask, and
+ * the mask is scene-controlled: a scene issuing many continuous raycasts on distinct
+ * masks that match nothing forced one full subtree walk per mask per frame, charged
+ * nothing, because the budget is taken from the MATCHED list and that list is empty.
+ * Measured at 500 raycasts over 10_000 colliders: 91.98ms/frame against 0.55ms when the
+ * masks were shared.
+ *
+ * REFCOUNTS rather than a running OR, because a monotonic union is a bypass: 32 colliders
+ * created and disposed one per bit would leave every bit set forever and the check would
+ * never fire again.
+ */
+const layerColliderCounts = new Int32Array(32)
+let layerUnionCache = 0
+
+function applyLayerDelta(layers: number, delta: number) {
+  for (let bit = 0; bit < 32; bit++) {
+    if ((layers >>> bit) & 1) layerColliderCounts[bit] += delta
+  }
+  let union = 0
+  for (let bit = 0; bit < 32; bit++) {
+    if (layerColliderCounts[bit] > 0) union |= 1 << bit
+  }
+  layerUnionCache = union
+}
+
+/**
+ * The OR of every layer bit carried by at least one LIVE collider.
+ *
+ * `(mask & colliderLayerUnion()) === 0` means no collider can match that mask, so the
+ * walk can be skipped entirely and the result answered empty — identical output, none
+ * of the work. It also canonicalizes the per-mask cache: for any collider,
+ * `layers & mask === layers & (mask & union)` because every collider's layers are a
+ * subset of the union, so two masks agreeing on the union bits select the same meshes
+ * and must share one cache entry.
+ */
+/** Marks that this mesh already carries the shared collider dispose hook. */
+const disposeHookSymbol = Symbol('colliderDisposeHook')
+
+/**
+ * Registers, at most once per mesh, the single teardown hook this module needs: retire
+ * the mesh's layer bits from the union refcount and drop it from `floorMeshes`.
+ *
+ * ONE hook, not one per concern. `setColliderMask` runs on EVERY accepted PUT and
+ * `addFloorMesh` is reached from it, so an unguarded `addOnce` in either grows the
+ * mesh's observer array by a closure per PUT for the mesh's lifetime — the leak the
+ * previous `floorMeshes` guard existed to prevent, which the union refcount would
+ * otherwise have reintroduced alongside it.
+ */
+function registerDisposeHook(mesh: AbstractMesh) {
+  if ((mesh as any)[disposeHookSymbol]) return
+  ;(mesh as any)[disposeHookSymbol] = true
+
+  mesh.onDisposeObservable.addOnce(() => {
+    const last: number | undefined = (mesh as any)[colliderSymbol]
+    if (last !== undefined) applyLayerDelta(last, -1)
+    floorMeshes.delete(mesh)
+  })
+}
+
+export function colliderLayerUnion(): number {
+  return layerUnionCache
+}
+
 export function setColliderMask(mesh: AbstractMesh, layers: number) {
-  (mesh as any)[colliderSymbol] = layers
+  // Re-masking is ordinary: setColliderMask runs on every accepted PUT. Retire the
+  // previous contribution before counting the new one, and register the dispose hook
+  // only on the FIRST mask so the observer list does not grow one closure per PUT.
+  const previous: number | undefined = (mesh as any)[colliderSymbol]
+  if (previous !== undefined) applyLayerDelta(previous, -1)
+  applyLayerDelta(layers, +1)
+  registerDisposeHook(mesh)
+
+  ;(mesh as any)[colliderSymbol] = layers
 
   if (mesh.name.endsWith('_collider')) {
     mesh.material = colliderMaterial(mesh.getScene())
@@ -53,17 +128,14 @@ export function setColliderMask(mesh: AbstractMesh, layers: number) {
 }
 
 export function addFloorMesh(mesh: AbstractMesh) {
-  // add only when NOT already present (the previous inverted check meant no
-  // collider mesh was ever added — only the ambient ground reached the list)
-  if (floorMeshes.has(mesh)) return
-
+  // No "already present?" guard: `Set.add` is idempotent and `registerDisposeHook` is
+  // guarded by its own symbol, so an early return here is unreachable code — verified by
+  // mutation, deleting it changed no test. (It was load-bearing when `floorMeshes` was an
+  // ARRAY and the dispose hook was registered right here; both of those are gone. The
+  // check before that was inverted, which meant no collider mesh was ever added at all
+  // and only the ambient ground reached the list.)
   floorMeshes.add(mesh)
-  // Registered on first add only: setColliderMask runs on EVERY accepted
-  // GltfContainer PUT, and an unconditional addOnce there grew each mesh's
-  // observer array by one closure per PUT for the mesh's lifetime.
-  mesh.onDisposeObservable.addOnce(() => {
-    floorMeshes.delete(mesh)
-  })
+  registerDisposeHook(mesh)
 }
 
 export function getColliderLayers(mesh: AbstractMesh): number {

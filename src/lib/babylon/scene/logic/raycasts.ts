@@ -7,7 +7,7 @@ import { raycastComponent, raycastResultComponent } from '../../../decentraland/
 import { SceneContext } from '../scene-context'
 import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoordinates } from '../coordinates'
 import { BabylonEntity } from '../BabylonEntity'
-import { pickMeshesForMask } from './colliders'
+import { colliderLayerUnion, pickMeshesForMask } from './colliders'
 import { isAvatarCapsule, isRemotePlayerEntity } from './avatar-colliders'
 import { intersectAnalyticSphere, NOT_ANALYTIC, resolveAnalyticSphere } from './analytic-colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
@@ -97,6 +97,9 @@ const DEFAULT_RAYCAST_MASK = ColliderLayer.CL_PHYSICS
  */
 const TRIANGLE_COST_FLOOR = 12
 
+/** Shared empty result for a mask no live collider can match; never mutated. */
+const EMPTY_CANDIDATES: BABYLON.AbstractMesh[] = []
+
 /**
  * How many triangles `Ray.intersectsMesh` will really test for this candidate.
  *
@@ -139,7 +142,7 @@ const TRIANGLE_COST_FLOOR = 12
  * (the loader sets the flag whenever it omits indices) and which still pays an
  * O(vertices) `_generatePointsArray` on its first ray test anyway.
  */
-function candidateTriangleCost(mesh: BABYLON.AbstractMesh, analyticRadius: number): number {
+export function candidateTriangleCost(mesh: BABYLON.AbstractMesh, analyticRadius: number): number {
   // A candidate that WILL be solved in closed form never touches a triangle, so
   // billing it the tessellated count is not conservatism — it is wrong, and wrong in a
   // way that produces FALSE EMPTY RESULTS. Measured: 463 analytic spheres bill 600 048
@@ -178,10 +181,41 @@ export function processRaycasts(scene: SceneContext) {
   // Collect the intersectable meshes once per collision mask per frame instead of
   // re-walking the whole scene subtree for every raycast.
   const meshesByMask = new Map<number, BABYLON.AbstractMesh[]>()
-  const meshesForMask = (mask: number): BABYLON.AbstractMesh[] => {
-    let meshes = meshesByMask.get(mask)
+  let colliderWalks = 0
+  const maxColliderWalks = limits.maxColliderWalksPerFrame // HAMMURABI_MAX_COLLIDER_WALKS_PER_FRAME
+
+  /**
+   * Candidate meshes for a mask, or null when this frame cannot afford to discover them.
+   *
+   * Keyed on the EFFECTIVE mask (`mask & colliderLayerUnion()`), not the raw one. The
+   * mask is scene-controlled and the cache miss walks the whole collider subtree, so a
+   * raw key let a scene force one full walk per raycast per frame simply by naming
+   * distinct masks — charged nothing, because the budget below is taken from the MATCHED
+   * list and an unmatched mask matches nothing. Measured at 500 continuous raycasts over
+   * 10_000 colliders: 91.98ms/frame, against 0.55ms once they shared a cache entry.
+   *
+   * Canonicalizing is exact rather than approximate: every collider's layers are a subset
+   * of the union, so `layers & mask === layers & (mask & union)` and two masks agreeing
+   * on the union bits select precisely the same meshes.
+   *
+   * An effective mask of 0 cannot match anything, so it answers empty WITHOUT walking —
+   * the same result the walk would have produced.
+   */
+  const meshesForMask = (mask: number): BABYLON.AbstractMesh[] | null => {
+    const effectiveMask = mask & colliderLayerUnion()
+    if (effectiveMask === 0) return EMPTY_CANDIDATES
+
+    let meshes = meshesByMask.get(effectiveMask)
     if (!meshes) {
-      meshes = Array.from(pickMeshesForMask(scene.rootNode, mask))
+      // The union early-return removes masks nothing can match, but not the general
+      // case: with k layer bits in use a scene can still name 2^k-1 distinct effective
+      // masks and force a walk for each. This is the ceiling that actually bounds it.
+      if (colliderWalks >= maxColliderWalks) {
+        limitLogger.hit('maxColliderWalksPerFrame', `scene ${scene.entityId}: too many distinct collision masks`)
+        return null
+      }
+      colliderWalks++
+      meshes = Array.from(pickMeshesForMask(scene.rootNode, effectiveMask))
       // Refresh world matrices ONCE per mask per frame, before anything reads
       // `minimumWorld`/`maximumWorld` off these meshes.
       //
@@ -219,7 +253,7 @@ export function processRaycasts(scene: SceneContext) {
       // measured at 5000 meshes and 50 raycasts, 9.45ms here versus 16.71ms
       // there.
       for (const mesh of meshes) mesh.computeWorldMatrix(false)
-      meshesByMask.set(mask, meshes)
+      meshesByMask.set(effectiveMask, meshes)
     }
     return meshes
   }
@@ -306,7 +340,12 @@ export function processRaycasts(scene: SceneContext) {
           // makes a zero-range raycast cost exactly what a raycast against one collider
           // costs, so `maxRaycastIntersectionsPerFrame` bounds how many can be answered
           // per frame on every path rather than on all but this one.
-          intersectionBudget -= Math.max(1, meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK).length)
+          const zeroRangeMeshes = meshesForMask(raycast.collisionMask ?? DEFAULT_RAYCAST_MASK)
+          // Out of collider-walk allowance this frame: defer whole, exactly as the
+          // budget-exceeded branch below does, so a continuous raycast retries next
+          // frame rather than being answered from a candidate set we declined to build.
+          if (zeroRangeMeshes === null) break
+          intersectionBudget -= Math.max(1, zeroRangeMeshes.length)
           RaycastResult.createOrReplace(
             entity.entityId,
             raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
@@ -315,6 +354,9 @@ export function processRaycasts(scene: SceneContext) {
           // get a list of all possible meshes to project this ray to
           const mask = raycast.collisionMask ?? DEFAULT_RAYCAST_MASK
           const intersectableMeshes = meshesForMask(mask)
+          // See the zero-range branch: no allowance left to discover a new mask's
+          // candidates, so defer rather than guess.
+          if (intersectableMeshes === null) break
 
           // The MESH ceiling pays for the bounding-box scan below: one cheap
           // ray↔box test per candidate, whether or not it survives. Enforced
@@ -564,6 +606,20 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
   // Checked here rather than left to `enforceColliderBounds` to disable: that runs a
   // frame later at best, and only for a scene that has parcel metadata.
   if (!(min.x <= max.x) || !(min.y <= max.y) || !(min.z <= max.z)) return -1
+
+  // The RAY can be degenerate too, and this check only validated the BOX. A NaN ray
+  // makes every comparison below false in exactly the same way, so `tmin` stays 0 and
+  // the box is reported as containing the origin — admitting a candidate the ray cannot
+  // reach and handing it to the intersection. `computeRayDirection` now fails closed
+  // before a ray gets here; this keeps the prefilter honest on its own terms.
+  if (!Number.isFinite(ray.origin.x) || !Number.isFinite(ray.origin.y) || !Number.isFinite(ray.origin.z)) return -1
+  if (
+    !Number.isFinite(ray.direction.x) ||
+    !Number.isFinite(ray.direction.y) ||
+    !Number.isFinite(ray.direction.z)
+  ) {
+    return -1
+  }
 
   let tmin = 0
   let tmax = ray.length
@@ -909,6 +965,31 @@ function computeRayDirection(scene: SceneContext, raycast: PBRaycast, ray: Ray, 
   // forever, and an unthrottled scene-triggerable log is an amplification vector
   // (see CLAUDE.md). The absent RaycastResult is the signal.
   if (ray.direction.lengthSquared() === 0) return null
+
+  // FAIL CLOSED on anything non-finite, and note that the zero check above does NOT
+  // cover it: `lengthSquared()` of a NaN vector is NaN, and `NaN === 0` is false.
+  //
+  // Every input here is scene-controlled and unvalidated upstream — `originOffset`,
+  // `localDirection`/`globalDirection`/`globalTarget`, and the entity Transform feeding
+  // `absolutePosition` are all raw protobuf floats, so NaN and Infinity are reachable.
+  // A NaN origin or direction produced a Ray that looked ordinary and then FAILED OPEN
+  // everywhere downstream: `rayBoxEntry` only validates the BOX, so the candidate is
+  // admitted, and `intersectAnalyticSphere`'s rejections are all `<` or `>` comparisons
+  // that are false for NaN — so it returned a PHANTOM HIT with NaN distance, position
+  // and normal, which `pickClosest` then let win because `NaN < x` is false. Measured:
+  // NaN origin, NaN direction and Infinity origin each produced
+  // `HIT distance=NaN point=NaN,NaN,NaN` while the triangle path correctly missed.
+  //
+  // No result at all is the right answer, matching the malformed-direction case above:
+  // a ray that cannot be evaluated is not a ray. Deliberately unlogged for the same
+  // reason — a scene can hold a malformed CONTINUOUS raycast and reach this every frame.
+  if (
+    !Number.isFinite(ray.origin.x) || !Number.isFinite(ray.origin.y) || !Number.isFinite(ray.origin.z) ||
+    !Number.isFinite(ray.direction.x) || !Number.isFinite(ray.direction.y) || !Number.isFinite(ray.direction.z) ||
+    !Number.isFinite(ray.length)
+  ) {
+    return null
+  }
 
   return ray
 }
