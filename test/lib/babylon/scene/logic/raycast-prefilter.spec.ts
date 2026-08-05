@@ -54,13 +54,19 @@ describe('raycast prefilter and early-out', () => {
     engine.dispose()
   })
 
-  function fakeScene(meshes: AbstractMesh[], queryType: RaycastQueryType, maxDistance: number, onResult: (r: any) => void) {
+  function fakeScene(
+    meshes: AbstractMesh[],
+    queryType: RaycastQueryType,
+    maxDistance: number,
+    onResult: (r: any) => void,
+    globalDirection: Vector3 = new Vector3(0, 0, 1)
+  ) {
     const raycast = {
       queryType,
       continuous: false,
       timestamp: 0,
       collisionMask: MASK,
-      direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
+      direction: { $case: 'globalDirection', globalDirection },
       originOffset: undefined,
       maxDistance
     }
@@ -285,6 +291,61 @@ describe('raycast prefilter and early-out', () => {
     // budget and the second would be deferred to the next frame.
     it('should leave the frame enough budget for a second raycast', () => {
       expect(processedSecond).toBe(true)
+    })
+  })
+
+  // Every raycast fixture in this repo fired along +Z, so the slab test's three
+  // `if (near > far) swap` blocks — one per axis — had never executed once. They are
+  // reached only by a NEGATIVE direction component, which is what makes the near plane
+  // divide to a larger value than the far one, and a ray pointing down -X, -Y or -Z is
+  // completely ordinary scene code.
+  //
+  // Without the swap the axis it applies to yields `tmin > tmax` and `rayBoxEntry`
+  // returns -1, so the collider is not even a candidate: every negative-direction
+  // raycast in the scene silently reports nothing.
+  //
+  // One case per axis, because a single diagonal ray would pass with two of the three
+  // blocks broken.
+  describe.each([
+    ['-X', new Vector3(-1, 0, 0), new Vector3(-5, 0, 0), new Vector3(5, 0, 0)],
+    ['-Y', new Vector3(0, -1, 0), new Vector3(0, -5, 0), new Vector3(0, 5, 0)],
+    ['-Z', new Vector3(0, 0, -1), new Vector3(0, 0, -5), new Vector3(0, 0, 5)]
+  ])('when the ray travels along %s', (_axis, direction, ahead, behind) => {
+    let hits: any[]
+    let behindHits: any[]
+
+    beforeEach(() => {
+      const inFront = createBoxMesh(scene, 'ahead_collider')
+      inFront.position.copyFrom(ahead)
+      inFront.computeWorldMatrix(true)
+      setColliderMask(inFront, MASK)
+
+      hits = []
+      processRaycasts(fakeScene([inFront], RaycastQueryType.RQT_HIT_FIRST, 50, (r) => (hits = r.hits), direction))
+
+      // Control: the same collider on the OPPOSITE side must stay unreachable, so a
+      // swap that merely admits everything cannot pass either.
+      const back = createBoxMesh(scene, 'behind_collider')
+      back.position.copyFrom(behind)
+      back.computeWorldMatrix(true)
+      setColliderMask(back, MASK)
+
+      behindHits = []
+      processRaycasts(
+        fakeScene([back], RaycastQueryType.RQT_HIT_FIRST, 50, (r) => (behindHits = r.hits), direction)
+      )
+    })
+
+    it('should hit a collider that lies along it', () => {
+      expect(hits).toHaveLength(1)
+    })
+
+    it('should report the distance to its near face', () => {
+      expect(hits[0].length).toBeCloseTo(4.5, 5)
+    })
+
+    it('should not hit a collider behind the origin', () => {
+      expect(behindHits).toHaveLength(0)
     })
   })
 

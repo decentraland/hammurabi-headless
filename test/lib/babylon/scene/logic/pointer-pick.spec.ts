@@ -12,6 +12,7 @@ import {
   pickActivePointerEventsEntity,
   pickPointerEventsMesh
 } from '../../../../../src/lib/babylon/scene/logic/pointer-events'
+import { setColliderMask } from '../../../../../src/lib/babylon/scene/logic/colliders'
 import { pointerEventsResultComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events-result'
 import { Entity } from '../../../../../src/lib/decentraland/types'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../../../src/lib/decentraland/state'
@@ -458,6 +459,98 @@ testWithEngine(
 
       it('should hover nothing, because the wall is what the pointer reaches first', () => {
         expect(pickActivePointerEventsEntity($.scene)).toBeNull()
+      })
+    })
+
+    // The centre-screen pick is a full-scene CPU raycast — a predicate over every mesh,
+    // then triangle tests — and it runs every frame. Hover synthesis is its only
+    // consumer here, so a scene declaring no PointerEvents at all must not pay for it.
+    // Nothing exercised the skip: every other case in this file has pointer events, so
+    // the `return false` in `anySceneHasPointerEvents` never ran.
+    describe('when no loaded scene declares any pointer events', () => {
+      let pickSpy: jest.SpyInstance
+
+      beforeEach(() => {
+        // Clear any hover carried over from an earlier case: the early-out is
+        // deliberately skipped while something is still hovered, so that HOVER_LEAVE
+        // can fire after the last PointerEvents component disappears.
+        pickPointerEventsMesh($.scene)
+        pickSpy = jest.spyOn($.scene, 'pick')
+      })
+
+      afterEach(() => {
+        pickSpy.mockRestore()
+      })
+
+      it('should skip the full-scene pick entirely', () => {
+        pickPointerEventsMesh($.scene)
+        expect(pickSpy).not.toHaveBeenCalled()
+      })
+    })
+
+    // An occluder need not belong to an entity at all: `ambientLights.ts` masks a
+    // ground mesh that hangs off no BabylonEntity, so `getParentEntity` walks to the
+    // root and returns null. That return had never executed — the occlusion case above
+    // uses a CRDT-authored wall, which does have a parent entity.
+    describe('when the nearest occluder belongs to no entity', () => {
+      let ground: BABYLON.Mesh
+
+      beforeEach(async () => {
+        await putInteractiveBox(6)
+        ground = BABYLON.MeshBuilder.CreateBox('ground', { width: 8, height: 8, depth: 1 }, $.scene)
+        ground.position.set(0, 0, 3)
+        ground.computeWorldMatrix(true)
+        setColliderMask(ground, ColliderLayer.CL_PHYSICS)
+      })
+
+      afterEach(() => {
+        ground.dispose()
+      })
+
+      it('should hover nothing rather than treating it as interactable', () => {
+        expect(pickActivePointerEventsEntity($.scene)).toBeNull()
+      })
+    })
+
+    // The hovered entity has not CHANGED, so `hoverNewEntity` takes its early-return
+    // path — which still has to refresh `lastPickPoint`, because the entity (or the
+    // player) may have moved. Nothing exercised that branch: every other case in this
+    // file picks once, or picks a different entity the second time.
+    //
+    // Without the refresh a press reports where the entity USED to be, which is the
+    // same class of bug as the stale hover-leave, just harder to notice.
+    describe('when the same entity stays hovered but moves closer', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putInteractiveBox(5, [
+          { eventType: PointerEventType.PET_DOWN, interactionType: InteractionType.CURSOR, eventInfo: {} }
+        ])
+        pickPointerEventsMesh($.scene)
+
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, entity, ++timestamp, {
+              position: new Vector3(0, 0, 3),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .finish()
+        })
+        pickPointerEventsMesh($.scene)
+        interactWithScene(PointerEventType.PET_DOWN, InputAction.IA_PRIMARY)
+      })
+
+      // 1.5, not 2.5: `pickingInfo.distance` is measured along the PICKING ray, whose
+      // origin is the camera's NEAR PLANE (`FreeCamera.minZ` defaults to 1), not the
+      // camera position. The box's near face is at z=2.5, so 1.5 from a ray starting at
+      // z=1. Stale, it would report 3.5 — the near face of where the box used to be.
+      //
+      // (Only `hit.length` is ray-relative like this. The `max_distance` and
+      // `max_player_distance` checks measure from the player, so they are unaffected.)
+      it('should report the hit where the entity is now, not where it was', () => {
+        expect(resultsFor(entity)[0].hit.length).toBeCloseTo(1.5, 5)
       })
     })
   }

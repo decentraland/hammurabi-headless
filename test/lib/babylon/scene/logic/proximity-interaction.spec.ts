@@ -130,6 +130,29 @@ testWithEngine(
       })
     })
 
+    // The cone is tested on the FLATTENED direction, so looking up or down does not
+    // change who is in front of you. Every other fixture here sits at y=0 with the
+    // player at y=0, where flattening is a no-op — so keeping the y component left the
+    // whole suite green.
+    //
+    // Discriminating geometry: 2m up and 1m ahead. Flattened, the direction is straight
+    // ahead and the dot product is 1. Unflattened it is (0,2,1)/sqrt(5), whose dot with
+    // the player's forward is 0.447 — under cos(60 degrees) = 0.5, so the entity falls
+    // out of the cone and never fires.
+    describe('when the entity is in front of the player but well above them', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 2, 1), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should still fire, because the cone ignores elevation', () => {
+        expect(resultsFor(entity).map((r) => r.state)).toEqual([PointerEventType.PET_PROXIMITY_ENTER])
+      })
+    })
+
     describe('when the entity is behind the player', () => {
       let entity: Entity
 

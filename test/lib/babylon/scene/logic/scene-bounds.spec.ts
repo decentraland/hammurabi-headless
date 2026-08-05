@@ -85,6 +85,31 @@ testWithEngine(
       })
     })
 
+    // ALL FOUR horizontal planes, because the containment test is four separate
+    // comparisons and only the eastern one was exercised: deleting the western check
+    // outright left the whole suite green. A scene reaching over its neighbour's land
+    // is the griefing vector here, and it does not care which way it reaches.
+    describe.each([
+      ['east', new Vector3(40, 1, 8)],
+      ['west', new Vector3(-40, 1, 8)],
+      ['south', new Vector3(8, 1, 40)],
+      ['north', new Vector3(8, 1, -40)]
+    ])('when a collider is pushed onto the %s neighbours parcel', (_where, position) => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putColliderAt(position)
+      })
+
+      it('should be disabled, as the client disables it', () => {
+        expect(colliderOf(entity).isEnabled(false)).toBe(false)
+      })
+
+      it('should stop being a raycast candidate', () => {
+        expect(isCandidate(entity)).toBe(false)
+      })
+    })
+
     describe('when a collider is pushed onto a neighbouring parcel', () => {
       let entity: Entity
 
@@ -113,6 +138,29 @@ testWithEngine(
     // — exactly what the client's EXTEND_AMOUNT comment ("to prevent on-boundary
     // flickering (float accuracy)") exists to stop. On an authoritative server the
     // consequence is players falling through a floor that every client keeps.
+    // The pass runs over every collider every frame, so it only writes when the verdict
+    // CHANGES. Without that guard it calls setEnabled on all of them on all frames,
+    // which marks each node dirty for nothing at the 50_000-collider ceiling. Nothing
+    // pinned it: replacing the condition with `true` left every case green, because
+    // assigning the same value is behaviourally invisible.
+    describe('when a settled collider is checked again on a later frame', () => {
+      let setEnabled: jest.SpyInstance
+
+      beforeEach(async () => {
+        const entity = await putColliderAt(new Vector3(8, 1, 8))
+        setEnabled = jest.spyOn(colliderOf(entity), 'setEnabled')
+        enforceColliderBounds($.ctx)
+      })
+
+      afterEach(() => {
+        setEnabled.mockRestore()
+      })
+
+      it('should leave it alone rather than re-writing the same verdict', () => {
+        expect(setEnabled).not.toHaveBeenCalled()
+      })
+    })
+
     describe('when a collider exactly fills its parcel', () => {
       let entity: Entity
 

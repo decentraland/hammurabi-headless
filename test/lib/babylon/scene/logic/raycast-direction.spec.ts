@@ -160,5 +160,47 @@ testWithEngine(
         expect(reportedDirection().map((n) => Math.round(n * 1000) / 1000)).toEqual([0, 0, -1])
       })
     })
+
+    // The MISSING-target fallback, which had never executed: `targetEntity` naming an
+    // entity that does not exist falls back to the scene root's world position, matching
+    // the client's `sceneRootPos - entityPosition` (its own source marks that "(why?)",
+    // and we match it deliberately).
+    //
+    // Fired from a NON-ZERO scene-local position on purpose. From the scene origin the
+    // fallback target IS the ray origin, the direction is a zero vector, and
+    // computeRayDirection correctly produces no ray at all — so the branch would run
+    // and still assert nothing about where it points.
+    describe('when a scene asks for a targetEntity that does not exist', () => {
+      beforeEach(async () => {
+        raycastEntity = nextEntityId++ as Entity
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, raycastEntity, ++timestamp, transform(new Vector3(5, 0, 0)))
+            .put(raycastComponent, raycastEntity, ++timestamp, {
+              timestamp: 1,
+              maxDistance: 100,
+              queryType: RaycastQueryType.RQT_HIT_FIRST,
+              continuous: false,
+              collisionMask: undefined,
+              direction: { $case: 'targetEntity', targetEntity: 60_000 as Entity }
+            } as any)
+            .finish()
+        })
+        processRaycasts($.ctx)
+      })
+
+      it('should point back towards the scene root rather than producing no ray', () => {
+        expect(reportedDirection().map((n) => Math.round(n * 1000) / 1000)).toEqual([-1, 0, 0])
+      })
+
+      // `raycast_hit.proto` says positions are relative to the SCENE, and this fixture
+      // is at parcel 1,1 so the two spaces differ by (16, 0, 16). Nothing asserted the
+      // conversion: leaving `globalOrigin` in world space passed every case, because
+      // every other spec runs at parcel 0,0 where the offset is zero.
+      it('should report the ray origin in scene space, not world space', () => {
+        const result = $.ctx.components[raycastResultComponent.componentId].getOrNull(raycastEntity) as any
+        expect([result.globalOrigin.x, result.globalOrigin.y, result.globalOrigin.z]).toEqual([5, 0, 0])
+      })
+    })
   }
 )

@@ -239,6 +239,16 @@ testWithEngine(
         expect([capsule.position.x, capsule.position.z]).toEqual([5, 7])
       })
 
+      // The VERTICAL half is a separate assertion because it is a separate mistake, and
+      // asserting only x and z let it through: the atom holds the CharacterController
+      // capsule positioned by its CENTRE, so the feet are 0.85m below it, and this
+      // capsule's own centre then sits half of ITS height (0.8m) above the feet. Two
+      // different halves, and dropping the whole conversion moves the capsule by only
+      // 0.05m — far too little for the ray fixtures to notice.
+      it('should stand the capsule on the players feet, not on their centre', () => {
+        expect(capsuleOf(StaticEntities.PlayerEntity)!.position.y).toBeCloseTo(0.8, 5)
+      })
+
       it('should not report a hit where the player no longer is', async () => {
         await fireAtTheOrigin(ColliderLayer.CL_MAIN_PLAYER)
         expect(resultOf(raycastEntity).hits).toHaveLength(0)
