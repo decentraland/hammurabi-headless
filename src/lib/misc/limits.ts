@@ -87,6 +87,9 @@ export interface Limits {
   maxRaycastTrianglesPerFrame: number
   maxRaycastHitsPerQuery: number
   maxColliderTreeDepth: number
+
+  // --- Pointer events ---
+  maxProximityCandidates: number
 }
 
 const KB = 1024
@@ -241,7 +244,21 @@ const KNOBS: readonly Knob[] = [
   // Transform.parent. The walk here is iterative so the stack cannot overflow at
   // all; this bounds the WORK instead, and sits far above any plausible scene
   // hierarchy.
-  { key: 'maxColliderTreeDepth', env: 'HAMMURABI_MAX_COLLIDER_TREE_DEPTH', def: 1_024, min: 1 }
+  { key: 'maxColliderTreeDepth', env: 'HAMMURABI_MAX_COLLIDER_TREE_DEPTH', def: 1_024, min: 1 },
+
+  // Entities examined per frame by the PROXIMITY pointer-event scan. Only entities
+  // that DECLARE a proximity entry are examined at all (SceneContext.proximityEntities
+  // indexes them at component-apply time), so an ordinary scene is nowhere near this
+  // and one that uses no proximity pays nothing.
+  //
+  // It exists because the scan is otherwise O(proximity entities) per frame per scene
+  // inside a quota-free lateUpdate, and entities are bounded only by maxLiveEntities.
+  // Deliberately NOT the client's 32: that number is the size of its
+  // `OverlapSphereNonAlloc` buffer, which a physics query fills with colliders already
+  // within 3m, so copying it here — where the scan is over every declared trigger
+  // regardless of distance — would silently stop a legitimate scene's 33rd trigger from
+  // ever firing.
+  { key: 'maxProximityCandidates', env: 'HAMMURABI_MAX_PROXIMITY_CANDIDATES', def: 1_024, min: 1 }
 ]
 
 const logger = createLogger('⚙️ Limits')

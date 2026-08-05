@@ -3,10 +3,10 @@ import { InputAction, InteractionType, PointerEventType } from '@dcl/protocol/ou
 import { PBPointerEvents } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events.gen'
 import type { SceneContext } from '../scene-context'
 import { Entity } from '../../../decentraland/types'
-import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { playerEntityAtom } from '../../../decentraland/state'
 import { limitLogger } from '../../../misc/limit-logger'
+import { limits } from '../../../misc/limits'
 import { interactionTypeOf, resolvePointerInfo } from './pointer-event-filter'
 
 /**
@@ -41,20 +41,6 @@ import { interactionTypeOf, resolvePointerInfo } from './pointer-event-filter'
 /** Radius searched around the player, from the client's PROXIMITY_DEFAULT_MAX_DISTANCE. */
 const PROXIMITY_SEARCH_RADIUS = 3
 
-/**
- * Ceiling on entities examined per frame, mirroring the client's fixed 32-collider
- * `OverlapSphereNonAlloc` buffer.
- *
- * Without it this scanned EVERY entity holding a PointerEvents component, every frame,
- * per scene, inside a quota-free `lateUpdate`: measured 3.86ms at 3000 entities, so
- * ~130ms/frame at the 100_000 entity cap. The client never examines more than 32
- * candidates because its buffer cannot hold more.
- *
- * Examined, not matched: entities are skipped cheaply before counting, so the ceiling
- * bounds real work rather than truncating at an arbitrary point in the map.
- */
-const PROXIMITY_MAX_CANDIDATES = 32
-
 /** Horizontal field of view in front of the player, from the client's constant. */
 const PROXIMITY_FOV_ANGLE_DEGREES = 120
 
@@ -65,28 +51,72 @@ const FOV_HALF_ANGLE_COS = Math.cos(((PROXIMITY_FOV_ANGLE_DEGREES / 2) * Math.PI
 const proximityTargets = new WeakMap<SceneContext, Entity>()
 
 /**
- * Smallest `maxPlayerDistance` and highest `priority` across an entity's PROXIMITY
- * entries, matching the client's `GetMaxDistanceAndHighestPriority`.
+ * One indexed proximity entity: its candidacy inputs, precomputed when the component
+ * value changes, plus that value so emission needs no component lookup.
+ *
+ * Carrying the value is also what keeps this module from importing
+ * `pointerEventsComponent`, which imports this one to maintain the index — a cycle
+ * through two module-level `const`s that would resolve differently depending on which
+ * side loaded first.
+ */
+export type ProximityIndexEntry = { maxPlayerDistance: number; priority: number; value: PBPointerEvents }
+
+/**
+ * Smallest `maxPlayerDistance` and highest `priority` for an entity, matching the
+ * client's `GetMaxDistanceAndHighestPriority`.
  *
  * The MINIMUM distance, not the maximum: the entity becomes a candidate at the
  * tightest range any of its entries asks for. Each entry is still filtered
  * individually when the result is emitted, so a wider entry is not lost — this only
  * decides candidacy.
+ *
+ * Over EVERY entry, not just the PROXIMITY ones. The client loops
+ * `pointerEvents.PointerEvents` with no interaction-type filter at all
+ * (`PlayerOriginatedProximitySystem.cs:217-241`), and an unset `max_player_distance`
+ * reads 0 — so an entity declaring `[{CURSOR, PET_DOWN}, {PROXIMITY,
+ * PET_PROXIMITY_ENTER, maxPlayerDistance: 3}]` gets `min(0, 3) = 0` on the client and
+ * is never a candidate at all. Filtering to PROXIMITY entries first gave it 3 and fired
+ * proximity events that no player's client fires, for what is a very ordinary way to
+ * author an entity that is both clickable and proximity-aware.
+ *
+ * Returns null when the entity declares no PROXIMITY entry, which is what keeps it out
+ * of the index. KNOWN DIVERGENCE: in the client such an entity can still WIN the single
+ * proximity slot (and so block a further one) while emitting nothing. Indexing every
+ * PointerEvents entity to reproduce that would reinstate the per-frame scan over all of
+ * them that the index exists to remove.
  */
-function proximityCriteria(value: PBPointerEvents): { maxPlayerDistance: number; priority: number } | null {
+function proximityCriteria(value: PBPointerEvents): ProximityIndexEntry | null {
   let maxPlayerDistance = Number.POSITIVE_INFINITY
   let priority = 0
-  let found = false
+  let declaresProximity = false
 
   for (const entry of value.pointerEvents) {
-    if (interactionTypeOf(entry) !== InteractionType.PROXIMITY) continue
-    found = true
+    if (interactionTypeOf(entry) === InteractionType.PROXIMITY) declaresProximity = true
     const info = resolvePointerInfo(entry.eventInfo)
     if (info.maxPlayerDistance < maxPlayerDistance) maxPlayerDistance = info.maxPlayerDistance
     if (info.priority > priority) priority = info.priority
   }
 
-  return found ? { maxPlayerDistance, priority } : null
+  return declaresProximity ? { maxPlayerDistance, priority, value } : null
+}
+
+/**
+ * Keeps `context.proximityEntities` in step with an entity's PointerEvents value.
+ *
+ * Called from the component applier, so the per-frame scan iterates only entities that
+ * actually declare a proximity trigger and never recomputes their criteria.
+ *
+ * Without the index the scan walked every entity holding ANY PointerEvents component
+ * and built a criteria object per entity per frame, inside a quota-free `lateUpdate`.
+ * Measured: 29.45ms/frame at 50_000 out-of-range proximity entities, and 7.79ms/frame
+ * for a scene using no proximity at all — the latter simply for having 50_000 clickable
+ * entities. Out-of-range is the normal case, not the hostile one: most pointer-event
+ * entities are further than 3m from the player.
+ */
+export function updateProximityIndex(context: SceneContext, entityId: Entity, value: PBPointerEvents | undefined) {
+  const criteria = value ? proximityCriteria(value) : null
+  if (criteria) context.proximityEntities.set(entityId, criteria)
+  else context.proximityEntities.delete(entityId)
 }
 
 /**
@@ -95,7 +125,6 @@ function proximityCriteria(value: PBPointerEvents): { maxPlayerDistance: number;
  */
 export function updateProximityInteractions(context: SceneContext): void {
   const player = playerEntityAtom.getOrNull()
-  const PointerEvents = context.components[pointerEventsComponent.componentId]
 
   const winner = player
     ? findProximityTarget(context, player.absolutePosition, playerForward(player.absoluteRotationQuaternion))
@@ -107,16 +136,20 @@ export function updateProximityInteractions(context: SceneContext): void {
   // LEAVE targets the entity being left, so it fires BEFORE the swap; ENTER targets
   // the new one and fires after. Same ordering trap as the hover path, which had the
   // comparison after the assignment and so could never fire ENTER.
+  //
+  // A previous target whose component has since been deleted or rewritten without any
+  // proximity entry is simply gone from the index, and gets no LEAVE — the same
+  // outcome the component lookup gave, since emission filters to PROXIMITY entries.
   if (previous !== undefined) {
-    const leaving = PointerEvents.getOrNull(previous)
-    if (leaving) emitProximityResults(context, previous, leaving, PointerEventType.PET_PROXIMITY_LEAVE)
+    const leaving = context.proximityEntities.get(previous)
+    if (leaving) emitProximityResults(context, previous, leaving.value, PointerEventType.PET_PROXIMITY_LEAVE)
   }
 
   if (winner === null) {
     proximityTargets.delete(context)
   } else {
     proximityTargets.set(context, winner)
-    emitProximityResults(context, winner, PointerEvents.getOrNull(winner)!, PointerEventType.PET_PROXIMITY_ENTER)
+    emitProximityResults(context, winner, context.proximityEntities.get(winner)!.value, PointerEventType.PET_PROXIMITY_ENTER)
   }
 }
 
@@ -139,21 +172,24 @@ function playerForward(rotation: Quaternion | undefined | null): Vector3 | null 
 }
 
 function findProximityTarget(context: SceneContext, playerPosition: Vector3, forward: Vector3 | null): Entity | null {
-  const PointerEvents = context.components[pointerEventsComponent.componentId]
-
   let bestEntity: Entity | null = null
   let bestPriority = -1
   let bestDistance = Number.POSITIVE_INFINITY
   let examined = 0
 
-  for (const [entityId, value] of PointerEvents.iterator()) {
-    if (examined >= PROXIMITY_MAX_CANDIDATES) {
-      limitLogger.hit('maxLiveEntities', `scene ${context.entityId}: proximity candidates truncated`)
+  // Only entities that declare a PROXIMITY entry, with their criteria already computed
+  // — see updateProximityIndex.
+  for (const [entityId, criteria] of context.proximityEntities) {
+    // Counted BEFORE the distance test, so this bounds the SCAN. Counting it after,
+    // as an in-range ceiling, bounded only the candidates that were already cheap and
+    // left the expensive part — every out-of-range entity's lookup, world-matrix
+    // refresh and vector maths — completely unbounded, which is the opposite of what
+    // the ceiling was added for.
+    if (examined >= limits.maxProximityCandidates) {
+      limitLogger.hit('maxProximityCandidates', `scene ${context.entityId}: proximity scan truncated`)
       break
     }
-
-    const criteria = proximityCriteria(value)
-    if (!criteria) continue
+    examined++
 
     const entity = context.getEntityOrNull(entityId)
     if (!entity) continue
@@ -161,12 +197,13 @@ function findProximityTarget(context: SceneContext, playerPosition: Vector3, for
     const toTarget = entity.absolutePosition.subtract(playerPosition)
     const distance = toTarget.length()
 
+    // `Number.isFinite` rather than leaning on the comparisons below: a NaN distance
+    // (reachable, transforms are unvalidated readFloat32) makes every `>` false, so the
+    // entity passes the range test, passes the cone test, and can then win on
+    // `distance >= bestDistance` being false too — becoming the proximity target from
+    // anywhere, regardless of where the player is.
+    if (!Number.isFinite(distance)) continue
     if (distance > PROXIMITY_SEARCH_RADIUS || distance > criteria.maxPlayerDistance) continue
-
-    // Counted only once a candidate is genuinely in range, so the ceiling bounds the
-    // expensive tail (cone test, priority compare) rather than cutting the scan at an
-    // arbitrary point in the component map.
-    examined++
 
     // Cone test on the FLATTENED direction, so looking up or down does not change
     // who is in front of you. A candidate exactly on the player is skipped rather

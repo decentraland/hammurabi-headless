@@ -12,6 +12,7 @@ import { pointerEventsResultComponent } from '../../../../../src/lib/decentralan
 import { updateProximityInteractions } from '../../../../../src/lib/babylon/scene/logic/proximity-interaction'
 import { playerEntityAtom } from '../../../../../src/lib/decentraland/state'
 import { Entity } from '../../../../../src/lib/decentraland/types'
+import { limits } from '../../../../../src/lib/misc/limits'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
 // InteractionType.PROXIMITY was entirely unimplemented: entries of that type never
@@ -292,23 +293,32 @@ testWithEngine(
       })
     })
 
-    // Without a ceiling this scanned EVERY entity holding a PointerEvents component,
-    // every frame, per scene, in a quota-free lateUpdate: 3.86ms at 3000 entities, so
-    // ~130ms/frame at the 100_000 entity cap. The client never examines more than 32,
-    // because that is the size of its OverlapSphereNonAlloc buffer.
+    // The scan is bounded by entities EXAMINED, counted before the distance test.
+    //
+    // That ordering is the whole point and it was wrong: counting only candidates
+    // already found to be IN RANGE bounded the cheap half and left the expensive half —
+    // an entity lookup, a world-matrix refresh and vector maths for every OUT-of-range
+    // entity — completely unbounded. Out-of-range is the ordinary case, since most
+    // triggers are further than 3m from the player. Measured before the fix: 29.45ms
+    // per frame at 50_000 out-of-range proximity entities, with the ceiling never
+    // firing once.
     //
     // Observable through the ceiling's consequence: the highest-priority entity is
-    // declared LAST, past the limit, so it is never examined and cannot win. Without
-    // the ceiling it would.
-    describe('when more proximity candidates are in range than the ceiling allows', () => {
+    // declared LAST, past the limit, so it is never examined and cannot win.
+    describe('when more proximity candidates exist than the scan ceiling allows', () => {
       let beyondTheCeiling: Entity
+      let restore: number
 
       beforeEach(async () => {
-        // 33 ordinary candidates fill the 32-candidate allowance.
-        for (let i = 0; i < 33; i++) {
-          await putProximityEntity(new Vector3(0, 0, 2), [proximityEntry()])
+        restore = limits.maxProximityCandidates
+        limits.maxProximityCandidates = 2
+
+        // Fill the allowance with entities that are OUT of range, so the test also
+        // fails if the count moves back behind the distance check.
+        for (let i = 0; i < 2; i++) {
+          await putProximityEntity(new Vector3(0, 0, 50), [proximityEntry()])
         }
-        // Declared last, and the only one that would win on priority.
+        // Declared last, in range, and the only one that would win on priority.
         beyondTheCeiling = await putProximityEntity(new Vector3(0, 0, 1), [
           proximityEntry({ eventInfo: { maxPlayerDistance: 3, priority: 99 } })
         ])
@@ -316,8 +326,40 @@ testWithEngine(
         updateProximityInteractions($.ctx)
       })
 
+      afterEach(() => {
+        limits.maxProximityCandidates = restore
+      })
+
       it('should never reach the entity past the ceiling, however high its priority', () => {
         expect(resultsFor(beyondTheCeiling)).toEqual([])
+      })
+    })
+
+    // The client takes the minimum max_player_distance over EVERY entry, with no
+    // interaction-type filter, and an unset one reads 0 — so an entity that is both
+    // clickable and proximity-aware is never a proximity candidate there at all.
+    // Filtering to PROXIMITY entries first made this server fire proximity events that
+    // no player's client fires, for an entirely ordinary way to author an entity.
+    describe('when an entity mixes a cursor entry with a proximity entry', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 1), [
+          // eventInfo deliberately EMPTY: an unset max_player_distance reads 0, so the
+          // client's minimum over both entries is 0 and the entity never qualifies.
+          proximityEntry({
+            interactionType: InteractionType.CURSOR,
+            eventType: PointerEventType.PET_DOWN,
+            eventInfo: {}
+          }),
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3 } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should not become a proximity candidate, as it cannot on the client', () => {
+        expect(resultsFor(entity)).toEqual([])
       })
     })
 
