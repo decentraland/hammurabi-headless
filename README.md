@@ -123,6 +123,54 @@ PRIVATE_KEY=0x<your-hex-key> hammurabi --position=0,0
 | `PRIVATE_KEY` | _(generated guest identity)_ | Private key for authentication (hex). Equivalent to `--private-key`. |
 | `HAMMURABI_FPS` | `30` | Renderer tick rate, clamped to `[1, 60]`. |
 | `HAMMURABI_XHR_DEBUG` | `off` | Per-request asset-fetch logging. Enable with `1`/`true`/`yes`/`on`. |
+| `HAMMURABI_DEBUG_VIEWER` | `off` | Serve the live scene-graph viewer (see below) on this port. `1`/`true`/`yes`/`on` means port 8080. |
+| `HAMMURABI_DEBUG_VIEWER_HZ` | `15` | Viewer snapshot rate, clamped to `[1, 60]`. |
+| `HAMMURABI_DEBUG_VIEWER_HOST` | `127.0.0.1` | Interface the viewer binds to. Anything other than loopback exposes the scene's live state to the network. |
+
+### Debug viewer — seeing what the server sees
+
+The server is headless, but it still maintains a complete 3D scene graph: entity
+transforms, colliders, glTF placements, its own player capsule and one capsule per
+connected peer. `HAMMURABI_DEBUG_VIEWER` opens a read-only window onto exactly that
+state.
+
+```bash
+npx sdk-commands start                                     # scene realm on :8000
+HAMMURABI_DEBUG_VIEWER=8080 node dist/cli.js --realm=http://localhost:8000
+open http://localhost:8080
+```
+
+This is **not** the same as watching a normal client connected to the same room. A
+client renders its own reconstruction of whatever the scene chose to sync, so it
+cannot show server-only entities, colliders, or a server/client divergence — which
+are the things worth looking at on an authoritative server. The viewer reads the
+host's own scene graph directly.
+
+| | |
+| --- | --- |
+| **Camera** | `fly` (default: WASD + `E`/`Q` up-down, drag to look, `shift` ×5, `ctrl` ×¼), `follow` (orbits the selection — drag to swing around it, wheel to zoom; any movement key hands back to `fly` from where you were), `eyes` (stands in the selection, looking where its yaw points) |
+| **Going places** | Click any row in the go-to list to select and jump behind it. `F` = server player, `N` = next peer, `G` = re-frame the selection. `follow`/`eyes` ride whatever is selected, so you can watch a specific peer. |
+| **Capsules** | green = this server's player entity; blue = a connected peer, one per avatar-range entity, positioned from that peer's comms packets |
+| **Orange wireframe** | a shape the scene declared but the host does not build (e.g. a cylinder `MeshRenderer`) — a real server behavior, surfaced rather than hidden |
+| **Grey wireframe** | a glTF the browser is still fetching; red = it failed to load in the browser (the server may still have it — `.gltf` files with external dependencies cannot be resolved by the viewer) |
+| **Teal wireframe** | mesh colliders, when enabled |
+
+#### Enabling it from a scene project
+
+`sdk-commands start` spawns the multiplayer server itself and builds its argv
+(`--realm=<url>` only), so a CLI flag would be unreachable from a scene. It does
+pass `process.env` through to the spawned process, which is why the switch is an
+environment variable — set it on the scene's normal start command:
+
+```bash
+HAMMURABI_DEBUG_VIEWER=8080 npm run start          # macOS / Linux
+$env:HAMMURABI_DEBUG_VIEWER=8080; npm run start    # PowerShell
+```
+
+Off unless the variable is set, loopback-only by default, and read-only: it never
+writes scene state, is skipped entirely when no browser is attached, and a failure
+inside it can never take down the render loop or the scene. Snapshots are capped at
+5000 entities; overflow is reported in the HUD rather than silently dropped.
 
 ### Resource & DoS limits
 
