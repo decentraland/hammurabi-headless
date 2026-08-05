@@ -30,6 +30,14 @@ const CYLINDER_DEFAULT_RADIUS = 0.5
 const PRIMITIVE_UNIT_SIZE = 1
 
 /**
+ * Radius of the unit sphere every SphereMesh builds, matching the client's
+ * `PrimitivesSize.SPHERE_RADIUS = 0.5f`. Exported so the analytic raycast path can
+ * describe the same sphere the tessellated mesh approximates — the two must agree
+ * or a scene gets different hits depending on which path ran.
+ */
+export const PRIMITIVE_SPHERE_RADIUS = PRIMITIVE_UNIT_SIZE / 2
+
+/**
  * Radial segments per cylinder, matching the reference client's
  * `CylinderVariantsFactory.VERTICES_NUM = 50`. Babylon's default is 24, which is
  * not a cosmetic difference on a headless authoritative server: the chord error of

@@ -9,6 +9,7 @@ import { globalCoordinatesToSceneCoordinates, sceneCoordinatesToBabylonGlobalCoo
 import { BabylonEntity } from '../BabylonEntity'
 import { pickMeshesForMask } from './colliders'
 import { isAvatarCapsule, isRemotePlayerEntity } from './avatar-colliders'
+import { intersectAnalyticSphere } from './analytic-colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
 import { limits } from '../../../misc/limits'
 import { limitLogger } from '../../../misc/limit-logger'
@@ -558,6 +559,24 @@ function rayBoxEntry(ray: Ray, min: Vector3, max: Vector3): number {
  * nothing short-circuits and this degrades to testing every candidate, exactly as
  * before. `RQT_QUERY_ALL` genuinely needs every hit and gets no early-out at all.
  */
+/**
+ * Intersects one candidate, in closed form when its exact shape is known.
+ *
+ * A SphereMesh collider is analytically a sphere — the 1296 triangles are this
+ * server's approximation of it, and the client does not tessellate at all
+ * (`SetupSphereCollider` assigns a PhysX `SphereCollider`). So the analytic answer
+ * is both the faster one and the one every player's client computes.
+ *
+ * `intersectAnalyticSphere` returns null for anything it cannot solve exactly —
+ * a non-sphere, or a sphere under non-uniform scale, which is an ellipsoid — and
+ * those fall through to the triangle path unchanged.
+ */
+function intersectCandidate(ray: Ray, mesh: BABYLON.AbstractMesh): BABYLON.Nullable<BABYLON.PickingInfo> {
+  const analytic = intersectAnalyticSphere(ray, mesh)
+  if (analytic) return analytic
+  return ray.intersectsMesh(mesh, false)
+}
+
 function intersectCandidates(
   ray: Ray,
   candidates: BABYLON.AbstractMesh[],
@@ -565,7 +584,12 @@ function intersectCandidates(
   queryType: RaycastQueryType
 ): { results: BABYLON.PickingInfo[]; refundedTriangles: number } {
   if (queryType !== RaycastQueryType.RQT_HIT_FIRST) {
-    return { results: ray.intersectsMeshes(candidates, false), refundedTriangles: 0 }
+    const all: BABYLON.PickingInfo[] = []
+    for (const mesh of candidates) {
+      const info = intersectCandidate(ray, mesh)
+      if (info?.hit) all.push(info)
+    }
+    return { results: all, refundedTriangles: 0 }
   }
 
   // Indices sorted by entry distance; the meshes themselves are left alone so the
@@ -579,8 +603,8 @@ function intersectCandidates(
   for (const index of order) {
     if (entries[index] >= nearestHit) break
     tested++
-    const info = ray.intersectsMesh(candidates[index], false)
-    if (info.hit) {
+    const info = intersectCandidate(ray, candidates[index])
+    if (info?.hit) {
       results.push(info)
       if (info.distance < nearestHit) nearestHit = info.distance
     }
