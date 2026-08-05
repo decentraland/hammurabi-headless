@@ -2,12 +2,13 @@ import { Matrix, Node, PickingInfo, PointerEventTypes, Ray, Scene, Vector3 } fro
 import { BabylonEntity } from '../BabylonEntity'
 import { getColliderLayers } from './colliders'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
-import { InputAction, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
+import { InputAction, InteractionType, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
 import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
 import { pickingToRaycastHit, raycastResultFromRay } from './raycasts'
-import { loadedScenesByEntityId } from '../../../decentraland/state'
+import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
+import { resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
 
 // returns true if the entity has PointerEvents
 export function entityHasPointerEvents(entity: BabylonEntity) {
@@ -56,6 +57,17 @@ export function pickPointerEventsMesh(scene: Scene) {
   hoverNewEntity(pickedEntity, scene)
 }
 
+/**
+ * Reach of the centre-screen pointer pick, matching the client's
+ * `PlayerOriginatedRaycastSystem.MAX_RAYCAST_DISTANCE`.
+ *
+ * The pick was previously unbounded — `scene.pick` tests the whole scene — so an
+ * entity a kilometre away could be hovered and clicked here while no client would
+ * reach it. The per-entry `maxDistance` filter below would reject most of those
+ * anyway, but bounding the pick means the work is not done in the first place.
+ */
+export const MAX_POINTER_PICK_DISTANCE = 100
+
 export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | null {
   const camera = scene.activeCamera
 
@@ -80,13 +92,27 @@ export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | nul
     camera
   );
 
-  if (pickInfo.pickedMesh && pickInfo.pickedPoint) {
+  if (pickInfo.pickedMesh && pickInfo.pickedPoint && pickInfo.distance <= MAX_POINTER_PICK_DISTANCE) {
     lastPickPoint = pickInfo
     const parentEntity = getParentEntity(pickInfo.pickedMesh)
     return parentEntity
   }
 
   return null
+}
+
+/**
+ * Distance from the local player to a point, in world units, or Infinity when the
+ * player's position is not known yet.
+ *
+ * Feeds the protocol's `max_player_distance` check. Infinity rather than 0 for the
+ * unknown case: 0 would make every proximity-style entry qualify before the player
+ * even exists.
+ */
+function distanceFromPlayer(point: Vector3): number {
+  const player = playerEntityAtom.getOrNull()
+  if (!player) return Number.POSITIVE_INFINITY
+  return Vector3.Distance(player.absolutePosition, point)
 }
 
 function addPointerEventResult(entity: BabylonEntity, result: Omit<PBPointerEventsResult, "tickNumber">) {
@@ -111,13 +137,13 @@ function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
   // previous version compared lastPickedEntity !== entity AFTER assigning it,
   // so HOVER_ENTER could never fire.)
   if (lastPickedEntity) {
-    interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.UNRECOGNIZED)
+    interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.IA_ANY)
   }
 
   lastPickedEntity = entity
 
   if (entity) {
-    interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.UNRECOGNIZED)
+    interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.IA_ANY)
   }
 
   // headless: no hover-text label UI to update
@@ -128,17 +154,44 @@ function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
  * it will trigger the corresponding PointerEvent
  */
 export function interactWithScene(eventType: PointerEventType, action: InputAction) {
-  if (!lastPickedEntity?.appliedComponents.pointerEvents || !lastPickPoint) return
+  const pointerEvents = lastPickedEntity?.appliedComponents.pointerEvents
+  if (!lastPickedEntity || !pointerEvents || !lastPickPoint) return
 
   const context = lastPickedEntity.context.deref()
   if (!context) return
 
-  // TODO: check for max distance and input filtering
+  // Every declared entry is consulted now. This used to emit ONE result for the
+  // hovered entity with whatever button the caller passed, reading nothing off the
+  // component — so an entity asking only for {PET_DOWN, IA_PRIMARY} still received
+  // PET_UP with IA_POINTER, and any entity in view was clickable from any distance.
+  const cameraDistance = lastPickPoint.distance
+  const playerDistance = distanceFromPlayer(lastPickPoint.pickedPoint!)
 
-  addPointerEventResult(lastPickedEntity, {
-    state: eventType,
-    button: action,
-    hit: pickingToRaycastHit(context, lastPickPoint, lastPickPoint.ray!),
-    timestamp: globalLamportTimestamp++,
-  })
+  const firing = selectFiringEntries(
+    pointerEvents.pointerEvents,
+    eventType,
+    action,
+    cameraDistance,
+    playerDistance,
+    InteractionType.CURSOR
+  )
+  // NOTE for anyone mutation-testing this: deleting this early return is an
+  // EQUIVALENT mutant, not a gap. The loop below iterates `firing`, so an empty
+  // `firing` emits nothing either way — the return only avoids building `hit`.
+  if (!firing.length) return
+
+  const hit = pickingToRaycastHit(context, lastPickPoint, lastPickPoint.ray!)
+
+  for (const entry of firing) {
+    addPointerEventResult(lastPickedEntity, {
+      state: eventType,
+      // The ENTRY's button, not the raw input. For a real press that is the same
+      // value unless the entry said IA_ANY; for a HOVER it is the only sensible
+      // answer, and it replaces the `InputAction.UNRECOGNIZED` (-1) this used to
+      // send — a ts-proto "unknown enum" sentinel that no scene can match on.
+      button: resolvePointerInfo(entry.eventInfo).button,
+      hit,
+      timestamp: globalLamportTimestamp++
+    })
+  }
 }

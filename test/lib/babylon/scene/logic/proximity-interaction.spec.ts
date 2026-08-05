@@ -1,0 +1,329 @@
+import { Quaternion, TransformNode, Vector3 } from '@babylonjs/core'
+import { Scene } from '@dcl/schemas'
+import {
+  InputAction,
+  InteractionType,
+  PointerEventType
+} from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
+import { PBPointerEvents_Entry } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events.gen'
+import { transformComponent } from '../../../../../src/lib/decentraland/sdk-components/transform-component'
+import { pointerEventsComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events'
+import { pointerEventsResultComponent } from '../../../../../src/lib/decentraland/sdk-components/pointer-events-result'
+import { updateProximityInteractions } from '../../../../../src/lib/babylon/scene/logic/proximity-interaction'
+import { playerEntityAtom } from '../../../../../src/lib/decentraland/state'
+import { Entity } from '../../../../../src/lib/decentraland/types'
+import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
+
+// InteractionType.PROXIMITY was entirely unimplemented: entries of that type never
+// fired, so a scene using proximity triggers (a door that greets you, a sign that
+// lights up as you approach) got nothing here while working for every real player.
+//
+// Geometry matched from the client's PlayerOriginatedProximitySystem: a 3-metre search
+// radius, a 120-degree HORIZONTAL cone in front of the player, gated by the entry's
+// maxPlayerDistance, highest priority winning and the closest breaking ties.
+
+const proximityEntry = (over: Partial<PBPointerEvents_Entry> = {}): PBPointerEvents_Entry => ({
+  eventType: PointerEventType.PET_PROXIMITY_ENTER,
+  interactionType: InteractionType.PROXIMITY,
+  eventInfo: { maxPlayerDistance: 3 },
+  ...over
+})
+
+testWithEngine(
+  'proximity interactions',
+  {
+    baseUrl: '/',
+    entity: { content: [], metadata: {} as Scene, type: 'scene' },
+    urn: 'proximity'
+  },
+  ($) => {
+    let timestamp = 0
+    let nextEntityId = 700
+    let previousPlayer: TransformNode | null
+    let created: Entity[] = []
+
+    /** Puts the local player at a world position, facing +Z. */
+    function placePlayer(position: Vector3, facing = Quaternion.Identity()): void {
+      playerEntityAtom.swap({
+        absolutePosition: position,
+        absoluteRotationQuaternion: facing
+      } as unknown as TransformNode)
+    }
+
+    async function putProximityEntity(position: Vector3, entries: PBPointerEvents_Entry[]): Promise<Entity> {
+      const entity = nextEntityId++ as Entity
+      created.push(entity)
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder()
+          .put(transformComponent, entity, ++timestamp, {
+            position,
+            rotation: Quaternion.Identity(),
+            scale: new Vector3(1, 1, 1),
+            parent: 0 as Entity
+          })
+          .put(pointerEventsComponent, entity, ++timestamp, { pointerEvents: entries } as any)
+          .finish()
+      })
+      return entity
+    }
+
+    // PointerEventsResult is a GROW-ONLY SET, so `get` returns a ReadonlySet rather
+    // than an array — an earlier version of this helper flatMapped the iterator and
+    // got the Set object itself as a single element, which read as one result whose
+    // every field was undefined.
+    const resultsFor = (entity: Entity): any[] =>
+      Array.from($.ctx.components[pointerEventsResultComponent.componentId].get(entity) ?? [])
+
+    beforeEach(() => {
+      $.startEngine()
+      previousPlayer = playerEntityAtom.getOrNull()
+      created = []
+    })
+
+    afterEach(async () => {
+      if (previousPlayer) playerEntityAtom.swap(previousPlayer)
+
+      // Entities outlive each test in this shared SceneContext, and a proximity
+      // entity left at the same spot keeps WINNING: iteration is insertion-ordered
+      // and ties go to the first seen, so the previous test's entity stayed the
+      // target and the current test's never fired at all. Tear them down.
+      if (!created.length) return
+      const teardown = new CrdtBuilder()
+      for (const entity of created) teardown.deleteEntity(entity)
+      await $.ctx.crdtSendToRenderer({ data: teardown.finish() })
+      // Drop the remembered target too, so the next test starts from "nobody near".
+      updateProximityInteractions($.ctx)
+    })
+
+    describe('when the player stands in front of a proximity entity, within range', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 2), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should report a PET_PROXIMITY_ENTER, which never fired before', () => {
+        expect(resultsFor(entity).map((r) => r.state)).toEqual([PointerEventType.PET_PROXIMITY_ENTER])
+      })
+
+      // A proximity event has no ray and no intersection, so there is nothing to
+      // report. Inventing a synthetic ray would hand scenes an origin and direction
+      // no pointer ever travelled.
+      it('should report no hit, because nothing was intersected', () => {
+        expect(resultsFor(entity)[0].hit).toBeUndefined()
+      })
+
+      it('should report the entry button rather than a sentinel', () => {
+        expect(resultsFor(entity)[0].button).toBe(InputAction.IA_ANY)
+      })
+    })
+
+    describe('when the entity is behind the player', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        // Player faces +Z (identity), entity sits at -Z: outside the 120-degree cone.
+        entity = await putProximityEntity(new Vector3(0, 0, -2), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should not fire, since proximity is limited to a forward cone', () => {
+        expect(resultsFor(entity)).toEqual([])
+      })
+    })
+
+    describe('when the entity is beyond the entry maxPlayerDistance', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 2.5), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 1 } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should not fire', () => {
+        expect(resultsFor(entity)).toEqual([])
+      })
+    })
+
+    describe('when the entity is outside the search radius entirely', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        // maxPlayerDistance is generous, but the 3m search radius still applies —
+        // matching the client, which only overlaps a 3m sphere in the first place.
+        entity = await putProximityEntity(new Vector3(0, 0, 10), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 100 } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should not fire', () => {
+        expect(resultsFor(entity)).toEqual([])
+      })
+    })
+
+    describe('when the player walks away from an entity already in proximity', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 2), [
+          proximityEntry(),
+          proximityEntry({ eventType: PointerEventType.PET_PROXIMITY_LEAVE })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+
+        placePlayer(new Vector3(0, 0, -50))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should report ENTER then LEAVE, in that order', () => {
+        expect(resultsFor(entity).map((r) => r.state)).toEqual([
+          PointerEventType.PET_PROXIMITY_ENTER,
+          PointerEventType.PET_PROXIMITY_LEAVE
+        ])
+      })
+    })
+
+    describe('when the player stays in proximity across several frames', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 2), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        for (let frame = 0; frame < 5; frame++) updateProximityInteractions($.ctx)
+      })
+
+      // ENTER is a transition, not a state. Re-firing every frame would flood the
+      // scene's result stream for as long as the player stands still.
+      it('should report ENTER once, not once per frame', () => {
+        expect(resultsFor(entity)).toHaveLength(1)
+      })
+    })
+
+    describe('when two proximity entities are in range at different priorities', () => {
+      let low: Entity
+      let high: Entity
+
+      beforeEach(async () => {
+        // The LOW priority one is deliberately CLOSER, so distance alone would pick
+        // it and only priority can produce the right answer.
+        low = await putProximityEntity(new Vector3(0, 0, 1), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3, priority: 1 } })
+        ])
+        high = await putProximityEntity(new Vector3(0, 0, 2), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3, priority: 9 } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should pick the higher priority even though it is further away', () => {
+        expect(resultsFor(high)).toHaveLength(1)
+      })
+
+      it('should leave the nearer, lower-priority entity alone', () => {
+        expect(resultsFor(low)).toEqual([])
+      })
+    })
+
+    // ORDER MATTERS and an earlier version of this file missed it. With the
+    // high-priority entity declared FIRST, a lower-priority candidate seen afterwards
+    // must be rejected outright — dropping the `priority < best` guard still passed
+    // when the low-priority one came first, because the tie-break happened to sort it
+    // out. Verified by mutation.
+    describe('and the higher-priority entity is seen before a closer lower-priority one', () => {
+      let high: Entity
+      let low: Entity
+
+      beforeEach(async () => {
+        high = await putProximityEntity(new Vector3(0, 0, 2.5), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3, priority: 9 } })
+        ])
+        low = await putProximityEntity(new Vector3(0, 0, 1), [
+          proximityEntry({ eventInfo: { maxPlayerDistance: 3, priority: 1 } })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should keep the higher-priority entity as the target', () => {
+        expect(resultsFor(high)).toHaveLength(1)
+      })
+
+      it('should not let the closer, lower-priority one take over', () => {
+        expect(resultsFor(low)).toEqual([])
+      })
+    })
+
+    describe('when two equal-priority entities are in range', () => {
+      let near: Entity
+      let far: Entity
+
+      beforeEach(async () => {
+        far = await putProximityEntity(new Vector3(0, 0, 2.5), [proximityEntry()])
+        near = await putProximityEntity(new Vector3(0, 0, 1), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      it('should pick the closest', () => {
+        expect(resultsFor(near)).toHaveLength(1)
+      })
+
+      it('should pick exactly one, not both', () => {
+        expect(resultsFor(far)).toEqual([])
+      })
+    })
+
+    describe('when an entity declares only CURSOR entries', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 2), [
+          proximityEntry({ interactionType: InteractionType.CURSOR })
+        ])
+        placePlayer(new Vector3(0, 0, 0))
+        updateProximityInteractions($.ctx)
+      })
+
+      // Proximity must not hijack cursor entries; those belong to the pointer pick.
+      it('should not fire a proximity event for it', () => {
+        expect(resultsFor(entity)).toEqual([])
+      })
+    })
+
+    // Everything above drives `updateProximityInteractions` directly, because
+    // babylon-test-helper mocks `ctx.updateStaticEntities` — which is where the
+    // production wiring lives. Verified by mutation: removing the call from
+    // scene-context.ts left every case above green while proximity never ran at all
+    // in production.
+    describe('when the scene runs its real per-frame static-entity update', () => {
+      let entity: Entity
+
+      beforeEach(async () => {
+        entity = await putProximityEntity(new Vector3(0, 0, 2), [proximityEntry()])
+        placePlayer(new Vector3(0, 0, 0))
+
+        const spy = $.ctx.updateStaticEntities as unknown as jest.SpyInstance
+        spy.mockRestore()
+        $.ctx.updateStaticEntities()
+      })
+
+      afterEach(() => {
+        jest.spyOn($.ctx, 'updateStaticEntities').mockImplementation(() => void 0)
+      })
+
+      it('should fire proximity without anything calling the system by hand', () => {
+        expect(resultsFor(entity)).toHaveLength(1)
+      })
+    })
+  }
+)

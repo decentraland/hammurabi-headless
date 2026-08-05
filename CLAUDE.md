@@ -236,8 +236,29 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   sphere/box colliders are tessellated where the client uses analytic PhysX
   primitives; a negative cylinder radius is taken as its magnitude where the client
   builds a self-intersecting hourglass; raycast ordering is a rotation cursor where
-  the client sorts by partition distance (no equivalent here — no camera); and
-  `CL_PLAYER` hits are never reported because no avatar colliders exist. Raycasting
+  the client sorts by partition distance (no equivalent here — no camera).
+  **PointerEvents (`pointer-event-filter.ts`, `proximity-interaction.ts`).** These
+  were almost entirely unimplemented: the old code read ZERO fields off
+  `PBPointerEvents_Info` and never consulted the entry list, so it fired one result
+  for whatever entity was hovered, with whatever button the caller passed, at ANY
+  distance — interactions no client can produce. Now every declared entry is matched
+  on `eventType` and `button` (default `IA_ANY`, since `IA_POINTER` is 0 and would be
+  indistinguishable from unset), gated by the distance rules `pointer_events.proto`
+  spells out (only `max_distance` -> camera check; only `max_player_distance` ->
+  player check; BOTH -> either passing is enough, an OR not an AND; NEITHER -> as if
+  `max_distance` were 10), resolved by `priority` (higher wins, ties all fire), and
+  reported with the ENTRY's button — replacing `InputAction.UNRECOGNIZED` (-1), a
+  ts-proto "unknown enum" sentinel no scene can match on. `maxDistance` is read with
+  `??` and never `||`: a scene asking for 0 means "only when touching". The pointer
+  pick is capped at `MAX_POINTER_PICK_DISTANCE` (100, the client's
+  `MAX_RAYCAST_DISTANCE`) where `scene.pick` would otherwise test the whole scene.
+  `InteractionType.PROXIMITY` entries now fire `PET_PROXIMITY_ENTER`/`_LEAVE` from
+  player nearness (3m search radius, 120-degree horizontal cone, highest priority
+  then closest wins, one target at a time); a proximity result carries NO `hit`,
+  because there is no ray and inventing one would report a direction no pointer
+  travelled. Known divergence: the client also raycasts to a proximity candidate and
+  skips it when occluded — deliberately not replicated, since it needs a per-candidate
+  raycast against the whole collider set and the occlusion is cosmetic. Raycasting
   is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
   because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
   every primitive collider was a 12-triangle box; a sphere is 1296. Those two bound

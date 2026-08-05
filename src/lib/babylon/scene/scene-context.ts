@@ -32,6 +32,7 @@ import { pointerEventsComponent } from '../../decentraland/sdk-components/pointe
 import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
 import { updateAvatarColliders } from './logic/avatar-colliders'
 import { enforceColliderBounds } from './logic/scene-bounds'
+import { updateProximityInteractions } from './logic/proximity-interaction'
 import { isDeniedSceneCrdtOp, sanitizeSceneCrdt } from './logic/scene-crdt-guard'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
@@ -776,6 +777,10 @@ export class SceneContext implements EngineApiInterface {
     // for avatar movement, matching the client. Runs after the avatar capsules so a
     // player who steps outside is not itself disabled — see scene-bounds.ts.
     enforceColliderBounds(this)
+    // InteractionType.PROXIMITY pointer events fire on player nearness rather than
+    // pointing, and had no implementation at all — a scene using proximity triggers
+    // got nothing here while they worked for every real player.
+    updateProximityInteractions(this)
   }
 
   // impl RuntimeApi {
