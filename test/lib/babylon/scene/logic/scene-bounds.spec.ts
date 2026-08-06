@@ -9,6 +9,7 @@ import { pickMeshesForMask } from '../../../../../src/lib/babylon/scene/logic/co
 import { PLAYER_CAPSULE_HALF_HEIGHT, StaticEntities } from '../../../../../src/lib/babylon/scene/logic/static-entities'
 import { playerEntityAtom } from '../../../../../src/lib/decentraland/state'
 import { Entity } from '../../../../../src/lib/decentraland/types'
+import { limits } from '../../../../../src/lib/misc/limits'
 import { CrdtBuilder, testWithEngine } from '../../babylon-test-helper'
 
 // Nothing enforced scene bounds here. A scene could put a collider over a
@@ -445,6 +446,230 @@ testWithEngine(
   ($) => {
     it('should still build a bounding box, so its colliders can be bounds-checked', () => {
       expect($.ctx.boundingBox === undefined).toBe(false)
+    })
+  }
+)
+
+// The bounds check used to walk and re-measure EVERY collider under the scene root on
+// EVERY frame, with no budget of any kind — 18.72ms/frame at 50_000 colliders, on a tree
+// the scene itself sizes. It is now a cached list spent through a round-robin cursor, and
+// both halves of that need pinning: the cursor must make progress, and the cache must not
+// let the cursor be reset.
+testWithEngine(
+  'scene collider bounds budget',
+  {
+    baseUrl: '/',
+    entity: {
+      content: [],
+      metadata: { scene: { base: '1,1', parcels: ['1,1'] } } as unknown as Scene,
+      type: 'scene'
+    },
+    urn: 'scene-bounds-budget'
+  },
+  ($) => {
+    let timestamp = 0
+    let nextEntityId = 900
+    let restore: number
+    let colliders: Entity[]
+    // Entities outlive a test in this shared SceneContext, and a leftover collider is
+    // indistinguishable from one of this test's own to a cursor spending one check per
+    // frame — the first version of this fixture measured the PREVIOUS test's colliders
+    // and reported the cursor stuck.
+    let created: Entity[]
+
+    /** Positions `entity`'s collider without running the bounds check. */
+    async function moveTo(entity: Entity, position: Vector3): Promise<void> {
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder()
+          .put(transformComponent, entity, ++timestamp, {
+            position,
+            rotation: Quaternion.Identity(),
+            scale: new Vector3(1, 1, 1),
+            parent: 0 as Entity
+          })
+          .finish()
+      })
+    }
+
+    async function putCollider(position: Vector3): Promise<Entity> {
+      const entity = nextEntityId++ as Entity
+      created.push(entity)
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder()
+          .put(transformComponent, entity, ++timestamp, {
+            position,
+            rotation: Quaternion.Identity(),
+            scale: new Vector3(1, 1, 1),
+            parent: 0 as Entity
+          })
+          .put(meshColliderComponent, entity, ++timestamp, {
+            collisionMask: MASK,
+            mesh: { $case: 'box', box: {} }
+          } as any)
+          .finish()
+      })
+      return entity
+    }
+
+    const disabledCount = () =>
+      colliders.filter((e) => !$.ctx.entities.get(e)!.appliedComponents.meshCollider!.collider!.isEnabled(false))
+        .length
+
+    beforeEach(async () => {
+      $.startEngine()
+      created = []
+      restore = limits.maxColliderBoundsChecksPerFrame
+      // Placed INSIDE the parcel and settled, so every one of them starts enabled and
+      // only the move below can disable it.
+      colliders = [
+        await putCollider(new Vector3(8, 1, 8)),
+        await putCollider(new Vector3(9, 1, 8)),
+        await putCollider(new Vector3(10, 1, 8))
+      ]
+      enforceColliderBounds($.ctx)
+      for (const entity of colliders) await moveTo(entity, new Vector3(40, 1, 8))
+      limits.maxColliderBoundsChecksPerFrame = 1
+    })
+
+    afterEach(async () => {
+      limits.maxColliderBoundsChecksPerFrame = restore
+      const teardown = new CrdtBuilder()
+      for (const entity of created) teardown.deleteEntity(entity)
+      await $.ctx.crdtSendToRenderer({ data: teardown.finish() })
+    })
+
+    describe('when three out-of-bounds colliders share a budget of one check per frame', () => {
+      beforeEach(() => {
+        enforceColliderBounds($.ctx)
+      })
+
+      it('should disable exactly one of them, spending the budget rather than ignoring it', () => {
+        expect(disabledCount()).toBe(1)
+      })
+
+      describe('and two more frames pass', () => {
+        beforeEach(() => {
+          enforceColliderBounds($.ctx)
+          enforceColliderBounds($.ctx)
+        })
+
+        // A cursor that restarted at the head every frame would re-check the same
+        // collider forever and the other two would never be examined.
+        it('should have disabled all three, because the cursor advances', () => {
+          expect(disabledCount()).toBe(3)
+        })
+      })
+    })
+
+    describe('and a throwaway collider is added between every frame', () => {
+      beforeEach(async () => {
+        // Each ADD bumps the collider membership version, so the cached list is REBUILT
+        // before every check. That is the condition a naive cursor cannot survive: reset
+        // it to the head and only the first `budget` entries are ever examined, resume it
+        // by identity and it chases the newly appended tail forever. Both were measured
+        // here — the identity-resume version disabled 0 of 3.
+        //
+        // Two checks per frame, not one: a new collider has to be checked too (it could
+        // have been created out of bounds), so it spends budget. At a budget of one the
+        // throwaway consumes the whole allowance and progress stalls by construction —
+        // see the header note on the creation rate this knob has to exceed.
+        limits.maxColliderBoundsChecksPerFrame = 2
+        for (let frame = 0; frame < 3; frame++) {
+          await putCollider(new Vector3(8, 1, 8))
+          enforceColliderBounds($.ctx)
+        }
+      })
+
+      it('should still have disabled all three, because the round survives the rebuild', () => {
+        expect(disabledCount()).toBe(3)
+      })
+    })
+  }
+)
+
+// What the round STAMP buys, which a scan index alone does not. Inserting a collider
+// ahead of the scan shifts every later entry forward, so entries the scan has already
+// passed move back INTO its path. Re-checking them is not merely redundant — it is budget
+// the frame then cannot spend on the collider that was just created, which is the one
+// that might have been created out of bounds.
+//
+// Its own engine block, deliberately. The sweep's scan position is per-SceneContext state
+// that outlives a test, so run inside the shared fixture above this measured whatever the
+// previous test left behind and passed against a mutant that ignores the stamp entirely.
+testWithEngine(
+  'scene collider bounds insertion ahead of the scan',
+  {
+    baseUrl: '/',
+    entity: {
+      content: [],
+      metadata: { scene: { base: '1,1', parcels: ['1,1'] } } as unknown as Scene,
+      type: 'scene'
+    },
+    urn: 'scene-bounds-insertion'
+  },
+  ($) => {
+    let timestamp = 0
+    let nextEntityId = 950
+    let restore: number
+    let inserted: Entity
+
+    async function putCollider(position: Vector3, parent: Entity): Promise<Entity> {
+      const entity = nextEntityId++ as Entity
+      await $.ctx.crdtSendToRenderer({
+        data: new CrdtBuilder()
+          .put(transformComponent, entity, ++timestamp, {
+            position,
+            rotation: Quaternion.Identity(),
+            scale: new Vector3(1, 1, 1),
+            parent
+          })
+          .put(meshColliderComponent, entity, ++timestamp, {
+            collisionMask: MASK,
+            mesh: { $case: 'box', box: {} }
+          } as any)
+          .finish()
+      })
+      return entity
+    }
+
+    describe('when a new out-of-bounds collider is inserted ahead of the scan', () => {
+      beforeEach(async () => {
+        $.startEngine()
+        restore = limits.maxColliderBoundsChecksPerFrame
+
+        // Three settled colliders, all checked once, leaving the scan at the end of the
+        // list — the state in which the next frame has nothing new to do.
+        const settled: Entity[] = []
+        for (const x of [8, 9, 10]) settled.push(await putCollider(new Vector3(x, 1, 8), 0 as Entity))
+        enforceColliderBounds($.ctx)
+        for (const entity of settled) {
+          await $.ctx.crdtSendToRenderer({
+            data: new CrdtBuilder()
+              .put(transformComponent, entity, ++timestamp, {
+                position: new Vector3(40, 1, 8),
+                rotation: Quaternion.Identity(),
+                scale: new Vector3(1, 1, 1),
+                parent: 0 as Entity
+              })
+              .finish()
+          })
+        }
+
+        limits.maxColliderBoundsChecksPerFrame = 2
+        // Parented to the FIRST collider entity, so it lands second in the pre-order walk
+        // (measured: A,T,B,C) rather than appended at the end, pushing the two entries the
+        // scan has already passed further along.
+        inserted = await putCollider(new Vector3(40, 1, 8), settled[0])
+        enforceColliderBounds($.ctx)
+      })
+
+      afterEach(() => {
+        limits.maxColliderBoundsChecksPerFrame = restore
+      })
+
+      it('should be disabled on that frame, because entries already checked are skipped for free', () => {
+        expect($.ctx.entities.get(inserted)!.appliedComponents.meshCollider!.collider!.isEnabled(false)).toBe(false)
+      })
     })
   }
 )

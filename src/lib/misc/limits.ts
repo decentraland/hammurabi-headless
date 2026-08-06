@@ -89,6 +89,7 @@ export interface Limits {
   maxColliderTreeDepth: number
   maxColliderWalksPerFrame: number
   maxColliderTreeVisitsPerFrame: number
+  maxColliderBoundsChecksPerFrame: number
 
   // --- Pointer events ---
   maxProximityCandidates: number
@@ -278,6 +279,7 @@ const KNOBS: readonly Knob[] = [
   // affordable — a legitimate scene with a single collision mask is never truncated —
   // while a second maximal walk in the same frame is not.
   { key: 'maxColliderTreeVisitsPerFrame', env: 'HAMMURABI_MAX_COLLIDER_TREE_VISITS_PER_FRAME', def: 100_000, min: 1 },
+  { key: 'maxColliderBoundsChecksPerFrame', env: 'HAMMURABI_MAX_COLLIDER_BOUNDS_CHECKS_PER_FRAME', def: 8192, min: 1 },
 
   // Entities examined per frame by the PROXIMITY pointer-event scan. Only entities
   // that DECLARE a proximity entry are examined at all (SceneContext.proximityEntities

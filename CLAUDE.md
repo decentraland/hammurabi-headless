@@ -84,6 +84,12 @@ it previously reported under `maxLiveEntities`, and since the throttle state is
 keyed per `Limits` field, proximity truncation SUPPRESSED the genuine entity-cap
 signal for the whole window (and vice versa) while pointing the operator at a knob
 that could not move it.
+`maxColliderBoundsChecksPerFrame` is logged even though it only DEFERS work, which
+is the exception to the rule above and the reason is the point: what it defers is a
+GRIEFING DEFENCE, not the scene's own query. Past it, a collider that has left the
+scene's parcels keeps absorbing raycasts and blocking movement on land the scene does
+not own for up to `ceil(colliders / budget)` frames — a neighbour observes the
+deferral, so an operator has a reason to raise the knob.
 `profileFetchCooldownMs` is normal debounce (deliberately not logged), whereas
 `emoteMetadataFetchCooldownMs` IS logged because tripping it substitutes a
 possibly-wrong `loop` flag into what the scene observes — closer to a truncation
@@ -272,6 +278,20 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   counter here (advancing only on a hover CHANGE or a press) against the tick
   (advancing 30x a second) made a single proximity event kill every hover and click in
   the scene for the life of the process — executed against the real `@dcl/ecs`.
+  **Collider bounds enforcement is BUDGETED** (`scene-bounds.ts`). It used to walk and
+  re-measure every collider under the scene root every frame with no budget of any kind
+  (2.60ms at 10_000 colliders, 18.72ms at 50_000, on a tree the scene sizes). The walk is
+  now cached and rebuilt only when collider MEMBERSHIP changes
+  (`colliderMembershipVersion`, bumped in `setColliderMask` and the dispose hook — the two
+  doors every membership change goes through), and the per-collider work is spent through
+  a round-robin sweep bounded by `maxColliderBoundsChecksPerFrame` (1.20ms / 7.19ms). The
+  sweep's fairness is tracked by a per-mesh ROUND STAMP, not by an index: a scene chooses
+  where its new colliders land in the walk order and can bump the version every frame, so
+  an index reset on rebuild re-checks the same prefix forever and one resuming by identity
+  chases the newly appended tail — both measured disabling 0 of 3 out-of-bounds colliders.
+  An already-stamped mesh is skipped WITHOUT spending budget, so inserting ahead of the
+  scan delays nothing. Residual: a NEW collider must be checked too, so a scene creating
+  colliders faster than the budget per frame delays re-checks of existing ones.
   **`updateInteractionSystems` runs BEFORE `processRaycasts`** (`scene-context.ts`):
   avatar capsules, then bounds enforcement, then proximity. Hanging them off
   `updateStaticEntities` put them AFTER, so every raycast answered against the
@@ -287,6 +307,20 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   A PRESS emits ONE result however many entries match (the client fills presses once
   per entity, outside its entry loop); only hover emits per entry.
   PROXIMITY candidacy takes the minimum `max_player_distance` and maximum `priority`
+  The pointer PICK shares the raycast core's ceilings but must spend the triangle
+  one INCREMENTALLY, in box-entry order, exactly as `RQT_HIT_FIRST` does: it is a
+  nearest-hit query, so the walk stops once the best hit is nearer than the next box
+  can begin and the candidates behind it are never tested. Summing the whole set and
+  refusing it as a lump made a cheap interactable under the crosshair vanish whenever
+  anything expensive sat behind it (measured: a 12-triangle box at 5m unhoverable
+  because a 200-triangle cylinder 45m away pushed the sum over). Exhaustion still
+  hovers NOTHING — the walk only stops on cost while an untested box still begins
+  nearer than the best hit, so the answer is not proven. Discovery's acceptance
+  predicate (`isPointerOccluder`) is handed to `pickMeshesForMask` rather than applied
+  to its output, so a mesh it rejects never charges the RESULT budget: the mask must
+  name `CL_PLAYER` for remote avatar capsules, and `collisionMask` is raw scene input,
+  so scene-authored CL_PLAYER-only colliders could otherwise spend the whole allowance
+  on their way to being discarded and truncate discovery before a real target.
   over EVERY entry, not just the proximity ones — the client applies no
   interaction-type filter, and an unset `max_player_distance` reads 0, so an entity
   that is both clickable and proximity-aware is never a candidate there. Entities

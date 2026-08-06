@@ -100,11 +100,36 @@ function registerDisposeHook(mesh: AbstractMesh) {
     const last: number | undefined = (mesh as any)[colliderSymbol]
     if (last !== undefined) applyLayerDelta(last, -1)
     floorMeshes.delete(mesh)
+    colliderMembershipGeneration++
   })
 }
 
 export function colliderLayerUnion(): number {
   return layerUnionCache
+}
+
+let colliderMembershipGeneration = 0
+
+/**
+ * Bumped whenever the set of meshes that ARE colliders can have changed, so a consumer
+ * caching a collected list knows when to rebuild it.
+ *
+ * Every membership change goes through exactly two doors — `setColliderMask` (a mesh
+ * becoming a collider, or its layers going to CL_NONE, which is the same thing to a
+ * consumer that filters on `getColliderLayers(node) !== 0`) and the dispose hook. That
+ * is the whole invariant `scene-bounds.ts`'s cache rests on: miss a door and a collider
+ * goes permanently unchecked, which is the griefing hole that module exists to close.
+ *
+ * Deliberately NOT bumped on re-parenting. A `Transform.parent` change moves a collider
+ * within its own scene's tree — the parent is an entity id in the same CRDT — so the set
+ * under any given scene root is unchanged.
+ *
+ * A counter rather than per-scene bookkeeping: `setColliderMask` is called from places
+ * that have no `SceneContext` to hand (ambientLights, AssetManager), and a rebuild is
+ * cheap next to being wrong.
+ */
+export function colliderMembershipVersion(): number {
+  return colliderMembershipGeneration
 }
 
 export function setColliderMask(mesh: AbstractMesh, layers: number) {
@@ -115,6 +140,7 @@ export function setColliderMask(mesh: AbstractMesh, layers: number) {
   if (previous !== undefined) applyLayerDelta(previous, -1)
   applyLayerDelta(layers, +1)
   registerDisposeHook(mesh)
+  colliderMembershipGeneration++
 
   ;(mesh as any)[colliderSymbol] = layers
 
@@ -178,7 +204,8 @@ export type ColliderWalkBudget = {
 export function pickMeshesForMask(
   entity: BabylonEntity,
   mask: number,
-  budget?: ColliderWalkBudget
+  budget?: ColliderWalkBudget,
+  accept?: (mesh: AbstractMesh) => boolean
 ): Iterable<AbstractMesh> {
   if (!mask) return []
 
@@ -224,7 +251,19 @@ export function pickMeshesForMask(
       node !== entity &&
       node instanceof AbstractMesh &&
       node.isEnabled(false) &&
-      bitIntersectsAndContainsAny(getColliderLayers(node), mask)
+      bitIntersectsAndContainsAny(getColliderLayers(node), mask) &&
+      // The caller's own acceptance rule, applied BEFORE the result budget is charged.
+      //
+      // A mask is a coarse filter: the pointer path has to name CL_PLAYER so remote
+      // avatar capsules are found, but a SCENE collider carrying CL_PLAYER alone is not a
+      // capsule and carries no CL_POINTER, so the pointer rejects it afterwards. Charged
+      // first, those rejects spent the result allowance on their way to being discarded —
+      // and `collisionMask` is raw scene input, so a scene could park enough of them to
+      // truncate discovery and make hover return null before a real target was reached.
+      //
+      // The VISIT allowance is still charged for them, and correctly so: it bounds the
+      // walk itself, which has to touch a node to know what it is.
+      (!accept || accept(node))
     ) {
       results.push(node)
       // Past what the caller can afford to intersect: it will answer empty, so there is

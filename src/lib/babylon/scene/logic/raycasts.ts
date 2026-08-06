@@ -854,14 +854,23 @@ export function prefilterCandidates(
  * mode already visits candidates in box-entry order and stops once the best hit is
  * nearer than the next box can begin, which is the early-out `Scene.prototype.pick`
  * lacks entirely (it tests every mesh and takes the minimum).
+ *
+ * `budget` is the SAME incremental spend the raycast path uses, and passing it is the
+ * point: a nearest-hit query does not have to afford the whole candidate set, only the
+ * prefix of it that proves the answer. Charging the set as a lump — which the pointer
+ * pick used to do before calling this — let one far, expensive collider hide a cheap
+ * one directly under the crosshair, since the sum went over the ceiling while the hit
+ * was already settled by the first candidate tested. The caller reads `exhausted` to
+ * tell "nothing is there" from "we stopped before we could know".
  */
 export function nearestHitAlongRay(
   ray: Ray,
   candidates: BABYLON.AbstractMesh[],
   entries: number[],
-  radii: number[]
+  radii: number[],
+  budget?: TriangleSpend
 ): BABYLON.Nullable<BABYLON.PickingInfo> {
-  const { results } = intersectCandidates(ray, candidates, entries, radii, RaycastQueryType.RQT_HIT_FIRST)
+  const { results } = intersectCandidates(ray, candidates, entries, radii, RaycastQueryType.RQT_HIT_FIRST, budget)
   const closest = pickClosest(results)
   if (!closest) return null
 

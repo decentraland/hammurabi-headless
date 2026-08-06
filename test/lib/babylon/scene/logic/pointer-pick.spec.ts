@@ -854,6 +854,89 @@ testWithEngine(
       })
     })
 
+    // A CL_PLAYER-only SCENE collider is not an avatar capsule and carries no
+    // CL_POINTER, so `isPointerOccluder` rejects it — but discovery names CL_PLAYER
+    // (for remote-avatar capsules) and counts every match against the result budget
+    // BEFORE the predicate runs. The mask is raw scene input, so a scene could spend
+    // the whole pointer budget on geometry that can never be hovered or occlude.
+    describe('when scene-authored CL_PLAYER-only colliders crowd the tree', () => {
+      let target: Entity
+      let restore: number
+
+      beforeEach(async () => {
+        target = await putInteractiveBox(9)
+        for (let i = 0; i < 6; i++) {
+          const filler = nextEntityId++ as Entity
+          created.push(filler)
+          await $.ctx.crdtSendToRenderer({
+            data: new CrdtBuilder()
+              .put(transformComponent, filler, ++timestamp, {
+                position: new Vector3(0, 0, 2 + i * 0.2),
+                rotation: BABYLON.Quaternion.Identity(),
+                scale: new Vector3(1, 1, 1),
+                parent: 0 as Entity
+              })
+              .put(meshColliderComponent, filler, ++timestamp, {
+                collisionMask: ColliderLayer.CL_PLAYER,
+                mesh: { $case: 'box', box: {} }
+              } as any)
+              .finish()
+          })
+        }
+        restore = limits.maxRaycastIntersectionsPerFrame
+        limits.maxRaycastIntersectionsPerFrame = 3
+      })
+
+      afterEach(() => {
+        limits.maxRaycastIntersectionsPerFrame = restore
+      })
+
+      it('should still hover the target, because they never enter the result budget', () => {
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).toBe(target)
+      })
+    })
+
+    // A nearest-hit query does not need to test what it can prove it does not need.
+    // The raycast HIT_FIRST path spends its triangle budget incrementally in box-entry
+    // order and stops once the best hit is nearer than the next box can begin; the
+    // pointer pick summed the whole set up front and refused it wholesale, so a far,
+    // expensive collider could hide a cheap one directly under the crosshair.
+    describe('and an expensive collider sits far behind a cheap one', () => {
+      let near: Entity
+      let restore: number
+
+      beforeEach(async () => {
+        near = await putInteractiveBox(5)
+        const far = nextEntityId++ as Entity
+        created.push(far)
+        await $.ctx.crdtSendToRenderer({
+          data: new CrdtBuilder()
+            .put(transformComponent, far, ++timestamp, {
+              position: new Vector3(0, 0, 50),
+              rotation: BABYLON.Quaternion.Identity(),
+              scale: new Vector3(1, 1, 1),
+              parent: 0 as Entity
+            })
+            .put(meshColliderComponent, far, ++timestamp, {
+              collisionMask: ColliderLayer.CL_POINTER,
+              mesh: { $case: 'cylinder', cylinder: {} }
+            } as any)
+            .finish()
+        })
+        // Enough for the near box (12), nowhere near enough for the cylinder (200).
+        restore = limits.maxRaycastTrianglesPerFrame
+        limits.maxRaycastTrianglesPerFrame = 100
+      })
+
+      afterEach(() => {
+        limits.maxRaycastTrianglesPerFrame = restore
+      })
+
+      it('should hover the near entity, whose hit is proven before the cost is reached', () => {
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).toBe(near)
+      })
+    })
+
     // Physics-only colliders must not be able to EXHAUST discovery either. They cannot
     // block or receive the pointer, but while the discovery mask still named CL_PHYSICS
     // they were collected — spending the visit/result budget on their way to being

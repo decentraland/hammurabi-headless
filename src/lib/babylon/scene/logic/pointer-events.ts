@@ -10,11 +10,11 @@ import { pointerEventsComponent } from '../../../decentraland/sdk-components/poi
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
 import {
-  candidateTriangleCost,
   nearestHitAlongRay,
   pickingToRaycastHit,
   prefilterCandidates,
-  raycastResultFromRay
+  raycastResultFromRay,
+  TriangleSpend
 } from './raycasts'
 import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
 import { isAvatarCapsule } from './avatar-colliders'
@@ -162,7 +162,37 @@ export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
   // the wrong entity because the one that would have occluded it was never tested.
   if (!affordable) return null
 
-  const pickInfo = nearestHitAlongRay(ray, ...affordable)
+  // The triangle ceiling is spent INCREMENTALLY, in box-entry order, exactly as the
+  // raycast HIT_FIRST path spends it — not summed over the candidate set and refused as
+  // a lump, which is what this did before.
+  //
+  // The two are not equivalent, because this is a nearest-hit query: the walk stops as
+  // soon as the best hit so far is nearer than the next box can begin, so the candidates
+  // behind it are never tested and their cost is never owed. Aggregating made a cheap
+  // interactable directly under the crosshair vanish whenever anything expensive sat
+  // behind it — measured, a 12-triangle box at 5m stopped being hoverable because a
+  // 200-triangle cylinder 45m further away pushed the sum over the ceiling, though
+  // proving the box's hit needs 12.
+  //
+  // `frameCeiling` equals `remaining` because this budget is per pick (see the note in
+  // `prefilterArgs` on why it is not shared with `processRaycasts`), so "more than a
+  // whole frame" and "more than what is left" are the same question here.
+  const spend: TriangleSpend = {
+    remaining: limits.maxRaycastTrianglesPerFrame,
+    frameCeiling: limits.maxRaycastTrianglesPerFrame,
+    exhausted: false,
+    blockedByFrameCeiling: false
+  }
+  const pickInfo = nearestHitAlongRay(ray, ...affordable, spend)
+
+  // Stopped before the answer was proven. `intersectCandidates` only breaks on cost while
+  // the next box still begins NEARER than the best hit so far, so an untested candidate
+  // could still be the closest — the same reason the whole-set refusal above hovers
+  // nothing rather than answering from a subset.
+  if (spend.exhausted) {
+    limitLogger.hit('maxRaycastTrianglesPerFrame', 'pointer pick: nearest hit not proven within budget')
+    return null
+  }
 
   if (!pickInfo || !pickInfo.pickedMesh || !pickInfo.pickedPoint) return null
 
@@ -214,8 +244,11 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
   }
 
   for (const context of loadedScenesByEntityId.values()) {
-    for (const mesh of pickMeshesForMask(context.rootNode, POINTER_OCCLUDING_LAYERS, budget)) {
-      if (isPointerOccluder(mesh)) meshes.add(mesh)
+    // `isPointerOccluder` is handed to the WALK rather than applied to its output, so a
+    // mesh it rejects never charges the result budget — see the note in
+    // `pickMeshesForMask`. The predicate is unchanged; only where it runs is.
+    for (const mesh of pickMeshesForMask(context.rootNode, POINTER_OCCLUDING_LAYERS, budget, isPointerOccluder)) {
+      meshes.add(mesh)
     }
     if (budget.truncatedBy) {
       // The ceiling that actually stopped it, so an operator is pointed at the knob that
@@ -278,13 +311,9 @@ function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number
 
   const { candidates, entries, radii } = prefilterCandidates(ray, meshes)
 
-  let triangles = 0
-  for (let i = 0; i < candidates.length; i++) triangles += candidateTriangleCost(candidates[i], radii[i])
-  if (triangles > limits.maxRaycastTrianglesPerFrame) {
-    limitLogger.hit('maxRaycastTrianglesPerFrame', `pointer pick spans ${triangles} triangles`)
-    return null
-  }
-
+  // The TRIANGLE ceiling is deliberately not applied here. It belongs to the walk over
+  // the candidates, which stops early, so it is charged there — see the note at the call
+  // site on why an aggregate refusal is wrong for a nearest-hit query.
   return [candidates, entries, radii]
 }
 
