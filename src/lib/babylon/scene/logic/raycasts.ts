@@ -420,7 +420,20 @@ export function processRaycasts(scene: SceneContext) {
           // retired a continuous raycast after a single empty result: nothing
           // re-arms it except the scene re-PUTting the component, so it stayed
           // dead even once the collider set dropped back under budget.
-          if (intersectableMeshes === null || intersectableMeshes.length > maxIntersectionsPerFrame) {
+          // FLOORED at 1, for the same reason the zero-range branch is: the scene picks
+          // the mask, and an effective mask no live collider carries yields an empty
+          // candidate list that charged NOTHING while still writing a RaycastResult —
+          // an outgoing PutComponentOperation per raycast per frame, with
+          // `pendingRaycastOperations` bounded only by the entity cap. Measured: 100_000
+          // continuous raycasts on an unmatched mask emitted 100_000 results in 52.8ms,
+          // none of it charged.
+          //
+          // Computed ONCE and used by all three branches. Charging the floor while
+          // testing the raw length would let the budget run negative without the defer
+          // branch ever firing, so empty raycasts would still be unbounded.
+          const intersectionCost = intersectableMeshes === null ? maxIntersectionsPerFrame : Math.max(1, intersectableMeshes.length)
+
+          if (intersectableMeshes === null || intersectionCost > maxIntersectionsPerFrame) {
             // Charged even though no scan runs. A retained continuous raycast
             // arrives here again next frame, and getting here is not free —
             // `meshesForMask` walked the whole subtree and swept every world
@@ -428,7 +441,7 @@ export function processRaycasts(scene: SceneContext) {
             // repeats that walk every frame forever, once per DISTINCT mask
             // (~4ms per mask per frame at 50k colliders): exactly the cost this
             // ceiling exists to bound.
-            intersectionBudget -= intersectableMeshes?.length ?? maxIntersectionsPerFrame
+            intersectionBudget -= intersectionCost
             limitLogger.hit(
               'maxRaycastIntersectionsPerFrame',
               `scene ${scene.entityId}: one raycast spans ${intersectableMeshes?.length ?? 'too many'} colliders`
@@ -437,12 +450,12 @@ export function processRaycasts(scene: SceneContext) {
               entity.entityId,
               raycastResultFromRay(scene, ray, [], raycast.queryType, raycast.timestamp || 0)
             )
-          } else if (intersectableMeshes.length > intersectionBudget) {
+          } else if (intersectionCost > intersectionBudget) {
             // Fits in a frame, just not in what is left of this one — defer it
             // whole rather than truncating its candidate set.
             break
           } else {
-            intersectionBudget -= intersectableMeshes.length
+            intersectionBudget -= intersectionCost
 
             // Bounding-box prefilter, charged separately from the triangle work it
             // gates. Babylon does an equivalent early-out inside intersectsMeshes,

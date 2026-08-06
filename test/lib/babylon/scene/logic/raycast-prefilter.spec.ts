@@ -681,6 +681,80 @@ describe('raycast candidate discovery against scene-controlled masks', () => {
 // Discovery is now budgeted itself, so an unaffordable set is never materialized and
 // never swept. The sweep is the observable half — it is what makes such a frame
 // expensive — so that is what this measures.
+// The candidate list for a mask no live collider carries is empty, which is the right
+// ANSWER — but it charged nothing while still writing a RaycastResult, i.e. an outgoing
+// PutComponentOperation per raycast per frame with `pendingRaycastOperations` bounded only
+// by the entity cap. Measured before the fix: 100_000 continuous raycasts on an unmatched
+// mask emitted 100_000 results in 52.8ms/frame. The zero-range branch already floored its
+// charge at 1; the positive-range branch did not.
+describe('raycasts on a mask no live collider carries', () => {
+  let engine: BABYLON.NullEngine
+  let scene: BABYLON.Scene
+  let written: number
+  let restore: number
+
+  beforeEach(() => {
+    engine = new BABYLON.NullEngine()
+    scene = new BABYLON.Scene(engine)
+    const root = new BABYLON.TransformNode('root', scene)
+    const meshes: AbstractMesh[] = []
+    for (let i = 0; i < 5; i++) {
+      const box = createBoxMesh(scene, `c${i}_collider`)
+      box.parent = root
+      box.position.set(0, 0, 5 + i)
+      box.computeWorldMatrix(true)
+      setColliderMask(box, MASK)
+      meshes.push(box)
+    }
+
+    restore = limits.maxRaycastIntersectionsPerFrame
+    limits.maxRaycastIntersectionsPerFrame = 3
+
+    const ids = [1, 2, 3, 4, 5, 6, 7, 8]
+    written = 0
+    processRaycasts({
+      currentTick: 0,
+      entityId: 'empty-mask-spec',
+      rootNode: root,
+      raycastRotationCursor: 0,
+      pendingRaycastOperations: new Set(ids),
+      components: {
+        [raycastComponent.componentId]: {
+          getOrNull: () => ({
+            queryType: RaycastQueryType.RQT_HIT_FIRST,
+            continuous: true,
+            timestamp: 0,
+            // CL_CUSTOM8: no collider in this scene carries it, so the candidate list is
+            // empty and the raycast costs nothing but the result it writes.
+            collisionMask: ColliderLayer.CL_CUSTOM8,
+            direction: { $case: 'globalDirection', globalDirection: new Vector3(0, 0, 1) },
+            originOffset: undefined,
+            maxDistance: 50
+          })
+        },
+        [raycastResultComponent.componentId]: { createOrReplace: () => written++ }
+      },
+      getEntityOrNull: (id: number) => ({
+        entityId: id,
+        appliedComponents: { raycast: { ray: new Ray(Vector3.Zero(), Vector3.Forward(), 999) } },
+        getWorldMatrix: () => Matrix.Identity(),
+        absolutePosition: Vector3.Zero(),
+        absoluteRotationQuaternion: Quaternion.Identity()
+      })
+    } as any)
+  })
+
+  afterEach(() => {
+    limits.maxRaycastIntersectionsPerFrame = restore
+    scene.dispose()
+    engine.dispose()
+  })
+
+  it('should answer only as many as the frame budget affords, not all of them', () => {
+    expect(written).toBe(3)
+  })
+})
+
 describe('raycast candidate discovery under its own budget', () => {
   let engine: BABYLON.NullEngine
   let scene: BABYLON.Scene

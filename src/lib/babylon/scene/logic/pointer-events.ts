@@ -100,10 +100,16 @@ export const MAX_POINTER_PICK_DISTANCE = 100
  * (`PlayerOriginatedRaycastSystem.cs:93,112-113`). So a plain wall, or another player,
  * blocks interaction there.
  *
- * This set is only the CANDIDATE filter handed to `pickMeshesForMask`, i.e. which bits are
- * worth collecting; `isPointerOccluder` then applies the real rule. It is deliberately
- * WIDER than that rule: `CL_PHYSICS` is here so a `CL_PHYSICS | CL_POINTER` collider is
- * collected by either bit, and `CL_PLAYER` so avatar capsules are.
+ * This is the CANDIDATE filter handed to `pickMeshesForMask`, and it is deliberately as
+ * NARROW as the acceptance rule `isPointerOccluder` applies.
+ *
+ * `CL_PHYSICS` used to be here so that a `CL_PHYSICS | CL_POINTER` collider was collected
+ * by either bit — but the mask test is an OR, so the pointer bit alone already collects
+ * it, and including CL_PHYSICS also collected physics-ONLY colliders that the acceptance
+ * rule then rejects. Those spent the discovery budget on their way to being discarded, so
+ * a scene could park enough of them in front of a real target to truncate discovery and
+ * make hover return null — using geometry that, under the parity rule this file
+ * documents, can neither block nor receive the pointer.
  *
  * `CL_MAIN_PLAYER` is deliberately ABSENT, matching the client's mask, which names
  * OtherAvatars but not the local CharacterController — see the capsule check in
@@ -113,8 +119,7 @@ export const MAX_POINTER_PICK_DISTANCE = 100
  * which is not in the client's pointer mask, so a custom-only collider neither blocks nor
  * receives the pointer.
  */
-const POINTER_OCCLUDING_LAYERS =
-  ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS | ColliderLayer.CL_PLAYER
+const POINTER_OCCLUDING_LAYERS = ColliderLayer.CL_POINTER | ColliderLayer.CL_PLAYER
 
 /**
  * The centre-screen pick, or null when nothing interactable is hovered.

@@ -854,6 +854,49 @@ testWithEngine(
       })
     })
 
+    // Physics-only colliders must not be able to EXHAUST discovery either. They cannot
+    // block or receive the pointer, but while the discovery mask still named CL_PHYSICS
+    // they were collected — spending the visit/result budget on their way to being
+    // rejected — so a scene could park enough of them in front of a real target to
+    // truncate the walk and make hover return null.
+    describe('when many physics-only colliders sit in front of an interactive entity', () => {
+      let target: Entity
+      let restore: number
+
+      beforeEach(async () => {
+        target = await putInteractiveBox(9)
+        for (let i = 0; i < 6; i++) {
+          const filler = nextEntityId++ as Entity
+          created.push(filler)
+          await $.ctx.crdtSendToRenderer({
+            data: new CrdtBuilder()
+              .put(transformComponent, filler, ++timestamp, {
+                position: new Vector3(0, 0, 2 + i * 0.2),
+                rotation: BABYLON.Quaternion.Identity(),
+                scale: new Vector3(1, 1, 1),
+                parent: 0 as Entity
+              })
+              .put(meshColliderComponent, filler, ++timestamp, {
+                collisionMask: ColliderLayer.CL_PHYSICS,
+                mesh: { $case: 'box', box: {} }
+              } as any)
+              .finish()
+          })
+        }
+        // Room for the target and the avatar capsule, but not for six rejected fillers.
+        restore = limits.maxRaycastIntersectionsPerFrame
+        limits.maxRaycastIntersectionsPerFrame = 3
+      })
+
+      afterEach(() => {
+        limits.maxRaycastIntersectionsPerFrame = restore
+      })
+
+      it('should still hover the target, because they are never collected', () => {
+        expect(pickActivePointerEventsEntity($.scene)?.entityId).toBe(target)
+      })
+    })
+
     // Scene geometry belonging to no INTERACTIVE entity still occludes. This case used to
     // be written against a mesh outside every scene root, reached through `floorMeshes`;
     // that group is no longer scanned — it contributed nothing and cost a full unbudgeted
