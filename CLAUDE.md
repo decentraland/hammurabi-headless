@@ -43,7 +43,7 @@ comms peer, or a content-server response is centralized in
 **`src/lib/misc/limits.ts`** and overridable via `HAMMURABI_*` environment variables.
 That module's `KNOBS` table is the single source of truth: it lists every knob's env
 var name, default (equal to the former hard-coded value), unit (named in the suffix:
-`_MS`/`_BYTES`/`_MB`, else a count), and hard minimum. `readLimits(env)` parses and
+`_MS`/`_BYTES`/`_MB`/`_METERS`, else a count), and hard minimum. `readLimits(env)` parses and
 validates each — a non-integer / below-minimum / non-numeric override is ignored
 (default kept) and logged once at startup — and exports a `limits` singleton read once
 from `process.env` at first import. Consumers import `limits` instead of declaring a
@@ -71,7 +71,25 @@ set, AND throttled in-shim per key per interval — host throttling bounds emiss
 not the cross-isolate callback volume, so a scene hammering a cap must not enqueue
 one host task per rejected call. Wire a new cap by
 adding a `limitLogger.hit(...)` at its drop/reject/truncate site. Not every knob is a
-discrete hit: frame-pacing/shutdown/raycast are cooperative yields (not logged);
+discrete hit: frame-pacing and shutdown knobs are cooperative yields (not logged).
+The RAYCAST knobs split — `maxRaycastIntersectionsPerFrame`,
+`maxRaycastTrianglesPerFrame`, `maxRaycastHitsPerQuery` and `maxColliderTreeDepth`
+ARE logged, because each one changes what the scene observes (an empty result, a
+truncated hit list, a collider that has silently stopped existing) rather than
+merely deferring work to the next frame; the per-frame budget EXHAUSTION that
+simply defers a raycast is not logged.
+`maxProximityCandidates` is logged for the same reason — past it an entity stops
+being considered for proximity at all. Its key matters as much as its existence:
+it previously reported under `maxLiveEntities`, and since the throttle state is
+keyed per `Limits` field, proximity truncation SUPPRESSED the genuine entity-cap
+signal for the whole window (and vice versa) while pointing the operator at a knob
+that could not move it.
+`maxColliderBoundsChecksPerFrame` is logged even though it only DEFERS work, which
+is the exception to the rule above and the reason is the point: what it defers is a
+GRIEFING DEFENCE, not the scene's own query. Past it, a collider that has left the
+scene's parcels keeps absorbing raycasts and blocking movement on land the scene does
+not own for up to `ceil(colliders / budget)` frames — a neighbour observes the
+deferral, so an operator has a reason to raise the knob.
 `profileFetchCooldownMs` is normal debounce (deliberately not logged), whereas
 `emoteMetadataFetchCooldownMs` IS logged because tripping it substitutes a
 possibly-wrong `loop` flag into what the scene observes — closer to a truncation
@@ -189,7 +207,177 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
   capped for this reason). `resolveFile` (`content-server-entity.ts`) validates the
   deployer-controlled content hash is an alphanumeric CID before it's concatenated
   into a fetch URL — a `../`-bearing hash would otherwise WHATWG-normalize into a
-  path traversal on the realm origin. Scene→LiveKit `sendBinary` caps peers,
+  path traversal on the realm origin. Scene-supplied PRIMITIVE GEOMETRY is bounded
+  in `logic/primitive-meshes.ts`: a `CylinderMesh` radius is a raw protobuf float, so
+  non-finite falls back to the protocol default, negative is taken as its magnitude
+  (clamping it to 0 built a 5µm surface no raycast could ever hit — the same
+  silently-dead collider the guard exists to prevent), and the magnitude is capped by
+  `maxPrimitiveRadiusMeters`. This bounds LOCAL geometry only; world extent is that
+  radius times the entity Transform scale, which is NOT validated anywhere. Raycasting
+  **Client parity (`raycasts.ts`, checked against unity-explorer's
+  `RaycastUtils.TryCreateRay` / `ExecuteRaycastSystem` / `PBRaycastDefaults`).** This
+  is an AUTHORITATIVE server, so a raycast that resolves differently from the client
+  every player runs is a correctness bug, not a rendering nicety. `originOffset` is
+  added in WORLD space (not rotated/scaled through the entity matrix);
+  `localDirection` is rotated by the entity's rotation ONLY and normalized (folding
+  in scale would silently rescale what `maxDistance` means, since Babylon measures a
+  ray in units of its direction vector); `targetEntity` uses `absolutePosition`
+  DIRECTLY — it is already world-space, and re-converting it through
+  `sceneCoordinatesToBabylonGlobalCoordinates` added the scene root twice, which is
+  invisible at parcel 0,0 and wrong everywhere else. TWO defaults deliberately follow
+  the CLIENT where it contradicts raycast.proto: an unset raycast `collisionMask`
+  defaults to `CL_PHYSICS` alone (the proto documents `CL_POINTER | CL_PHYSICS`), and
+  `RQT_NONE` writes NO result at all (the proto says "set the raycast result with
+  empty hits"). The MeshCollider mask default does NOT diverge — both say
+  `CL_PHYSICS | CL_POINTER`. An unset `maxDistance` is a ZERO-length ray, not a
+  999m one: `max_distance` is a plain proto3 scalar so unset arrives as 0, and the
+  client passes it straight to `Physics.RaycastNonAlloc` with no default anywhere —
+  a scene that never sets it already finds nothing on every player's machine, so the
+  old 999 fallback could only mask scenes that were broken for real users. Non-finite
+  is still rejected to 0 rather than passed through: a NaN length makes BOTH
+  `tmin > tmax` in the slab prefilter and `distance > this.length` in
+  `intersectsTriangle` false, so it would admit every collider at any range. A
+  malformed direction (no oneof, or one resolving to a zero vector) produces NO ray
+  and NO result, matching `TryCreateRay`'s `return false` — the old local-forward
+  default was a hammurabi invention. Unlike the client we do NOT log it: a scene can
+  hold a malformed CONTINUOUS raycast and reach it every frame forever. The collider
+  plane is a 1cm-deep box (`PrimitivesSize.PLANE_SIZE`), not the zero-thickness quad
+  it used to be. Known REMAINING divergences, deliberate: `QUERY_ALL` caps at
+  `maxRaycastHitsPerQuery` nearest-first where the client takes an arbitrary,
+  unsorted 10 (which also degrades the client's own HIT_FIRST past 10 candidates);
+  sphere/box colliders are tessellated where the client uses analytic PhysX
+  primitives; a negative cylinder radius is taken as its magnitude where the client
+  builds a self-intersecting hourglass; raycast ordering is a rotation cursor where
+  the client sorts by partition distance (no equivalent here — no camera).
+  **PointerEvents (`pointer-event-filter.ts`, `proximity-interaction.ts`).** These
+  were almost entirely unimplemented: the old code read ZERO fields off
+  `PBPointerEvents_Info` and never consulted the entry list, so it fired one result
+  for whatever entity was hovered, with whatever button the caller passed, at ANY
+  distance — interactions no client can produce. Now every declared entry is matched
+  on `eventType` and `button` (default `IA_ANY`, since `IA_POINTER` is 0 and would be
+  indistinguishable from unset), gated by the distance rules `pointer_events.proto`
+  spells out (only `max_distance` -> camera check; only `max_player_distance` ->
+  player check; BOTH -> either passing is enough, an OR not an AND; NEITHER -> as if
+  `max_distance` were 10), resolved by `priority` (higher wins, ties all fire), and
+  reported with the ENTRY's button — replacing `InputAction.UNRECOGNIZED` (-1), a
+  ts-proto "unknown enum" sentinel no scene can match on. `maxDistance` is read with
+  `??` and never `||`: a scene asking for 0 means "only when touching". The pointer
+  pick is capped at `MAX_POINTER_PICK_DISTANCE` (100, the client's
+  `MAX_RAYCAST_DISTANCE`) where `scene.pick` would otherwise test the whole scene.
+  `InteractionType.PROXIMITY` entries now fire `PET_PROXIMITY_ENTER`/`_LEAVE` from
+  player nearness (3m search radius, 120-degree horizontal cone, highest priority
+  then closest wins, one target at a time); a proximity result carries NO `hit`,
+  because there is no ray and inventing one would report a direction no pointer
+  travelled.
+  **ONE CLOCK for `PBPointerEventsResult.timestamp` (do not add a second).** Both
+  writers — `pointer-events.ts` and `proximity-interaction.ts` — stamp it with
+  `context.currentTick`, as the client does for `Timestamp` and `TickNumber` alike.
+  The scene-side SDK gates every lookup on `timestamp > previousFrameMaxTimestamp`,
+  a maximum taken over ALL of the scene's results that never decreases, so two
+  independent counters mean the slower one is silenced permanently: a private lamport
+  counter here (advancing only on a hover CHANGE or a press) against the tick
+  (advancing 30x a second) made a single proximity event kill every hover and click in
+  the scene for the life of the process — executed against the real `@dcl/ecs`.
+  **Collider bounds enforcement is BUDGETED** (`scene-bounds.ts`). It used to walk and
+  re-measure every collider under the scene root every frame with no budget of any kind
+  (2.60ms at 10_000 colliders, 18.72ms at 50_000, on a tree the scene sizes). The walk is
+  now cached and rebuilt only when collider MEMBERSHIP changes
+  (`colliderMembershipVersion`, bumped in `setColliderMask` and the dispose hook — the two
+  doors every membership change goes through), and the per-collider work is spent through
+  a round-robin sweep bounded by `maxColliderBoundsChecksPerFrame` (1.20ms / 7.19ms). The
+  sweep's fairness is tracked by a per-mesh ROUND STAMP, not by an index: a scene chooses
+  where its new colliders land in the walk order and can bump the version every frame, so
+  an index reset on rebuild re-checks the same prefix forever and one resuming by identity
+  chases the newly appended tail — both measured disabling 0 of 3 out-of-bounds colliders.
+  An already-stamped mesh is skipped WITHOUT spending budget, so inserting ahead of the
+  scan delays nothing. Residual: a NEW collider must be checked too, so a scene creating
+  colliders faster than the budget per frame delays re-checks of existing ones.
+  **`updateInteractionSystems` runs BEFORE `processRaycasts`** (`scene-context.ts`):
+  avatar capsules, then bounds enforcement, then proximity. Hanging them off
+  `updateStaticEntities` put them AFTER, so every raycast answered against the
+  previous frame's collider state — a scene alternating a collider in and out of its
+  parcels had the out-of-bounds position honoured on ~half of all frames, and a
+  legally re-entering platform was unhittable for a frame.
+  The hover pick admits every OCCLUDER (`CL_POINTER|CL_PHYSICS|CL_PLAYER|
+  CL_MAIN_PLAYER`) and then hovers nothing when the closest hit is not an
+  interactable, matching the client's `Reset()`; restricting the predicate to
+  interactables meant nothing could ever block a hover and it passed through walls.
+  `max_distance` is measured from the PLAYER, not from `pickInfo.distance` — the
+  camera sits 8m behind, so the protocol's default of 10 stopped qualifying ~2m out.
+  A PRESS emits ONE result however many entries match (the client fills presses once
+  per entity, outside its entry loop); only hover emits per entry.
+  PROXIMITY candidacy takes the minimum `max_player_distance` and maximum `priority`
+  The pointer PICK shares the raycast core's ceilings but must spend the triangle
+  one INCREMENTALLY, in box-entry order, exactly as `RQT_HIT_FIRST` does: it is a
+  nearest-hit query, so the walk stops once the best hit is nearer than the next box
+  can begin and the candidates behind it are never tested. Summing the whole set and
+  refusing it as a lump made a cheap interactable under the crosshair vanish whenever
+  anything expensive sat behind it (measured: a 12-triangle box at 5m unhoverable
+  because a 200-triangle cylinder 45m away pushed the sum over). Exhaustion still
+  hovers NOTHING — the walk only stops on cost while an untested box still begins
+  nearer than the best hit, so the answer is not proven. Discovery's acceptance
+  predicate (`isPointerOccluder`) is handed to `pickMeshesForMask` rather than applied
+  to its output, so a mesh it rejects never charges the RESULT budget: the mask must
+  name `CL_PLAYER` for remote avatar capsules, and `collisionMask` is raw scene input,
+  so scene-authored CL_PLAYER-only colliders could otherwise spend the whole allowance
+  on their way to being discarded and truncate discovery before a real target.
+  over EVERY entry, not just the proximity ones — the client applies no
+  interaction-type filter, and an unset `max_player_distance` reads 0, so an entity
+  that is both clickable and proximity-aware is never a candidate there. Entities
+  declaring a proximity entry are INDEXED at component-apply time
+  (`SceneContext.proximityEntities`); the per-frame scan iterates that, bounded by
+  `maxProximityCandidates` counted BEFORE the distance test. Counting after it (an
+  in-range ceiling) bounded only the cheap half and left every out-of-range entity's
+  lookup and vector maths unbounded — 29.45ms/frame at 50_000 of them, with the
+  ceiling never firing.
+  Known divergences, all deliberate: the client also raycasts to a proximity candidate
+  and skips it when occluded (needs a per-candidate raycast against the whole collider
+  set; the occlusion is cosmetic); it measures proximity distance to the collider's
+  CLOSEST POINT and only considers entities that HAVE a collider on its proximity mask,
+  where this measures to the transform origin (reproducing it needs a spatial index or
+  a per-candidate subtree walk, i.e. exactly the per-frame cost the index removed); a
+  proximity result carries no `hit` where the client always sets one, built from the
+  cursor raycast; pointer `hit.globalOrigin` is scene-relative here and world-space in
+  the client (`RaycastUtils.cs` passes it unconverted, inconsistently with its own
+  raycast path) and `meshName` is a Babylon name where the client sends `""`. A
+  proximity result's `button` is the ENTRY's, which for the SDK's default registration
+  is `IA_ANY` — and `getInputCommand` expands `IA_ANY` over a list that does NOT
+  contain it, so `onProximityEnter()` with default opts observes nothing. That is
+  UPSTREAM, not ours: the client emits `IaAny` there too
+  (`AppendPointerEventResultsIntent.cs` gates on `IaPointer or IaAny`,
+  `WritePointerEventResultsSystem.cs` then passes `info.Button` through for non-hover
+  events). Reporting `IA_POINTER` would make this server fire an event no player
+  receives; scenes must pass `opts: { button: IA_POINTER }`.
+  Finally, note `PET_DOWN`/`PET_UP` cannot fire in production at all: `input.ts` hangs
+  off Babylon's ActionManager keyboard triggers (no DOM on a NullEngine) and its mouse
+  path is gated on `hasPointerLock = () => false`, so hover and proximity are the only
+  reachable writers. The client's global (scene-root, entity 0) input results and the
+  SDK's `onProximityDown`/`onProximityUp` are unimplemented for the same reason.
+  Raycasting
+  is bounded by TWO ceilings charged together (`raycasts.ts`) — meshes and triangles —
+  because a mesh ceiling alone assumes uniform per-mesh cost, which held only while
+  every primitive collider was a 12-triangle box; a sphere is 1296. Those two bound
+  the WORK; two more bound what comes back and how the walk gets there.
+  `maxRaycastHitsPerQuery` caps an `RQT_QUERY_ALL` result (truncated nearest-first),
+  because the mesh ceiling bounds how many colliders are TESTED, not how many
+  RaycastHits are serialized into the scene's CRDT stream every frame — measured, 300
+  colliders on one ray returned 304 hits. `pickMeshesForMask` (`colliders.ts`) walks
+  the subtree ITERATIVELY: Babylon's `getChildMeshes` recurses via `_getDescendants`
+  and overflows the stack between depth 5000 and 6000, while `Transform.parent` lets a
+  scene chain entities to any depth and `maxLiveEntities` defaults to 100_000.
+  `maxColliderTreeDepth` then bounds the work; at its default (1024) the CAP is what a
+  deep scene meets first, so the iterative walk only matters once an operator raises
+  it — they are two defences, not one. The per-frame budget is spent through a
+  ROTATION CURSOR (`SceneContext.raycastRotationCursor`) rather than from the head of
+  `pendingRaycastOperations`: a Set iterates in insertion order and the budget resets
+  identically each frame, so head-first spending starved the tail PERMANENTLY —
+  measured, 3 continuous raycasts against a budget fitting one, and raycasts 2 and 3
+  produced no result across 20 frames. `PBRaycast.maxDistance` IS now read
+  (`computeRayDirection` assigns `ray.length` every pass, since the Ray is reused
+  across re-PUTs); it was previously ignored in favour of a hard-coded 999, so a scene
+  could not narrow its own cost. It bounds HITS, not cost — the AABB prefilter's
+  `intersectsBoxMinMax` ignores ray length. Scene→LiveKit
+  `sendBinary` caps peers,
   messages, per-message size AND the per-message destination-identities list.
   Inbound comms: `CommsTransportWrapper.handleMessage` drops oversized packets and
   rate-limits per peer before decoding; the avatar system dedupes + rate-limits

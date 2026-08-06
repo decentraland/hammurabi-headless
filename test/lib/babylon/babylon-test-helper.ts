@@ -74,6 +74,7 @@ export function testWithEngine(
 
       if (!params.enableStaticEntities) {
         jest.spyOn(ctx, 'updateStaticEntities').mockImplementation(() => void 0)
+        jest.spyOn(ctx, 'updateInteractionSystems').mockImplementation(() => void 0)
       }
 
       function addMessages(data: Uint8Array, prefix: string) {

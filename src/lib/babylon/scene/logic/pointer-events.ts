@@ -1,13 +1,25 @@
 import { Matrix, Node, PickingInfo, PointerEventTypes, Ray, Scene, Vector3 } from '@babylonjs/core'
 import { BabylonEntity } from '../BabylonEntity'
-import { getColliderLayers } from './colliders'
+import { AbstractMesh as BabylonMesh } from '@babylonjs/core'
+import { ColliderWalkBudget, getColliderLayers, pickMeshesForMask } from './colliders'
+import { limits } from '../../../misc/limits'
+import { limitLogger } from '../../../misc/limit-logger'
 import { ColliderLayer } from '@dcl/protocol/out-js/decentraland/sdk/components/mesh_collider.gen'
-import { InputAction, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
+import { InputAction, InteractionType, PointerEventType } from '@dcl/protocol/out-js/decentraland/sdk/components/common/input_action.gen'
 import { pointerEventsComponent } from '../../../decentraland/sdk-components/pointer-events'
 import { pointerEventsResultComponent } from '../../../decentraland/sdk-components/pointer-events-result'
 import { PBPointerEventsResult } from '@dcl/protocol/out-js/decentraland/sdk/components/pointer_events_result.gen'
-import { pickingToRaycastHit, raycastResultFromRay } from './raycasts'
-import { loadedScenesByEntityId } from '../../../decentraland/state'
+import {
+  nearestHitAlongRay,
+  pickingToRaycastHit,
+  prefilterCandidates,
+  raycastResultFromRay,
+  TriangleSpend
+} from './raycasts'
+import { loadedScenesByEntityId, playerEntityAtom } from '../../../decentraland/state'
+import { isAvatarCapsule } from './avatar-colliders'
+import { isHover, resolvePointerInfo, selectFiringEntries } from './pointer-event-filter'
+import { PLAYER_CAPSULE_HALF_HEIGHT } from './static-entities'
 
 // returns true if the entity has PointerEvents
 export function entityHasPointerEvents(entity: BabylonEntity) {
@@ -17,7 +29,9 @@ export function entityHasPointerEvents(entity: BabylonEntity) {
 let lastPickedEntity: BabylonEntity | null = null
 let lastPickPoint: PickingInfo | null = null
 
-let globalLamportTimestamp = 0
+// NOTE: there is deliberately no private lamport counter here any more. Both writers of
+// PBPointerEventsResult (this file and proximity-interaction.ts) stamp `timestamp` with
+// the scene's `currentTick` — see addPointerEventResult.
 
 /**
  * This function walks the parents of the provided searchEntity
@@ -51,45 +65,369 @@ export function pickPointerEventsMesh(scene: Scene) {
   // PointerEvents component disappears.
   if (!lastPickedEntity && !anySceneHasPointerEvents()) return
 
-  const pickedEntity = pickActivePointerEventsEntity(scene)
+  const pick = pickActivePointerEventsInfo(scene)
 
-  hoverNewEntity(pickedEntity, scene)
+  hoverNewEntity(pick ? getParentEntity(pick.pickedMesh!) : null, pick)
 }
 
+/** The interactable entity under the pointer this frame, or null. */
 export function pickActivePointerEventsEntity(scene: Scene): BabylonEntity | null {
+  const pick = pickActivePointerEventsInfo(scene)
+  return pick ? getParentEntity(pick.pickedMesh!) : null
+}
+
+/**
+ * Reach of the centre-screen pointer pick, matching the client's
+ * `PlayerOriginatedRaycastSystem.MAX_RAYCAST_DISTANCE`.
+ *
+ * An entity a kilometre away could otherwise be hovered and clicked here while no
+ * client would reach it, since a scene is free to ask for `maxDistance: 500` and the
+ * client still cannot fire past its ray cap.
+ *
+ * Bounds the WORK, not just the answer: it is assigned to `ray.length`, so the slab
+ * prefilter rejects anything further at the box rather than triangle-testing it and
+ * discarding the result. (It did once bound only the answer, when the pick went through
+ * `Scene.prototype.pick`, which takes no distance argument.)
+ */
+export const MAX_POINTER_PICK_DISTANCE = 100
+
+/**
+ * Collider layers that can BLOCK the pointer, whether or not they can receive it.
+ *
+ * The client casts one closest hit over `OnPointerEvent | Default | OtherAvatars`
+ * (`PhysicsLayers.PLAYER_ORIGIN_RAYCAST_MASK`) and, when that closest collider is not
+ * an interactable scene entity, calls `Reset()` and hovers NOTHING
+ * (`PlayerOriginatedRaycastSystem.cs:93,112-113`). So a plain wall, or another player,
+ * blocks interaction there.
+ *
+ * This is the CANDIDATE filter handed to `pickMeshesForMask`, and it is deliberately as
+ * NARROW as the acceptance rule `isPointerOccluder` applies.
+ *
+ * `CL_PHYSICS` used to be here so that a `CL_PHYSICS | CL_POINTER` collider was collected
+ * by either bit — but the mask test is an OR, so the pointer bit alone already collects
+ * it, and including CL_PHYSICS also collected physics-ONLY colliders that the acceptance
+ * rule then rejects. Those spent the discovery budget on their way to being discarded, so
+ * a scene could park enough of them in front of a real target to truncate discovery and
+ * make hover return null — using geometry that, under the parity rule this file
+ * documents, can neither block nor receive the pointer.
+ *
+ * `CL_MAIN_PLAYER` is deliberately ABSENT, matching the client's mask, which names
+ * OtherAvatars but not the local CharacterController — see the capsule check in
+ * `isPointerOccluder` for why that distinction decides whether the pointer works at all.
+ *
+ * The `CL_CUSTOM*` bits are deliberately NOT included: they map to SDK_CUSTOM_LAYER,
+ * which is not in the client's pointer mask, so a custom-only collider neither blocks nor
+ * receives the pointer.
+ */
+const POINTER_OCCLUDING_LAYERS = ColliderLayer.CL_POINTER | ColliderLayer.CL_PLAYER
+
+/**
+ * The centre-screen pick, or null when nothing interactable is hovered.
+ *
+ * Returns the `PickingInfo` rather than the entity, and does NOT touch `lastPickPoint`:
+ * the caller has to emit `PET_HOVER_LEAVE` for the OUTGOING entity before this frame's
+ * pick replaces it. Assigning here meant the leave was distance-gated against the new
+ * entity's distance and carried the new entity's `hit` — look from a button 3m away to
+ * one 30m away with the default `maxDistance` of 10 and the leave was filtered out
+ * entirely, stranding the scene's hover state on the first button forever.
+ */
+export function pickActivePointerEventsInfo(scene: Scene): PickingInfo | null {
   const camera = scene.activeCamera
 
   if (!camera) return null
 
-  const pickInfo = scene.pick(
+  // The picking RAY, bounded to the pick's reach, rather than `Scene.prototype.pick`.
+  //
+  // `pick` takes no distance argument, so the cap could only be applied to its ANSWER
+  // after the whole scene had been tested; Babylon's box test ignores `ray.length`
+  // entirely, so geometry hundreds of metres away was triangle-tested and then thrown
+  // away one triangle at a time. Measured: 2.86ms -> 0.28ms per frame for 2000 colliders
+  // sitting 500m down the ray.
+  //
+  // The results are identical, not merely similar: `pick` returns the CLOSEST hit, so if
+  // that hit is beyond the cap there is nothing nearer to find, and a bounded ray
+  // returning nothing is the same answer.
+  const ray = scene.createPickingRay(
     scene.getEngine().getRenderWidth() / 2,
     scene.getEngine().getRenderHeight() / 2,
-    (mesh) => {
-      // select meshes with CL_POINTER
-      if (getColliderLayers(mesh) & ColliderLayer.CL_POINTER) {
-
-        // and then only filter by meshes having PointerEvents
-        const parentEntity = getParentEntity(mesh)
-        if (parentEntity) {
-          return entityHasPointerEvents(parentEntity)
-        }
-      }
-      return false
-    },
-    false,
+    Matrix.Identity(),
     camera
-  );
+  )
+  ray.length = MAX_POINTER_PICK_DISTANCE
 
-  if (pickInfo.pickedMesh && pickInfo.pickedPoint) {
-    lastPickPoint = pickInfo
-    const parentEntity = getParentEntity(pickInfo.pickedMesh)
-    return parentEntity
+  const affordable = prefilterArgs(scene, ray)
+  // Over the per-pick ceilings: hover NOTHING this frame rather than resolve against a
+  // partial candidate set. A hover is authoritative — it is what a scene's onPointerDown
+  // fires against — and a nearest hit taken from a subset is not merely late, it can name
+  // the wrong entity because the one that would have occluded it was never tested.
+  if (!affordable) return null
+
+  // The triangle ceiling is spent INCREMENTALLY, in box-entry order, exactly as the
+  // raycast HIT_FIRST path spends it — not summed over the candidate set and refused as
+  // a lump, which is what this did before.
+  //
+  // The two are not equivalent, because this is a nearest-hit query: the walk stops as
+  // soon as the best hit so far is nearer than the next box can begin, so the candidates
+  // behind it are never tested and their cost is never owed. Aggregating made a cheap
+  // interactable directly under the crosshair vanish whenever anything expensive sat
+  // behind it — measured, a 12-triangle box at 5m stopped being hoverable because a
+  // 200-triangle cylinder 45m further away pushed the sum over the ceiling, though
+  // proving the box's hit needs 12.
+  //
+  // `frameCeiling` equals `remaining` because this budget is per pick (see the note in
+  // `prefilterArgs` on why it is not shared with `processRaycasts`), so "more than a
+  // whole frame" and "more than what is left" are the same question here.
+  const spend: TriangleSpend = {
+    remaining: limits.maxRaycastTrianglesPerFrame,
+    frameCeiling: limits.maxRaycastTrianglesPerFrame,
+    exhausted: false,
+    blockedByFrameCeiling: false
+  }
+  const pickInfo = nearestHitAlongRay(ray, ...affordable, spend)
+
+  // Stopped before the answer was proven. `intersectCandidates` only breaks on cost while
+  // the next box still begins NEARER than the best hit so far, so an untested candidate
+  // could still be the closest — the same reason the whole-set refusal above hovers
+  // nothing rather than answering from a subset.
+  if (spend.exhausted) {
+    limitLogger.hit('maxRaycastTrianglesPerFrame', 'pointer pick: nearest hit not proven within budget')
+    return null
   }
 
-  return null
+  if (!pickInfo || !pickInfo.pickedMesh || !pickInfo.pickedPoint) return null
+
+  // The closest thing in front of the player is not something a scene can interact
+  // with, so nothing is hovered — the client's `Reset()` branch.
+  const parentEntity = getParentEntity(pickInfo.pickedMesh)
+  if (!parentEntity || !entityHasPointerEvents(parentEntity)) return null
+
+  return pickInfo
 }
 
-function addPointerEventResult(entity: BabylonEntity, result: Omit<PBPointerEventsResult, "tickNumber">) {
+/**
+ * Every mesh that can block or receive the pointer, prefiltered against `ray`.
+ *
+ * The candidate set has to match what `Scene.prototype.pick` used to walk — every mesh
+ * in the Babylon scene — or occluders quietly stop occluding. Two groups live outside
+ * any single scene's node tree:
+ *
+ *   - EVERY loaded scene's root, not just one. A second SceneContext exists in ordinary
+ *     operation (the local avatar scene), and its colliders are as solid as any other's.
+ *   - `floorMeshes`, which is where the ambient ground lands. It is CL_PHYSICS and
+ *     deliberately unparented ("this port has no such parent", ambientLights.ts), and it
+ *     SHOULD occlude: the client's world floor is on the Default layer, which is in
+ *     PLAYER_ORIGIN_RAYCAST_MASK, so looking at the ground blocks hover there. Dropping
+ *     it would be the most visible regression this change could cause, and the least
+ *     obvious to spot.
+ *
+ * That list is also why `floorMeshes` finally has a reader: it was write-only.
+ */
+function prefilterArgs(scene: Scene, ray: Ray): [BabylonMesh[], number[], number[]] | null {
+  // A SET, because the two groups OVERLAP heavily. `setColliderMask` enrols any mesh
+  // named `*_collider` into `floorMeshes`, and every primitive collider is named exactly
+  // that — so nearly all of a scene's colliders appear in both groups. Collected into an
+  // array they were prefiltered and TRIANGLE-TESTED twice: measured, an 80_000-triangle
+  // floor cost 4.25ms/frame against `Scene.prototype.pick`'s 2.06ms, i.e. this
+  // optimisation ran 2x SLOWER than what it replaced until the duplicates were removed.
+  // The answer was never wrong — both hits are the same mesh at the same distance and
+  // `pickClosest` takes one — which is exactly why only a measurement caught it.
+  const meshes = new Set<BabylonMesh>()
+
+  // BUDGETED discovery, spending ONE allowance across every loaded scene. The ceilings
+  // below used to be checked after this loop had already walked every tree and the sweep
+  // had touched every matrix, so a broad scene paid the full cost each frame and then got
+  // no hover. Truncating here means an unaffordable set is never built.
+  const budget: ColliderWalkBudget = {
+    remainingVisits: limits.maxColliderTreeVisitsPerFrame,
+    maxResults: limits.maxRaycastIntersectionsPerFrame,
+    truncatedBy: null
+  }
+
+  for (const context of loadedScenesByEntityId.values()) {
+    // `isPointerOccluder` is handed to the WALK rather than applied to its output, so a
+    // mesh it rejects never charges the result budget — see the note in
+    // `pickMeshesForMask`. The predicate is unchanged; only where it runs is.
+    for (const mesh of pickMeshesForMask(context.rootNode, POINTER_OCCLUDING_LAYERS, budget, isPointerOccluder)) {
+      meshes.add(mesh)
+    }
+    if (budget.truncatedBy) {
+      // The ceiling that actually stopped it, so an operator is pointed at the knob that
+      // can move it — and so one drop is not attributed to two throttled keys.
+      limitLogger.hit(
+        budget.truncatedBy === 'visits' ? 'maxColliderTreeVisitsPerFrame' : 'maxRaycastIntersectionsPerFrame',
+        'pointer pick: collider discovery truncated'
+      )
+      return null
+    }
+  }
+  // `floorMeshes` is deliberately NOT scanned. It was, to catch occluders living outside
+  // every scene's node tree — but it contributes nothing and cost a full unbudgeted scan
+  // of the set on the per-frame hover path, which a scene grows simply by adding
+  // colliders (`setColliderMask` enrols every mesh named `*_collider`).
+  //
+  // Nothing is lost. Every producer of collider meshes — mesh-collider-component,
+  // gltf-component, AssetManager, avatar-colliders — parents them under a scene entity,
+  // so the walks above already reach them. The one member that is NOT under a scene root
+  // is `ambientLights.ts`'s ground, and it is CL_PHYSICS-only, so `isPointerOccluder`
+  // rejects it anyway — correctly, because the client's world floor sits on the Floor
+  // layer, which is not in PLAYER_ORIGIN_RAYCAST_MASK. Looking at the ground does not
+  // block hover there either.
+
+  // `getBoundingInfo()` re-derives the world box from the CACHED matrix rather than
+  // recomputing one, and `_evaluateActiveMeshes` never bumps the render id of a mesh it
+  // skipped — so without a sweep a collider is prefiltered against where it used to be.
+  // `Scene.prototype.pick` did not need this: `Ray.intersectsMesh` transforms the ray
+  // into each mesh's LOCAL space instead of comparing world boxes.
+  //
+  // HONESTLY: no test pins this, and I could not construct one. The case
+  // `raycast-stale-bounds.spec.ts` pins for the raycast path is a DISABLED scene root,
+  // and `isPointerOccluder` calls `isEnabled()` — which walks ancestors — so those meshes
+  // never reach the prefilter here. What is left is a mesh that was frustum-culled last
+  // frame and CRDT-moved onto the ray this frame: its node is dirty, but the prefilter
+  // reads `getBoundingInfo()` BEFORE any intersect call would recompute, so it would be
+  // rejected on stale bounds and never tested. That is reachable in principle and is why
+  // the sweep stays.
+  //
+  // It is not free: measured 0.315ms/frame over 10_000 candidates, about 13% of this
+  // path's total there. Delete it only with a test that fails without it.
+  for (const mesh of meshes) mesh.computeWorldMatrix(false)
+
+  // The SAME ceilings that protect processRaycasts, applied per pick. This path runs
+  // every frame from onBeforeRenderObservable for any scene that declares a single
+  // PointerEvents component, walks every loaded scene's colliders and then triangle-tests
+  // whatever the prefilter admits — so without them a scene bounds the host's frame time
+  // purely by how many colliders it puts under the crosshair.
+  //
+  // A per-pick cap, NOT a running budget shared with the raycasts: the pick happens on
+  // the Babylon frame and processRaycasts on the scene's CRDT frame, so a shared counter
+  // would make each starve the other depending on interleaving. What this bounds is one
+  // pick's own work, which is the thing that was unbounded.
+  // Belt and braces: the walk budget's `maxResults` already caps this, so reaching it
+  // here means the two disagree.
+  if (meshes.size > limits.maxRaycastIntersectionsPerFrame) {
+    limitLogger.hit('maxRaycastIntersectionsPerFrame', `pointer pick spans ${meshes.size} colliders`)
+    return null
+  }
+
+  const { candidates, entries, radii } = prefilterCandidates(ray, meshes)
+
+  // The TRIANGLE ceiling is deliberately not applied here. It belongs to the walk over
+  // the candidates, which stops early, so it is charged there — see the note at the call
+  // site on why an aggregate refusal is wrong for a nearest-hit query.
+  return [candidates, entries, radii]
+}
+
+/**
+ * Whether `mesh` can block or receive the pointer.
+ *
+ * Carries the rules the `Scene.prototype.pick` predicate used to hold, unchanged:
+ *
+ * `isEnabled` FIRST — a collider that `scene-bounds.ts` disabled for leaving its parcels
+ * must stop absorbing pointer events, which is verbatim the griefing vector that module
+ * exists to close. (`pickMeshesForMask` already applies `isEnabled(false)`, the mesh's
+ * OWN flag; this is the same test for the `floorMeshes` group, which is not walked
+ * through it.)
+ *
+ * The LOCAL player's own capsule never blocks, and this is not a detail: the camera is
+ * an ArcRotateCamera at radius 8, i.e. BEHIND the avatar, so the centre-screen ray
+ * passes through your own body before it reaches anything you are looking at. Treating
+ * it as an occluder killed every pointer interaction in the game — measured, the hovered
+ * entity became null with the avatar on the ray.
+ *
+ * The client excludes it the same way: PLAYER_ORIGIN_RAYCAST_MASK is
+ * `OnPointerEvent | Default | OtherAvatars`, so the local CharacterController layer is
+ * deliberately absent while OTHER avatars are present. A remote player blocks your
+ * pointer; you do not block your own.
+ *
+ * Keyed on the capsule TAG as well as the layer, so a scene cannot make one of its own
+ * colliders unblockable — and therefore invisible to hover — merely by naming
+ * CL_MAIN_PLAYER in its collision mask.
+ */
+function isPointerOccluder(mesh: BabylonMesh): boolean {
+  if (!mesh.isEnabled()) return false
+
+  const layers = getColliderLayers(mesh)
+
+  // Avatars are not SDK colliders and do not go through the mask->layer mapping below:
+  // the remote-avatar prefab sits on OtherAvatars, which IS in the client's pointer mask,
+  // while the local CharacterController layer is not. See POINTER_OCCLUDING_LAYERS.
+  if (isAvatarCapsule(mesh)) return (layers & ColliderLayer.CL_MAIN_PLAYER) === 0
+
+  // A SCENE collider reaches the client's pointer mask only through two of its layers,
+  // and BOTH require CL_POINTER (`PhysicsLayers.TryGetUnityLayerFromSDKLayer`):
+  //
+  //   CL_PHYSICS | CL_POINTER -> Default        (in PLAYER_ORIGIN_RAYCAST_MASK)
+  //   CL_POINTER alone        -> OnPointerEvent (in PLAYER_ORIGIN_RAYCAST_MASK)
+  //   CL_PHYSICS alone        -> CharacterOnly  (NOT in it)
+  //
+  // So a physics-ONLY collider is invisible to the pointer on the client: it neither
+  // blocks nor receives. Treating CL_PHYSICS as occluding on its own was wrong in both
+  // directions — such a wall blocked hover that no client blocks, AND if its entity also
+  // carried a PointerEvents component it was returned as hoverable, since the only check
+  // after the pick was on the ENTITY. Requiring CL_POINTER on the picked MESH fixes both,
+  // because a collider that can be hovered is exactly one that can occlude.
+  //
+  // The custom bits stay out for the same reason as before: they map to SDK_CUSTOM_LAYER,
+  // which is not in the pointer mask either.
+  return (layers & ColliderLayer.CL_POINTER) !== 0
+}
+
+/**
+ * Distance from the local player to a point, in world units, or Infinity when the
+ * player's position is not known yet.
+ *
+ * Feeds the protocol's `max_player_distance` check. Infinity rather than 0 for the
+ * unknown case: 0 would make every distance-gated entry qualify before the player
+ * even exists.
+ *
+ * Measured from the player's FEET, not the capsule centre. The client uses two
+ * different origins and it is easy to conflate them: `PlayerInteractionEntity.
+ * PlayerPosition` — what feeds this check — is `cc.transform.position`, the
+ * CharacterController's own transform, whereas its PROXIMITY system explicitly
+ * computes `TransformPoint(cc.center)` because it wants the centre. `playerEntityAtom`
+ * holds the capsule, whose position IS its centre, so using it raw put every
+ * max_player_distance check PLAYER_CAPSULE_HALF_HEIGHT (0.85m) out.
+ */
+function distanceFromPlayer(point: Vector3): number {
+  const player = playerEntityAtom.getOrNull()
+  if (!player) return Number.POSITIVE_INFINITY
+  const feet = player.absolutePosition.clone()
+  feet.y -= PLAYER_CAPSULE_HALF_HEIGHT
+  return Vector3.Distance(feet, point)
+}
+
+/**
+ * Distance feeding the protocol's `max_distance` check.
+ *
+ * NOT `pickInfo.distance`. That is measured from the CAMERA, and this server's camera
+ * is an `ArcRotateCamera` sitting `radius = 8` metres behind the player
+ * (`CharacterController.ts:95`) — so every distance was ~8m larger than the client's
+ * and the protocol's own default `max_distance` of 10 stopped qualifying about two
+ * metres in front of the player. Entities that every client reports as interactable out
+ * to 10m were silently unclickable here.
+ *
+ * The client measures from the PLAYER in both camera modes: first person is the camera
+ * distance (they coincide), third person is
+ * `Vector3.Distance(hitInfo.point, camera.PlayerFocus.position)`
+ * (`PlayerOriginatedRaycastSystem.cs:100`). We only ever have a third-person camera.
+ *
+ * From the capsule CENTRE, where `distanceFromPlayer` above measures from the FEET.
+ * That is not an inconsistency — it mirrors the client's two origins, `PlayerFocus`
+ * against `cc.transform.position`, which are 0.85m apart and easy to conflate.
+ *
+ * Falls back to the raw camera distance only when the player is not known yet, which is
+ * the same fallback the pick itself would have had.
+ */
+function distanceFromPlayerFocus(pickInfo: PickingInfo): number {
+  const player = playerEntityAtom.getOrNull()
+  if (!player || !pickInfo.pickedPoint) return pickInfo.distance
+  return Vector3.Distance(player.absolutePosition, pickInfo.pickedPoint)
+}
+
+function addPointerEventResult(
+  entity: BabylonEntity,
+  result: Omit<PBPointerEventsResult, 'tickNumber' | 'timestamp'>
+) {
   if (!lastPickedEntity?.appliedComponents.pointerEvents) return
 
   const context = lastPickedEntity.context.deref()
@@ -98,26 +436,52 @@ function addPointerEventResult(entity: BabylonEntity, result: Omit<PBPointerEven
   const PointerEventsResult = context.components[pointerEventsResultComponent.componentId]
 
   PointerEventsResult.addValue(entity.entityId, {
+    // THE TICK for both fields, matching the client
+    // (`WritePointerEventResultsSystem.cs:127-128` sets `Timestamp` and `TickNumber`
+    // from the same `sceneStateProvider.TickNumber`).
+    //
+    // This used to be a private lamport counter while proximity-interaction.ts used the
+    // tick, and two clocks in one component is fatal rather than untidy. The scene-side
+    // SDK gates every lookup on `timestamp > previousFrameMaxTimestamp`, where that
+    // maximum is taken over ALL of the scene's results and never decreases
+    // (@dcl/ecs `engine/input.js` `buttonStateUpdateSystem`). The tick advances 30x a
+    // second from scene start; this counter advanced only when a hover CHANGED or a
+    // button was pressed, so it was always far behind. Executed against the real SDK: a
+    // single proximity event at tick ~300 made every subsequent hover and click on
+    // every entity in the scene fail the gate permanently — `isClicked`,
+    // `isTriggered` and `getInputCommand` all returned null for the life of the
+    // process. One clock is the only arrangement that works.
     tickNumber: context.currentTick,
+    timestamp: context.currentTick,
     ...result
   })
 }
 
-function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
-  if (lastPickedEntity === entity) return
+function hoverNewEntity(entity: BabylonEntity | null, pick: PickingInfo | null) {
+  if (lastPickedEntity === entity) {
+    // Still the same entity, but it (or the player) has moved: refresh the pick so a
+    // press this frame reports where the pointer actually is.
+    if (pick) lastPickPoint = pick
+    return
+  }
 
-  // HOVER_LEAVE targets the previous entity, so it must fire BEFORE the
-  // reassignment; HOVER_ENTER targets the new one, so it fires after. (The
-  // previous version compared lastPickedEntity !== entity AFTER assigning it,
-  // so HOVER_ENTER could never fire.)
+  // HOVER_LEAVE targets the previous entity, so it must fire BEFORE the reassignment;
+  // HOVER_ENTER targets the new one, so it fires after. (An earlier version compared
+  // lastPickedEntity !== entity AFTER assigning it, so HOVER_ENTER could never fire.)
+  //
+  // Load-bearing that `lastPickPoint` is still the OUTGOING entity's pick here — see
+  // pickActivePointerEventsEntity.
   if (lastPickedEntity) {
-    interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.UNRECOGNIZED)
+    interactWithScene(PointerEventType.PET_HOVER_LEAVE, InputAction.IA_ANY)
   }
 
   lastPickedEntity = entity
+  // Kept as-is when the pick found nothing: `interactWithScene` early-returns on a null
+  // `lastPickedEntity`, so a stale point is never read, and there is nothing newer.
+  if (pick) lastPickPoint = pick
 
   if (entity) {
-    interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.UNRECOGNIZED)
+    interactWithScene(PointerEventType.PET_HOVER_ENTER, InputAction.IA_ANY)
   }
 
   // headless: no hover-text label UI to update
@@ -128,17 +492,74 @@ function hoverNewEntity(entity: BabylonEntity | null, scene: Scene) {
  * it will trigger the corresponding PointerEvent
  */
 export function interactWithScene(eventType: PointerEventType, action: InputAction) {
-  if (!lastPickedEntity?.appliedComponents.pointerEvents || !lastPickPoint) return
+  const pointerEvents = lastPickedEntity?.appliedComponents.pointerEvents
+  if (!lastPickedEntity || !pointerEvents || !lastPickPoint) return
 
   const context = lastPickedEntity.context.deref()
   if (!context) return
 
-  // TODO: check for max distance and input filtering
+  // Every declared entry is consulted now. This used to emit ONE result for the
+  // hovered entity with whatever button the caller passed, reading nothing off the
+  // component — so an entity asking only for {PET_DOWN, IA_PRIMARY} still received
+  // PET_UP with IA_POINTER, and any entity in view was clickable from any distance.
+  const cameraDistance = distanceFromPlayerFocus(lastPickPoint)
+  const playerDistance = distanceFromPlayer(lastPickPoint.pickedPoint!)
 
-  addPointerEventResult(lastPickedEntity, {
-    state: eventType,
-    button: action,
-    hit: pickingToRaycastHit(context, lastPickPoint, lastPickPoint.ray!),
-    timestamp: globalLamportTimestamp++,
-  })
+  const firing = selectFiringEntries(
+    pointerEvents.pointerEvents,
+    eventType,
+    action,
+    cameraDistance,
+    playerDistance,
+    InteractionType.CURSOR
+  )
+  // NOTE for anyone mutation-testing this: deleting this early return is an
+  // EQUIVALENT mutant, not a gap. The loop below iterates `firing`, so an empty
+  // `firing` emits nothing either way — the return only avoids building `hit`.
+  if (!firing.length) return
+
+  const hit = pickingToRaycastHit(context, lastPickPoint, lastPickPoint.ray!)
+
+  // A PRESS emits exactly ONE result no matter how many entries qualified; only
+  // hover emits per entry.
+  //
+  // The client reaches these two through different loops. Hover/proximity go through
+  // `intent.ValidIndices`, one append per qualifying ENTRY
+  // (`AppendPointerEventResultsIntent.AppendPointerInputIfQualified`), while a button
+  // press goes through `intent.ValidInputActions`, filled by `TryAppendButtonAction`
+  // called ONCE PER ENTITY outside the entry loop (`ProcessPointerEventsSystem.cs:337`)
+  // — one append per input action actually pressed.
+  //
+  // It matters because presses now report the raw action rather than the entry's
+  // button, so the canonical SDK pair `{PET_DOWN, IA_ANY}` plus an explicit
+  // `{PET_DOWN, IA_PRIMARY}` produced two results identical in `state`, `button` and
+  // `hit`, differing only in a timestamp that is now also the same tick. That is pure
+  // duplication in the CRDT stream, and `pointerEventsResultComponent` keeps only
+  // `maxElements: 10`, so it halved the usable history too.
+  const emitted = isHover(eventType) ? firing : firing.slice(0, 1)
+
+  for (const entry of emitted) {
+    addPointerEventResult(lastPickedEntity, {
+      state: eventType,
+      // HOVER reports IA_POINTER; a press reports the RAW input action. Neither is a
+      // free choice, and reporting the ENTRY's button — which an earlier revision did
+      // for both — is wrong twice over.
+      //
+      // Hover: the client hard-codes it in `WritePointerEventResultsSystem` with the
+      // comment "If the event is a Hover, the scenes are expecting an input action of
+      // type IaPointer." The SDK confirms it — `getInputCommand` expands IA_ANY over
+      // `[IA_POINTER, IA_PRIMARY, ...]`, a list that does NOT contain IA_ANY, and
+      // matches `command.button === inputAction` exactly. An IA_ANY-buttoned hover is
+      // invisible to every scene.
+      //
+      // Press: the client reports the concrete action pressed
+      // (`TryAppendButtonAction` -> `AddInputAction(ecsInputAction, ...)`), never the
+      // entry's. Reporting the entry's breaks the canonical SDK click, whose default
+      // entry is `{PET_DOWN, IA_ANY}`: the result carried IA_ANY and
+      // `getInputCommand(IA_ANY, PET_DOWN, entity)` resolved to null, so
+      // `onPointerDown` never fired.
+      button: isHover(eventType) ? InputAction.IA_POINTER : action,
+      hit
+    })
+  }
 }

@@ -29,7 +29,16 @@ import {
 import { gltfContainerComponent } from '../../decentraland/sdk-components/gltf-component'
 import { AssetManager } from './AssetManager'
 import { pointerEventsComponent } from '../../decentraland/sdk-components/pointer-events'
-import { StaticEntities, MAX_RESERVED_ENTITY, entityIsInRange, updateStaticEntities } from './logic/static-entities'
+import {
+  StaticEntities,
+  MAX_RESERVED_ENTITY,
+  AVATAR_ENTITY_RANGE,
+  entityIsInRange,
+  updateStaticEntities
+} from './logic/static-entities'
+import { disposeAvatarCapsules, updateAvatarColliders } from './logic/avatar-colliders'
+import { enforceColliderBounds } from './logic/scene-bounds'
+import { ProximityIndexEntry, updateProximityInteractions } from './logic/proximity-interaction'
 import { isDeniedSceneCrdtOp, sanitizeSceneCrdt } from './logic/scene-crdt-guard'
 import { globalCoordinatesToSceneCoordinates } from './coordinates'
 import { animatorComponent } from '../../decentraland/sdk-components/animator-component'
@@ -160,6 +169,39 @@ export class SceneContext implements EngineApiInterface {
   // it won't be removed from the set
   pendingRaycastOperations = new Set<Entity>()
 
+  // Where processRaycasts resumes next frame. The per-frame budget used to be
+  // spent from the head of this set every time, and a Set iterates in insertion
+  // order — so once a scene had more raycasts than one frame can afford, the same
+  // prefix won forever and the tail NEVER ran. Measured: 3 identical continuous
+  // raycasts against a budget fitting one, and raycasts 2 and 3 produced no result
+  // across 20 frames. Advancing this each frame turns that into round-robin.
+  raycastRotationCursor = 0
+
+  /**
+   * Live entities in the avatar-comms range (32..255), maintained as they are
+   * created and removed so `updateAvatarColliders` does not have to find them.
+   *
+   * It cannot find them by probing raw ids: `PlayerEntityManager` VERSION-PACKS them
+   * (`toEntityId(number, version + 1)` on slot reuse), so a slot's second occupant is
+   * `32 | (1 << 16)` and a `32..255` loop never reaches it — every player after the
+   * first join/leave cycle on a slot was invisible to CL_PLAYER raycasts. Scanning
+   * all of `entities` instead would be O(entity cap) every frame per scene.
+   *
+   * Membership is tested with `entityIsInRange`, which UNPACKS the version.
+   */
+  playerEntities = new Set<Entity>()
+
+  /**
+   * Entities declaring at least one `InteractionType.PROXIMITY` pointer-event entry,
+   * with their candidacy criteria, maintained by the PointerEvents applier.
+   *
+   * The per-frame proximity scan iterates this rather than every entity holding a
+   * PointerEvents component: measured, that walk cost 29.45ms/frame at 50_000
+   * proximity entities and 7.79ms/frame for a scene using no proximity at all.
+   * Bounded like `entities` is, since an entry only exists for a live entity.
+   */
+  proximityEntities = new Map<Entity, ProximityIndexEntry>()
+
   // log function for tests
   log: (...args: any[]) => void = (...args) => console.log(this.rootNode.name, ...args)
 
@@ -274,7 +316,12 @@ export class SceneContext implements EngineApiInterface {
       // as per https://docs.decentraland.org/creator/development-guide/scene-limitations/
       const height = Math.log2(this.metadata.scene.parcels.length + 1) * 20
 
-      if (minX) {
+      // `minX !== null`, not `if (minX)`. A parcel coordinate of 0 is falsy, so a
+      // scene whose leftmost parcel sits on x=0 built NO bounding box at all — it
+      // was never frustum-culled, and now would never have its colliders
+      // bounds-checked either. raycast-stale-bounds.spec.ts picks parcel 1,1
+      // specifically to dodge this.
+      if (minX !== null) {
         this.boundingBox = new BABYLON.BoundingBox(
           new Vector3(minX! * PARCEL_SIZE_METERS, -1, minZ! * PARCEL_SIZE_METERS),
           new Vector3((maxX! + 1) * PARCEL_SIZE_METERS, height, (maxZ! + 1) * PARCEL_SIZE_METERS)
@@ -337,6 +384,10 @@ export class SceneContext implements EngineApiInterface {
         this.unparentedEntities.add(child.entityId)
       }
       this.hierarchyChanged = true
+      // Before dispose: TransformNode.dispose(doNotRecurse) DETACHES children rather
+      // than disposing them, so an avatar capsule would be orphaned into scene.meshes
+      // and re-evaluated every frame for the life of the process.
+      disposeAvatarCapsules(entity)
       entity.dispose()
       // dispose() only clears the component VALUES (entityDeleted). The CRDT
       // bookkeeping (LWW timestamps / updatedAtTick) must be purged explicitly
@@ -354,6 +405,8 @@ export class SceneContext implements EngineApiInterface {
       }
       this.entities.delete(entityId)
       this.unparentedEntities.delete(entityId)
+      this.playerEntities.delete(entityId)
+      this.proximityEntities.delete(entityId)
     }
   }
 
@@ -370,6 +423,7 @@ export class SceneContext implements EngineApiInterface {
       // every new entity is parented to the scene's rootEntity by default
       entity.parent = this.rootNode
       this.entities.set(entityId, entity)
+      if (entityIsInRange(entityId, AVATAR_ENTITY_RANGE)) this.playerEntities.add(entityId)
     }
     return entity
   }
@@ -577,6 +631,10 @@ export class SceneContext implements EngineApiInterface {
     const outMessages: Uint8Array[] = []
 
     try {
+      // BEFORE the raycasts: they read collider enabled-state and avatar capsules that
+      // this pass creates, moves and disables. See updateInteractionSystems.
+      this.updateInteractionSystems()
+
       processRaycasts(this)
 
       // TODO: Execute queries into this.outgoingMessages
@@ -751,6 +809,41 @@ export class SceneContext implements EngineApiInterface {
   // this method exists to be a wrapper of the function. so it can be mocked for tests without wizzardy
   updateStaticEntities() {
     updateStaticEntities(this)
+  }
+
+  /**
+   * Per-frame interaction systems, which MUST run before `processRaycasts`.
+   *
+   * They used to hang off `updateStaticEntities()`, which `lateUpdate` calls AFTER the
+   * raycasts — so every raycast in a frame resolved against the previous frame's
+   * collider state. That is not a cosmetic frame of lag in either direction:
+   *
+   *   frame 2  scene moves a collider OUT of its parcels   -> hit, position honoured
+   *   frame 4  scene moves it BACK in, legally             -> no hit, collider dead
+   *
+   * A scene alternating every tick had its out-of-bounds geometry honoured on about
+   * half of all frames, which is verbatim the griefing vector `scene-bounds.ts` exists
+   * to close, while a legitimately moving platform re-entering its own parcel was
+   * unhittable for a frame. The same ordering made a `CL_PLAYER` raycast miss on the
+   * frame a capsule was first created.
+   *
+   * Order within the block matters too: capsules are created and placed first so the
+   * bounds pass sees them, and proximity runs last so it reads post-bounds state.
+   */
+  updateInteractionSystems() {
+    // Player entities exist as ordinary entities in this scene's CRDT (1 for the
+    // local player, 32-255 for remote ones), but nothing gave them collision
+    // geometry — so a CL_PLAYER raycast found nothing here while the client
+    // reported hits.
+    updateAvatarColliders(this)
+    // Colliders that have left this scene's parcels stop existing for raycasts and
+    // for avatar movement, matching the client. Runs after the avatar capsules so a
+    // player who steps outside is not itself disabled — see scene-bounds.ts.
+    enforceColliderBounds(this)
+    // InteractionType.PROXIMITY pointer events fire on player nearness rather than
+    // pointing, and had no implementation at all — a scene using proximity triggers
+    // got nothing here while they worked for every real player.
+    updateProximityInteractions(this)
   }
 
   // impl RuntimeApi {

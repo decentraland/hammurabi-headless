@@ -13,6 +13,12 @@ describe('readLimits', () => {
     expect(l.fetchTimeoutMs).toBe(15_000)
     expect(l.maxAssetBytes).toBe(64 * 1024 * 1024)
     expect(l.maxRaycastIntersectionsPerFrame).toBe(50_000)
+    // Pinned HERE rather than only in the consumers: the collider specs compare
+    // against `limits.maxPrimitiveRadiusMeters`, i.e. the same value the code under
+    // test reads, so they assert "code agrees with the knob" and stay green for any
+    // default whatsoever. Changing these numbers should require changing a test.
+    expect(l.maxPrimitiveRadiusMeters).toBe(4_096)
+    expect(l.maxRaycastTrianglesPerFrame).toBe(600_000)
   })
 
   it('applies a valid integer override in the field native unit', () => {
@@ -20,8 +26,12 @@ describe('readLimits', () => {
       HAMMURABI_MAX_LIVE_ENTITIES: '5000',
       HAMMURABI_MAX_MESSAGES_PER_WINDOW: '120',
       HAMMURABI_FETCH_TIMEOUT_MS: '3000',
-      HAMMURABI_MAX_ASSET_BYTES: String(10 * 1024 * 1024)
+      HAMMURABI_MAX_ASSET_BYTES: String(10 * 1024 * 1024),
+      HAMMURABI_MAX_PRIMITIVE_RADIUS_METERS: '64',
+      HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME: '1000'
     })
+    expect(l.maxPrimitiveRadiusMeters).toBe(64)
+    expect(l.maxRaycastTrianglesPerFrame).toBe(1000)
     expect(l.maxLiveEntities).toBe(5000)
     expect(l.maxMessagesPerWindow).toBe(120)
     expect(l.fetchTimeoutMs).toBe(3000)

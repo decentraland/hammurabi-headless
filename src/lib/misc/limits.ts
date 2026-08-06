@@ -13,9 +13,9 @@ import { REMOTE_PLAYER_ENTITY_CAPACITY } from '../decentraland/communications/pl
  * out-of-range or non-numeric override is ignored (default kept) and logged once.
  *
  * Units are named in the env var: `_MS` = milliseconds, `_BYTES` = bytes,
- * `_MB` = megabytes, otherwise a plain count. Spec-compliance validators (WebSocket
- * close codes, redirect method rewrites) are deliberately NOT configurable — only
- * resource/DoS caps and timeouts are.
+ * `_MB` = megabytes, `_METERS` = metres of scene space, otherwise a plain count.
+ * Spec-compliance validators (WebSocket close codes, redirect method rewrites) are
+ * deliberately NOT configurable — only resource/DoS caps and timeouts are.
  */
 export interface Limits {
   // --- Isolate sandbox (per-scene V8 isolate) ---
@@ -73,6 +73,9 @@ export interface Limits {
   maxWsBufferedBytes: number
   wsHandshakeTimeoutMs: number
 
+  // --- Scene primitives (MeshRenderer / MeshCollider geometry) ---
+  maxPrimitiveRadiusMeters: number
+
   // --- Render loop / scheduling / shutdown ---
   minFrameTimeMs: number
   msPerFrameProcessingSceneMessages: number
@@ -81,6 +84,15 @@ export interface Limits {
 
   // --- Raycasting ---
   maxRaycastIntersectionsPerFrame: number
+  maxRaycastTrianglesPerFrame: number
+  maxRaycastHitsPerQuery: number
+  maxColliderTreeDepth: number
+  maxColliderWalksPerFrame: number
+  maxColliderTreeVisitsPerFrame: number
+  maxColliderBoundsChecksPerFrame: number
+
+  // --- Pointer events ---
+  maxProximityCandidates: number
 }
 
 const KB = 1024
@@ -198,6 +210,15 @@ const KNOBS: readonly Knob[] = [
   { key: 'maxWsBufferedBytes', env: 'HAMMURABI_MAX_WS_BUFFERED_BYTES', def: 8 * MB, min: 1 },
   { key: 'wsHandshakeTimeoutMs', env: 'HAMMURABI_WS_HANDSHAKE_TIMEOUT_MS', def: 15_000, min: 100 },
 
+  // Scene primitives. A CylinderMesh's radiusTop/radiusBottom are untrusted protobuf
+  // floats that reach MeshBuilder directly, and the protocol states no maximum — so this
+  // is a sanity ceiling, not a protocol rule. 4096m is orders of magnitude past any
+  // legitimate primitive (they are unit-sized and scaled by the entity Transform, and a
+  // parcel is 16m), while still keeping vertex coordinates far inside float range; without
+  // it a scene builds a collider hittable from a million metres away, which no other
+  // client agrees with.
+  { key: 'maxPrimitiveRadiusMeters', env: 'HAMMURABI_MAX_PRIMITIVE_RADIUS_METERS', def: 4_096, min: 1 },
+
   // Render loop / scheduling / shutdown
   { key: 'minFrameTimeMs', env: 'HAMMURABI_MIN_FRAME_TIME_MS', def: 24, min: 1 },
   { key: 'msPerFrameProcessingSceneMessages', env: 'HAMMURABI_MS_PER_FRAME_PROCESSING_SCENE_MESSAGES', def: 10, min: 1 },
@@ -205,7 +226,74 @@ const KNOBS: readonly Knob[] = [
   { key: 'shutdownDrainMs', env: 'HAMMURABI_SHUTDOWN_DRAIN_MS', def: 1_500, min: 0 },
 
   // Raycasting
-  { key: 'maxRaycastIntersectionsPerFrame', env: 'HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME', def: 50_000, min: 1 }
+  { key: 'maxRaycastIntersectionsPerFrame', env: 'HAMMURABI_MAX_RAYCAST_INTERSECTIONS_PER_FRAME', def: 50_000, min: 1 },
+  // Triangle-denominated companion to the mesh ceiling above; both are charged and
+  // the first to run out ends the frame. 600_000 is the mesh budget's own measured
+  // cost against the shape it was tuned for (50_000 box colliders x 12 triangles
+  // ~ 100ms/frame), so a box-only scene behaves exactly as before and only the
+  // shapes that are orders of magnitude heavier per mesh are newly bounded.
+  { key: 'maxRaycastTrianglesPerFrame', env: 'HAMMURABI_MAX_RAYCAST_TRIANGLES_PER_FRAME', def: 600_000, min: 1 },
+  // RQT_QUERY_ALL returns EVERY mesh the ray crosses, one full RaycastHit each
+  // (normal, origin, direction, position, length, meshName, entityId). The mesh
+  // ceiling bounds how many are TESTED, not how many come back: measured, 300
+  // colliders on one ray produced 304 hits in a single result, and that whole
+  // list is serialized into the scene's CRDT stream every frame a continuous
+  // raycast runs. Truncated NEAREST-first, so what a scene actually reaches for
+  // survives the cut.
+  { key: 'maxRaycastHitsPerQuery', env: 'HAMMURABI_MAX_RAYCAST_HITS_PER_QUERY', def: 256, min: 1 },
+  // Depth ceiling for the collider-subtree walk. Babylon's own `_getDescendants`
+  // is recursive and overflows the JS stack between depth 5000 and 6000, while a
+  // scene may hold 100_000 entities and chains them to any depth it likes via
+  // Transform.parent. The walk here is iterative so the stack cannot overflow at
+  // all; this bounds the WORK instead, and sits far above any plausible scene
+  // hierarchy.
+  { key: 'maxColliderTreeDepth', env: 'HAMMURABI_MAX_COLLIDER_TREE_DEPTH', def: 1_024, min: 1 },
+
+  // Distinct collision masks whose candidate list may be BUILT in one frame. Each miss
+  // walks the scene's whole collider subtree, and the mask is scene-controlled, so
+  // without this a scene issues N continuous raycasts on N distinct masks and pays N
+  // full walks per frame — measured 91.98ms/frame at 500 raycasts over 10_000 colliders.
+  //
+  // The per-mask cache and the `colliderLayerUnion` early-return remove most of that
+  // (a mask no live collider can match never walks at all), but they do not bound it:
+  // with k layer bits in use a scene can still name 2^k-1 distinct EFFECTIVE masks. This
+  // is the actual ceiling. Raycasts past it are DEFERRED, not refused, and the rotation
+  // cursor gives different ones first pick each frame.
+  //
+  // 16 is far above what a real scene uses: masks come from the SDK's ColliderLayer
+  // constants, and a scene needing more than a handful of distinct combinations in one
+  // frame is doing something unusual.
+  { key: 'maxColliderWalksPerFrame', env: 'HAMMURABI_MAX_COLLIDER_WALKS_PER_FRAME', def: 16, min: 1 },
+
+  // Collider-tree NODES visited per frame across every candidate walk, raycast and
+  // pointer alike. The walk ceiling above bounds how many walks happen; this bounds the
+  // work inside them, which nothing else does — `maxColliderTreeDepth` bounds depth, and
+  // a scene can park the whole entity ceiling at depth 1.
+  //
+  // Without it the budgets were all enforced AFTER discovery had already walked the tree
+  // and swept every collected mesh's world matrix, so an over-ceiling raycast paid the
+  // full cost every frame and then answered empty. Measured at 60_000 colliders and 16
+  // distinct effective masks: 233.9ms/frame.
+  //
+  // Defaulted to the live-entity ceiling so ONE full walk of a maximal scene is always
+  // affordable — a legitimate scene with a single collision mask is never truncated —
+  // while a second maximal walk in the same frame is not.
+  { key: 'maxColliderTreeVisitsPerFrame', env: 'HAMMURABI_MAX_COLLIDER_TREE_VISITS_PER_FRAME', def: 100_000, min: 1 },
+  { key: 'maxColliderBoundsChecksPerFrame', env: 'HAMMURABI_MAX_COLLIDER_BOUNDS_CHECKS_PER_FRAME', def: 8192, min: 1 },
+
+  // Entities examined per frame by the PROXIMITY pointer-event scan. Only entities
+  // that DECLARE a proximity entry are examined at all (SceneContext.proximityEntities
+  // indexes them at component-apply time), so an ordinary scene is nowhere near this
+  // and one that uses no proximity pays nothing.
+  //
+  // It exists because the scan is otherwise O(proximity entities) per frame per scene
+  // inside a quota-free lateUpdate, and entities are bounded only by maxLiveEntities.
+  // Deliberately NOT the client's 32: that number is the size of its
+  // `OverlapSphereNonAlloc` buffer, which a physics query fills with colliders already
+  // within 3m, so copying it here — where the scan is over every declared trigger
+  // regardless of distance — would silently stop a legitimate scene's 33rd trigger from
+  // ever firing.
+  { key: 'maxProximityCandidates', env: 'HAMMURABI_MAX_PROXIMITY_CANDIDATES', def: 1_024, min: 1 }
 ]
 
 const logger = createLogger('⚙️ Limits')

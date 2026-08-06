@@ -12,6 +12,7 @@ describe('isolated-vm setImmediate re-entrancy', () => {
   describe('when a scene queues a setImmediate callback that re-queues itself forever', () => {
     it('should run it a bounded number of times per tick instead of wedging the host event loop', async () => {
       let count = 0
+      let elapsedMs = 0
 
       await withIsolatedVm(async (opts) => {
         // setImmediate is installed by provide(); a scene needs it available.
@@ -35,7 +36,9 @@ describe('isolated-vm setImmediate re-entrancy', () => {
 
         // With a live-queue drain the first tick would spin forever inside the
         // drain loop, blocking the event loop and this timer would never fire.
+        const started = Date.now()
         await new Promise((resolve) => setTimeout(resolve, 100))
+        elapsedMs = Date.now() - started
 
         count = opts.eval('globalThis.count') as number
 
@@ -46,8 +49,22 @@ describe('isolated-vm setImmediate re-entrancy', () => {
 
       // It ran (the queue is being serviced)...
       expect(count).toBeGreaterThan(0)
-      // ...but at most once per ~16ms tick — not unbounded within one tick.
-      expect(count).toBeLessThan(64)
+
+      // ...but at most once per ~16ms drain tick. Expressed against the time that
+      // ACTUALLY elapsed rather than the 100ms asked for, because the two come apart
+      // exactly when this suite runs alongside the others: a congested event loop
+      // delivers the timer late, more drain ticks fit inside the window, and a fixed
+      // ceiling of 64 fails for a reason that has nothing to do with the invariant.
+      // Measured flaking under full-suite load and under coverage instrumentation,
+      // while passing in isolation — which is the failure mode that reads as a
+      // surviving mutant in an automated audit.
+      //
+      // The bound still discriminates: a live-queue drain spins forever inside the
+      // FIRST tick, so `count` would be effectively unbounded and the 100ms timer
+      // would never be delivered at all (the case this test exists for makes it time
+      // out rather than overshoot).
+      const drainTicks = Math.ceil(elapsedMs / 16)
+      expect(count).toBeLessThanOrEqual(drainTicks + 8)
     }, 15_000)
   })
 })
