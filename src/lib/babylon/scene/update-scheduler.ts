@@ -1,5 +1,6 @@
 import { PrecisionDate, Scene, Vector3 } from "@babylonjs/core";
 import { SceneContext } from "./scene-context";
+import { recordFrame } from "../../misc/runtime-stats";
 
 // SceneTickSystem adds hooks to the babylon engine to start processing the updates from the workers
 export function createSceneTickSystem(scene: Scene, getScenes: () => Iterable<SceneContext>, quotaMs: number) {
@@ -26,16 +27,29 @@ export function createSceneTickSystem(scene: Scene, getScenes: () => Iterable<Sc
       const start = PrecisionDate.Now
       const hasQuota = () => (PrecisionDate.Now - start) < quotaMs
 
-      for (const { scene } of sortedScenes) {
-        try {
-          // if the processing quota has been exceeded for this frame we will skip it for now.
-          if (!scene.update(hasQuota)) return
-        } catch (err: any) {
-          // A malformed/hostile CRDT payload can throw out of the parser. Contain
-          // it to this scene's tick instead of crashing the shared render loop
-          // (which would take down every scene in the worker).
-          console.error(`Scene update failed for ${scene.entityId}: ${err?.message ?? err}`)
+      // How long this pass took, and whether it ran out of budget with scenes left unprocessed.
+      // An overrun is the clearest evidence a scene is too expensive for the frame it is given,
+      // and until it was counted here it was silent: the pass simply returned early.
+      let exceededQuota = false
+      try {
+        for (const { scene } of sortedScenes) {
+          try {
+            // if the processing quota has been exceeded for this frame we will skip it for now.
+            if (!scene.update(hasQuota)) {
+              exceededQuota = true
+              return
+            }
+          } catch (err: any) {
+            // A malformed/hostile CRDT payload can throw out of the parser. Contain
+            // it to this scene's tick instead of crashing the shared render loop
+            // (which would take down every scene in the worker).
+            console.error(`Scene update failed for ${scene.entityId}: ${err?.message ?? err}`)
+          }
         }
+      } finally {
+        // In a `finally` so the early return above — the overrun case, i.e. the one worth
+        // measuring — is recorded rather than skipped.
+        recordFrame(PrecisionDate.Now - start, exceededQuota)
       }
     },
     // this function runs the final part of the tick defined in ADR-148.

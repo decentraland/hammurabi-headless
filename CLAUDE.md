@@ -82,6 +82,31 @@ errors; `isolateMemoryLimitBytes` is a fatal V8 abort (no hook to log from); and
 `maxSyncExecutionMs` is logged only on the pump/`disposeOnTimeout` path — an
 onStart/onUpdate/eval sync-turn timeout raises its error without a limit log.
 
+## Runtime Stats (`src/lib/misc/runtime-stats.ts`)
+
+`getRuntimeStats()` — exported from the package root, and therefore from the worker bundle — is
+what a supervisor samples to record this worker's resource use. It reports the scene isolate's CPU
+and heap (via `ivm.Isolate.cpuTime` / `getHeapStatisticsSync()`, registered by `withIsolatedVm`),
+scene-processing frame counts and p99, per-frame budget overruns, and `limitLogger.totals()`.
+
+Three rules make the numbers usable, and breaking any of them breaks a supervisor silently:
+
+- **Every counter is CUMULATIVE and the call has NO SIDE EFFECTS.** A sampler subtracts its
+  previous reading to get an interval. A getter that reset what it reported would give two callers
+  different answers and turn a missed call into invisible data loss.
+- **Gauges are documented as gauges.** The heap figures are instantaneous; nobody should diff them.
+  `frames.p99Ms` is neither cumulative nor a gauge — a percentile cannot be diffed, so it is
+  reported over a bounded rolling window of recent frames.
+- **A section is OMITTED, never zero-filled, when its source is absent.** "No isolate is live" and
+  "the isolate used no CPU" are different facts.
+
+Limit-hit TOTALS are counted separately from the throttle state above. Throttling governs how often
+a hit is *logged*, and a scene hammering a cap thousands of times per frame is deliberately quiet
+in the log — which is exactly when the count is the only evidence left, so totals are unthrottled.
+
+The consumer is `sdk-multiplayer-server`, which pins a PUBLISHED version of this package and reads
+the export defensively: a version without it must still run. Keep the export's shape additive.
+
 ## Project Architecture
 
 This is the **Hammurabi Server** - a headless implementation of the Decentraland protocol that runs entirely in Node.js without browser dependencies.
