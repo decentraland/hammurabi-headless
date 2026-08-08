@@ -65,6 +65,17 @@ export interface ThrottledLimitLogger {
    * is NOT part of the throttle key.
    */
   hit(key: LimitKey, detail?: string): void
+
+  /**
+   * Every limit hit so far, as CUMULATIVE counts keyed by limit name. Sparse: a limit that has
+   * never been reached does not appear.
+   *
+   * Kept separately from the throttle state on purpose. Throttling decides how often a hit is
+   * *logged*, and a scene hammering a cap thousands of times per frame is deliberately quiet in
+   * the log — which is precisely the case where the count is the only evidence left. Totals are
+   * unthrottled, and bounded by the fixed set of {@link Limits} field names.
+   */
+  totals(): Record<string, number>
 }
 
 export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions = {}): ThrottledLimitLogger {
@@ -73,7 +84,7 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
   const logger = createLogger('🚧 limit')
   const emit = options.emit ?? ((message: string) => logger.error(message))
   // key -> throttle state. Bounded by the fixed set of Limits field names.
-  const state = new Map<LimitKey, { lastLogAt: number; suppressed: number }>()
+  const state = new Map<LimitKey, { lastLogAt: number; suppressed: number; hits: number }>()
 
   return {
     hit(key: LimitKey, detail?: string): void {
@@ -81,9 +92,10 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
       let s = state.get(key)
       if (!s) {
         // NEGATIVE_INFINITY so the very first hit always clears the interval and emits.
-        s = { lastLogAt: Number.NEGATIVE_INFINITY, suppressed: 0 }
+        s = { lastLogAt: Number.NEGATIVE_INFINITY, suppressed: 0, hits: 0 }
         state.set(key, s)
       }
+      s.hits++
       if (t - s.lastLogAt >= intervalMs) {
         const windowSec = s.lastLogAt === Number.NEGATIVE_INFINITY ? null : Math.round((t - s.lastLogAt) / 1000)
         const suffix = s.suppressed > 0 ? ` (${s.suppressed} more in ${windowSec ?? '?'}s)` : ''
@@ -94,6 +106,14 @@ export function createThrottledLimitLogger(options: ThrottledLimitLoggerOptions 
       } else {
         s.suppressed++
       }
+    },
+
+    totals(): Record<string, number> {
+      const result: Record<string, number> = {}
+      for (const [key, s] of state) {
+        result[key] = s.hits
+      }
+      return result
     }
   }
 }

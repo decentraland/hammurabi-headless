@@ -4,6 +4,7 @@ import { BOOTSTRAP_SOURCE, provideConsole, provideRequire, provideSetImmediate }
 import { provideFetch, provideWebSocket } from './network-globals'
 import { limits as configuredLimits } from '../misc/limits'
 import { limitLogger } from '../misc/limit-logger'
+import { registerIsolate, unregisterIsolate } from '../misc/runtime-stats'
 
 export * from './types'
 
@@ -44,6 +45,11 @@ export async function withIsolatedVm<T>(
   const maxAsyncMs = limits.maxAsyncTurnMs ?? MAX_ASYNC_TURN_MS
 
   const isolate = new ivm.Isolate({ memoryLimit: memoryLimitMb })
+  // Publish it for `getRuntimeStats()`, so a supervisor can see the scene sandbox's CPU and heap
+  // separately from the worker process as a whole. Registered before bootstrap because a scene
+  // that fails to bootstrap is one whose memory use is worth reading; the `finally` below always
+  // unregisters, and the registry ignores a stale unregister.
+  registerIsolate(isolate)
   let context: ivm.Context
   let callExportRef: ivm.Reference<any>
   try {
@@ -57,6 +63,7 @@ export async function withIsolatedVm<T>(
     context.evalSync('delete globalThis.__callExport')
   } catch (err) {
     // Bootstrap failed — dispose the isolate we just created so it doesn't leak.
+    unregisterIsolate(isolate)
     try { isolate.dispose() } catch { /* nothing to clean up */ }
     throw err
   }
@@ -135,6 +142,9 @@ export async function withIsolatedVm<T>(
       }
     })
   } finally {
+    // Stop reporting this isolate's stats before tearing it down, so a sampler cannot read a
+    // half-disposed one. Ignored if a hot reload already registered its replacement.
+    unregisterIsolate(isolate)
     // Close host resources first (sockets, the setImmediate interval) so no late
     // callback dispatches into an isolate that is being torn down, then dispose.
     // Every step is throw-proofed so one failure can't skip the isolate dispose.
