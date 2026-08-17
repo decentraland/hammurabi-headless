@@ -34,6 +34,13 @@ HAMMURABI_ISOLATE_MEMORY_LIMIT_MB=512 node dist/cli.js ...      # per-scene isol
 HAMMURABI_MAX_ASYNC_TURN_MS=30000 node dist/cli.js ...          # async-turn watchdog deadline
 HAMMURABI_MAX_LIVE_ENTITIES=50000 node dist/cli.js ...          # concurrent entities per scene
 HAMMURABI_MAX_MESSAGES_PER_WINDOW=150 node dist/cli.js ...      # per-peer inbound comms rate
+
+# Pulse comms (augments LiveKit; see "Comms transport routing" below)
+HAMMURABI_COMMS_PROTOCOL=pulse node dist/cli.js ...  # route Pulse's capability set through Pulse
+HAMMURABI_PULSE_HOST=localhost ...           # pulse server host (default pulse-server.decentraland.zone)
+HAMMURABI_PULSE_PORT=7777 ...                # pulse UDP port (default 7777, valid 1-65535)
+HAMMURABI_PULSE_REALM=main ...               # realm sent in the handshake (default main)
+HAMMURABI_PULSE_DEBUG=1 ...                  # log each received Pulse position
 ```
 
 ## Configurable Resource Limits
@@ -333,6 +340,18 @@ This is the **Hammurabi Server** - a headless implementation of the Decentraland
 - **Comms Gatekeeper URLs**:
   - Local: `https://comms-gatekeeper-local.decentraland.org`
   - Production: `https://comms-gatekeeper.decentraland.zone`
+- **Comms transport routing** (`communications/comms-routing.ts` + `comms-router.ts`)
+  - LiveKit is the default and carries every message type. `HAMMURABI_COMMS_PROTOCOL=pulse`
+    ADDITIONALLY runs Pulse alongside LiveKit and routes Pulse's capability set
+    (`CAPABILITIES.pulse`, currently just `position`) through it — Pulse AUGMENTS LiveKit,
+    it does not replace it (Pulse is receive-only: no scene MessageBus / profile / chat).
+  - `resolveRouting(pulseEnabled)` picks one owner per listener and connects ONLY the
+    transports that own something; `CommsRouter` forwards each typed event from its owning
+    transport into one merged stream the avatar system + scene context consume unchanged.
+  - To move a message type onto Pulse: add it to `CAPABILITIES.pulse` AND teach `PulseAdapter`
+    to emit it. The downstream handler is transport-agnostic — do NOT fork per-transport
+    handlers. `position` intentionally includes `movement` (both encode "where a peer is"),
+    so the two can't split across transports and fight over a peer's Transform.
 
 **RPC Services (`src/lib/babylon/scene/connect-context-rpc.ts`)**
 - Scene-kernel communication via RPC protocol
